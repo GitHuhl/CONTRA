@@ -1,0 +1,30 @@
+name: cull branches
+
+# One-off, run by hand from the Actions tab: deletes every branch except
+# main. Delete this file afterwards.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type DELETE to remove every branch except main
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  cull:
+    if: inputs.confirm == 'DELETE'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Delete every branch except main
+        run: |
+          git ls-remote --heads origin | awk '{print $2}' | sed 's#refs/heads/##' \
+            | grep -vx main > branches.txt
+          echo "Deleting $(wc -l < branches.txt) branches"
+          xargs -n 50 git push origin --delete < branches.txt
+          echo "Left:"
+          git ls-remote --heads origin
