@@ -7,7 +7,7 @@
 //! A library response a script loads into a convolution after `on init`
 //! (`load_ir_sample`) takes the same path, decoded where it is built.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::queue::Exit;
 use crate::racks::{self, Dsp, Rack, Responses};

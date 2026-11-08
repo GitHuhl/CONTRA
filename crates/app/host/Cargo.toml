@@ -1,5 +1,5 @@
 [package]
-name = "kontra-host"
+name = "contra-host"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -9,22 +9,22 @@ publish = false
 workspace = true
 
 [dependencies]
-kontra-engine = { path = "../../engine/engine" }
-kontra-prepare = { path = "../../engine/prepare" }
-kontra-format = { path = "../../format/common" }
-kontra-format-kontakt = { path = "../../format/kontakt" }
-kontra-ksp = { path = "../../script/ksp" }
-kontra-library = { path = "../library" }
-kontra-protocol = { path = "../../model/protocol" }
-kontra-stream = { path = "../../engine/stream" }
-kontra-ui-model = { path = "../../model/ui-model" }
+contra-engine = { path = "../../engine/engine" }
+contra-prepare = { path = "../../engine/prepare" }
+contra-format = { path = "../../format/common" }
+contra-format-kontakt = { path = "../../format/kontakt" }
+contra-ksp = { path = "../../script/ksp" }
+contra-library = { path = "../library" }
+contra-protocol = { path = "../../model/protocol" }
+contra-stream = { path = "../../engine/stream" }
+contra-ui-model = { path = "../../model/ui-model" }
 dirs = "5"
 serde.workspace = true
 serde_json = "1"
-kontra-align = { path = "../align", optional = true }
+contra-align = { path = "../align", optional = true }
 
 [features]
-align = ["dep:kontra-align"]
+align = ["dep:contra-align"]
 
 [[example]]
 name = "align"

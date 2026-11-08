@@ -1,6 +1,6 @@
 // Driver-free actual-shim ownership regression (no renderer or host process):
-// g++ -std=c++17 -Wall -Wextra -Werror -pedantic vendor/moose-vst3/tests/editor_lifetime.cpp -o /tmp/kontra-editor-lifetime
-// /tmp/kontra-editor-lifetime
+// g++ -std=c++17 -Wall -Wextra -Werror -pedantic vendor/moose-vst3/tests/editor_lifetime.cpp -o /tmp/contra-editor-lifetime
+// /tmp/contra-editor-lifetime
 #include "../shim/vst3_shim.cpp"
 
 static bool context_alive, editor_open;

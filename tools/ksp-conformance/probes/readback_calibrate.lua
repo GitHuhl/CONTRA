@@ -3,7 +3,7 @@
 -- matching instrument property back (VOLUME -> get_instrument_volume, PAN ->
 -- get_instrument_pan, TUNE -> get_instrument_tune). The mapping value -> readback is what
 -- the conformance harness inverts, so it must be measured before it is trusted.
--- Run: flock /tmp/kontra-oracle.lock ORACLE_LUA=tools/ksp-conformance/probes/readback_calibrate.lua \
+-- Run: flock /tmp/contra-oracle.lock ORACLE_LUA=tools/ksp-conformance/probes/readback_calibrate.lua \
 --        tools/kontakt-oracle/dump.py OUT.jsonl
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))

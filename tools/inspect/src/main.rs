@@ -1,9 +1,9 @@
-//! `kontra-inspect`: what an instrument loads, plays and drops, as data, on
+//! `contra-inspect`: what an instrument loads, plays and drops, as data, on
 //! the engine the plugin ships (no plugin, no window).
 //!
 //! ```sh
-//! kontra-inspect load <instrument> [--json FILE]
-//! kontra-inspect law [NAME]
+//! contra-inspect load <instrument> [--json FILE]
+//! contra-inspect law [NAME]
 //! ```
 //!
 //! `<instrument>` is a Kontakt instrument or a UVI program as
@@ -29,13 +29,13 @@ mod ui;
 /// The engine's sample rate for every subcommand.
 const RATE: u32 = 48_000;
 
-const USAGE: &str = "usage: kontra-inspect law [NAME] | load <instrument> [--json FILE] | ui <instrument> [--json FILE] | play <instrument> [--scenario user|FILE] [--fresh-state] [--oracle] [--json FILE]";
+const USAGE: &str = "usage: contra-inspect law [NAME] | load <instrument> [--json FILE] | ui <instrument> [--json FILE] | play <instrument> [--scenario user|FILE] [--fresh-state] [--oracle] [--json FILE]";
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("kontra-inspect: {e:#}");
+            eprintln!("contra-inspect: {e:#}");
             ExitCode::from(2)
         }
     }

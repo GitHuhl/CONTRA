@@ -17,8 +17,8 @@ pub use cascade::{Cascade, CascadeSettings, CascadeStage};
 pub use clocked::{Clocked, ClockedShape};
 pub use formant::{Formant, VowelSet, Vowels};
 pub use huovilainen::Huovilainen;
-pub use kontra_dsp_core::Biquad;
-use kontra_dsp_core::flush;
+pub use contra_dsp_core::Biquad;
+use contra_dsp_core::flush;
 pub use ladder::Ladder;
 pub use sallen_key::SallenKey;
 

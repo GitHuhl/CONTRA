@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Plan};
-use kontra_host::ui::{Face, Live, interface};
-use kontra_stream::{Store, StoreConfig};
-use kontra_ui_model as ui;
+use contra_engine::{Engine, Plan};
+use contra_host::ui::{Face, Live, interface};
+use contra_stream::{Store, StoreConfig};
+use contra_ui_model as ui;
 
 fn tree(source: &str) -> ui::Interface {
     tree_with(source, &[])
@@ -14,9 +14,9 @@ fn tree(source: &str) -> ui::Interface {
 
 fn tree_with(source: &str, data: &[(String, Vec<u8>)]) -> ui::Interface {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let mut plan = Plan::new(vec![], 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let engine = Engine::new(Arc::new(plan), store.client(), 48_000);
     interface(&Face::of(&script, data), 0, &engine, &|_| None).unwrap()
 }
@@ -153,7 +153,7 @@ fn a_performance_view_gives_its_controls_type_place_and_parent() {
 #[test]
 fn an_idle_ui_rebuilds_nothing_and_a_moved_knob_rebuilds_what_it_touched() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare ui_knob $k (0, 100, 1)
             declare ui_label $readout (1, 1)
@@ -168,7 +168,7 @@ fn an_idle_ui_rebuilds_nothing_and_a_moved_knob_rebuilds_what_it_touched() {
     )
     .unwrap();
     let mut plan = Plan::new(vec![], 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut engine = Engine::new(Arc::new(plan), store.client(), 48_000);
     let face = Face::of(&script, &[]);
     let mut live = Live::new(&face, 0, &engine, &|_| None).unwrap();
@@ -204,7 +204,7 @@ fn an_idle_ui_rebuilds_nothing_and_a_moved_knob_rebuilds_what_it_touched() {
 #[test]
 fn a_page_the_script_moves_after_init_refreshes_without_rebuilding_widgets() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             make_perfview
             set_ui_height_px(300)
@@ -218,7 +218,7 @@ fn a_page_the_script_moves_after_init_refreshes_without_rebuilding_widgets() {
     )
     .unwrap();
     let mut plan = Plan::new(vec![], 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut engine = Engine::new(Arc::new(plan), store.client(), 48_000);
     let face = Face::of(&script, &[]);
     let mut live = Live::new(&face, 0, &engine, &|_| None).unwrap();
@@ -326,7 +326,7 @@ fn an_attached_level_meter_shows_its_channel() {
 #[test]
 fn a_text_edit_shows_what_the_script_wrote() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             make_perfview
             declare ui_text_edit @name
@@ -341,7 +341,7 @@ fn a_text_edit_shows_what_the_script_wrote() {
     )
     .unwrap();
     let mut plan = Plan::new(vec![], 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut engine = Engine::new(Arc::new(plan), store.client(), 48_000);
     let face = Face::of(&script, &[]);
     let mut live = Live::new(&face, 0, &engine, &|_| None).unwrap();

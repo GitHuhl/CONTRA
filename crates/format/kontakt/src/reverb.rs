@@ -4,7 +4,7 @@
 //! sampler-core space/design.rs, which matches the emulated native kernel
 //! to 1e-5).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 use std::sync::LazyLock;
 
 const LINES: usize = ir::NETWORK_LINES;

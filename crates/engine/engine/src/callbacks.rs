@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use kontra_time::SampleTime;
-use kontra_vm::{HostValue, Step, Vm};
-use kontra_voice::FadeTarget;
+use contra_time::SampleTime;
+use contra_vm::{HostValue, Step, Vm};
+use contra_voice::FadeTarget;
 
 use crate::ledger::{NoteRef, Releases};
 use crate::queue::{Exit, Work};
@@ -31,7 +31,7 @@ impl Engine {
         &mut self,
         slot: u8,
         mut running: Running,
-        start: impl FnOnce(&mut Vm, u64) -> Option<kontra_vm::CoId>,
+        start: impl FnOnce(&mut Vm, u64) -> Option<contra_vm::CoId>,
     ) -> Running {
         self.ids.callbacks = (self.ids.callbacks + 1) & 0xF_FFFF;
         running.callback_id = self.ids.callbacks;
@@ -150,7 +150,7 @@ impl Engine {
     }
 
     /// A waiting callback's time has come.
-    pub(crate) fn resume(&mut self, slot: u8, co: kontra_vm::CoId, wait: u32) {
+    pub(crate) fn resume(&mut self, slot: u8, co: contra_vm::CoId, wait: u32) {
         let mark = self.forward.len();
         if let Some(mut vm) = self.take_vm(slot) {
             if vm.wait_epoch(co) != Some(wait) {
@@ -220,7 +220,7 @@ impl Engine {
         }
     }
 
-    fn step_script(&mut self, slot: u8, vm: &mut Vm, co: kontra_vm::CoId) {
+    fn step_script(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId) {
         let plan = Arc::clone(&self.plan);
         let Some(script) = plan.scripts.get(usize::from(slot)) else {
             return;
@@ -231,7 +231,7 @@ impl Engine {
     }
 
     /// Queues `co`'s resume `micros` from now; a full queue ends it.
-    fn wake(&mut self, slot: u8, vm: &mut Vm, co: kontra_vm::CoId, micros: u64) {
+    fn wake(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId, micros: u64) {
         let micros = i64::try_from(micros).unwrap_or(i64::MAX);
         let frames = micros_to_frames(micros, self.rate).max(1);
         let at = SampleTime(self.now.0.saturating_add(frames));

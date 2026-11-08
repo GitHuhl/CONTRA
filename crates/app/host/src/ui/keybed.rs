@@ -3,8 +3,8 @@
 //! one key per `$KEY_COLOR_*` (oracle, 2026-10-29,
 //! scratch/laneJ/keys/keys{,2}.png).
 
-use kontra_engine::Key;
-use kontra_ui_model::Rgba;
+use contra_engine::Key;
+use contra_ui_model::Rgba;
 
 /// A white key's colour by `$KEY_COLOR_*` value; `None` draws the key as
 /// it is (NONE 0, WHITE 1, INACTIVE 20). BLACK (7) is drawn inverted, see

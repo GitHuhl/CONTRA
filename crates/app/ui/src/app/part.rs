@@ -1,7 +1,7 @@
 //! An open part's view under its tabs: the library's interface, the
 //! articulations, what the instrument holds, its scripts.
 
-use kontra_ui_model::PageRef;
+use contra_ui_model::PageRef;
 use mui::prelude::*;
 
 use super::{Action, FACE_SCALES, FaceLook, Part, PartTab, View};
@@ -37,7 +37,7 @@ pub(super) fn view(
                 size,
             );
             let look = p.look.unwrap_or(v.face_look);
-            let (edits, el) = if look == FaceLook::Kontra {
+            let (edits, el) = if look == FaceLook::Contra {
                 super::controls::view(ui, n, &face.tree, PageRef(0), &mut v.menu)
             } else {
                 let (edits, popup) =

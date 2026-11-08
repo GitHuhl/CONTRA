@@ -1,4 +1,4 @@
-use kontra_dsp_reverb::Convolver;
+use contra_dsp_reverb::Convolver;
 
 /// Deterministic noise in [-1, 1) (LCG), so tests need no RNG crate.
 fn noise(seed: &mut u64, len: usize, scale: f32) -> Vec<f32> {
@@ -96,7 +96,7 @@ fn silence_detection_and_reset() {
 
 /// Bench: a 3 s decaying response over 10 s of noise in 256-frame blocks;
 /// prints ns per stereo frame and the worst error against a direct f64
-/// convolution. `cargo test --release -p kontra-dsp-reverb --test convolver
+/// convolution. `cargo test --release -p contra-dsp-reverb --test convolver
 /// bench -- --ignored --nocapture`.
 #[test]
 #[ignore = "bench"]

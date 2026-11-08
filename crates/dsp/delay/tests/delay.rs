@@ -1,4 +1,4 @@
-use kontra_dsp_delay::{ModDelay, Phaser, PhaserSettings, Settings, Shelf};
+use contra_dsp_delay::{ModDelay, Phaser, PhaserSettings, Settings, Shelf};
 
 const RATE: u32 = 48_000;
 const IDENTITY: [[f32; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
@@ -253,7 +253,7 @@ fn a_long_triangle_swept_chain_without_feedback_passes_every_frequency() {
 fn the_polynomial_sine_matches_libm() {
     for n in -40_000..40_000 {
         let cycles = f64::from(n) / 9_973.0;
-        let err = (kontra_dsp_delay::sine(cycles) - (std::f64::consts::TAU * cycles).sin()).abs();
+        let err = (contra_dsp_delay::sine(cycles) - (std::f64::consts::TAU * cycles).sin()).abs();
         assert!(err < 1e-7, "{cycles}: {err}");
     }
 }

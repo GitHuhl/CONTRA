@@ -6,7 +6,7 @@ pointed at Python stubs, so the vectors record native branch structure and
 constants with helper-substituted math (float64 evaluated, rounded to f32). They
 are recorded as such in the output, never as helper-free parity.
 
-    verify_wavetable_phase_libm.py KONTRA_PE OUT.json
+    verify_wavetable_phase_libm.py CONTRA_PE OUT.json
 """
 import argparse
 import hashlib

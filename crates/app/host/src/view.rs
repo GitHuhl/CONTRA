@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
-use kontra_engine::{ControlLook, Engine, FIRST_FONT, Key, MenuItem, Page, Text};
-use kontra_ui_model as model;
+use contra_engine::{ControlLook, Engine, FIRST_FONT, Key, MenuItem, Page, Text};
+use contra_ui_model as model;
 
 use crate::ui::{Changes, Face, Library, Live, Looks};
 

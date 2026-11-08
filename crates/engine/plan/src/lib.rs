@@ -18,8 +18,8 @@ pub use script::{Callbacks, CcLink, Controls, Holder, LookPars, Recall, Saved, S
 
 use std::ops::RangeInclusive;
 
-use kontra_ir as ir;
-use kontra_voice::{Ahdsr, Region};
+use contra_ir as ir;
+use contra_voice::{Ahdsr, Region};
 
 /// When a zone sounds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -419,7 +419,7 @@ pub struct Bus {
     pub blends: Vec<ir::Blend>,
 }
 
-pub use kontra_effects::Response;
+pub use contra_effects::Response;
 
 /// Pool sizes, zones, groups and buses. Growing a pool is a new plan, not a resize.
 #[derive(Clone)]

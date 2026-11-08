@@ -11,7 +11,7 @@
 -- zones B and C were not heard. Standalone Kontakt sends MIDI to the selected instrument only, and
 -- the KSP timer chain did not re-arm audibly. Not a valid grid or retrigger test: see the doc.
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat3\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat3\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

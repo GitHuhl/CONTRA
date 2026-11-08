@@ -1,8 +1,8 @@
 //! Recalling saved values into the running scripts (a preset of the loaded
 //! instrument) without building the engine again; see [`Recall`].
 
-use kontra_plan::{Recall, Saved};
-use kontra_vm::Text;
+use contra_plan::{Recall, Saved};
+use contra_vm::Text;
 
 use crate::Engine;
 use crate::queue::{EventQueue, Work};

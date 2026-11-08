@@ -6,7 +6,7 @@
 -- isolates the note source only if the zone count is the same; against session 3 (three zones,
 -- MIDI) it isolates the zone count. Saves single.nki for the native render.
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat6\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat6\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

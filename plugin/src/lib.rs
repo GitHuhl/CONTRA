@@ -1,5 +1,5 @@
-//! KONTRA v3: the plugin shell (07-APP.md §3). moose's CLAP and VST3 glue
-//! over [`kontra_host::rack`] and the [`kontra_ui`] editor. The shell stamps
+//! CONTRA v3: the plugin shell (07-APP.md §3). moose's CLAP and VST3 glue
+//! over [`contra_host::rack`] and the [`contra_ui`] editor. The shell stamps
 //! host events with their frame offset, hands them to the rack, copies the
 //! rack's output pairs to the host's ports and keeps the project state.
 //! It holds no engine logic of its own.
@@ -22,8 +22,8 @@ mod tests;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
-use kontra_host::rack::{Event, Rack, RackAudio, Store, StoreConfig};
-use kontra_host::state::Saved;
+use contra_host::rack::{Event, Rack, RackAudio, Store, StoreConfig};
+use contra_host::state::Saved;
 use moose::core::LosslessEventRef;
 use moose::prelude::*;
 
@@ -32,11 +32,11 @@ pub const BUILD: &str = concat!(
     "Version ",
     env!("CARGO_PKG_VERSION"),
     " · ",
-    env!("KONTRA_REVISION")
+    env!("CONTRA_REVISION")
 );
 
 /// Stereo outputs the plugin offers: one per rack part.
-pub const OUTPUTS: usize = kontra_host::rack::OUTPUTS;
+pub const OUTPUTS: usize = contra_host::rack::OUTPUTS;
 
 /// Host events one block takes; more in one block are dropped and counted.
 const EVENTS: usize = 4096;
@@ -46,7 +46,7 @@ const CHUNK: usize = 1024;
 
 #[derive(Params)]
 #[params(pre_save = "capture", post_load = "restore")]
-pub struct KontraParams {
+pub struct ContraParams {
     #[param(
         id = 0,
         name = "Volume",
@@ -63,7 +63,7 @@ pub struct KontraParams {
     /// The rack as JSON ([`Saved`]): parts, presets, mix.
     #[persist = "rack"]
     pub saved: RwLock<String>,
-    /// The editor's view as JSON ([`kontra_host::state::SavedView`]).
+    /// The editor's view as JSON ([`contra_host::state::SavedView`]).
     #[persist = "editor"]
     pub look: RwLock<String>,
     #[skip]
@@ -72,18 +72,18 @@ pub struct KontraParams {
     pub level: MeterSlot,
 }
 
-use KontraParamsParamId as P;
+use ContraParamsParamId as P;
 
 /// What the control threads share. The audio thread reads only `latency`.
 #[derive(Default)]
 pub struct Shared {
     rack: Mutex<Option<Rack>>,
     /// The editor's keyboard into the rack, without the rack's lock.
-    player: Mutex<Option<kontra_host::rack::Player>>,
+    player: Mutex<Option<contra_host::rack::Player>>,
     requests: Mutex<Vec<Request>>,
     /// Opened on the first tick, so a plugin made and dropped by a host
     /// scanning plug-ins never scans libraries.
-    browser: Mutex<Option<kontra_host::browser::Browser>>,
+    browser: Mutex<Option<contra_host::browser::Browser>>,
     /// The editor's copy of the rack, refreshed by [`Tick`].
     view: Mutex<editor::Snapshot>,
     dirty: std::sync::atomic::AtomicBool,
@@ -112,7 +112,7 @@ pub enum Request {
     Restore(Saved),
     Ui(editor::Edit),
     /// The browser's own actions: load a preset, star, rescan.
-    Browse(kontra_ui::app::Action),
+    Browse(contra_ui::app::Action),
     /// A folder the player dropped, to scan for libraries.
     AddRoot(std::path::PathBuf),
 }
@@ -135,7 +135,7 @@ impl Shared {
 impl Request {
     /// Whether it loads an instrument into a part.
     fn loads(&self) -> bool {
-        use kontra_ui::app::Action;
+        use contra_ui::app::Action;
         match self {
             Self::Load { .. } => true,
             Self::Browse(a) => matches!(
@@ -150,7 +150,7 @@ impl Request {
     }
 }
 
-impl KontraParams {
+impl ContraParams {
     /// Before the host saves: the rack as it is now. A state still waiting
     /// to load (the host saved before the first block) is kept as it came.
     fn capture(&self) {
@@ -194,13 +194,13 @@ impl KontraParams {
 
 /// The player's library browser, its prefs in the user's settings; tests
 /// keep nothing on disk.
-fn browse() -> kontra_host::browser::Browser {
+fn browse() -> contra_host::browser::Browser {
     let (config, cache) = if cfg!(test) {
         (None, None)
     } else {
         (dirs::config_dir(), dirs::cache_dir())
     };
-    kontra_host::browser::Browser::open(config.as_deref(), cache.as_deref())
+    contra_host::browser::Browser::open(config.as_deref(), cache.as_deref())
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -226,10 +226,10 @@ pub struct Dsp {
 pub struct Tick;
 
 impl BackgroundTask for Tick {
-    type Params = KontraParams;
+    type Params = ContraParams;
     const SERIALIZED: bool = true;
 
-    fn run(self, p: &KontraParams) {
+    fn run(self, p: &ContraParams) {
         let mut guard = lock(&p.shared.rack);
         let Some(rack) = guard.as_mut() else {
             return;
@@ -291,16 +291,16 @@ impl BackgroundTask for Tick {
 }
 
 /// A host state is waiting to load: what `saved` holds is that state.
-fn requests_restoring(p: &KontraParams) -> bool {
+fn requests_restoring(p: &ContraParams) -> bool {
     lock(&p.shared.requests)
         .iter()
         .any(|r| matches!(r, Request::Restore(_)))
 }
 
-pub struct Kontra;
+pub struct Contra;
 
-impl PluginLogic for Kontra {
-    type Params = KontraParams;
+impl PluginLogic for Contra {
+    type Params = ContraParams;
     type DspState = Dsp;
 
     fn bus_layouts() -> Vec<BusLayout> {
@@ -315,7 +315,7 @@ impl PluginLogic for Kontra {
 
     /// A new rack at the host's rate. The parts of the one it replaces (a
     /// rate change) load again into it on the next tick.
-    fn reset(s: &mut Dsp, p: &KontraParams, c: &AudioConfig) {
+    fn reset(s: &mut Dsp, p: &ContraParams, c: &AudioConfig) {
         // A reset at the same rate (CLAP's plain reset, a host restarting
         // its stream) keeps the loaded parts and only ends their notes.
         if let Some(audio) = &s.audio
@@ -337,7 +337,7 @@ impl PluginLogic for Kontra {
             return;
         };
         let (mut rack, audio) = Rack::new(rate, store, c.max_block_size);
-        if let Some(saves) = kontra_host::rack::user_saves() {
+        if let Some(saves) = contra_host::rack::user_saves() {
             rack.set_saves(saves);
         }
         *lock(&p.shared.player) = Some(rack.player());
@@ -353,7 +353,7 @@ impl PluginLogic for Kontra {
 
     fn process(
         s: &mut Dsp,
-        p: &KontraParams,
+        p: &ContraParams,
         b: &mut AudioBuffer,
         events: &EventList,
         cx: &mut ProcessContext,
@@ -456,9 +456,9 @@ impl PluginLogic for Kontra {
         s.latency
     }
 
-    fn editor(params: std::sync::Arc<KontraParams>) -> Box<dyn Editor> {
+    fn editor(params: std::sync::Arc<ContraParams>) -> Box<dyn Editor> {
         editor::editor(params)
     }
 }
 
-moose::plugin! { logic: Kontra, params: KontraParams, tasks: [Tick] }
+moose::plugin! { logic: Contra, params: ContraParams, tasks: [Tick] }

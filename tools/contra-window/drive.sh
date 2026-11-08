@@ -9,7 +9,7 @@
 # click.sh beside it clicks one library control (Areia's Classic Mix) and
 # wants it drawn with no further input.
 #
-#   tools/kontra-window/drive.sh <kontra-window binary> <instrument> <out dir>
+#   tools/contra-window/drive.sh <contra-window binary> <instrument> <out dir>
 #
 # The points below are window pixels for Una Corda Cotton at the default
 # 1180x780 and device scale 1.5, with the browser on Una Corda's three
@@ -29,9 +29,9 @@ third=${THIRD:-94,847}         # Una Corda Pure
 edge=${EDGE:-200,578}          # the edge between libraries and presets
 header=${HEADER:-760,114}      # part 0's header, to drop on
 fold=${FOLD:-426,114}          # part 0's fold, so a new part shows below it
-look=${LOOK:-900,164}          # the part's look: Original, Vector, KONTRA
+look=${LOOK:-900,164}          # the part's look: Original, Vector, CONTRA
 vector=${VECTOR:-805,242}      # its menu's Vector
-kontra=${KONTRA:-812,280}      # and KONTRA
+contra=${CONTRA:-812,280}      # and CONTRA
 mkdir -p "$out"
 display=${XDISPLAY:-:97}
 # A server still shutting down holds the display for a moment; one still
@@ -363,7 +363,7 @@ check 4-face 5-knob "library knob: drag turns it"
 at "$switch"; xdotool click 1; sleep 1.5; shot 6-switch
 check 5-knob 6-switch "library switch: click flips it"
 at 1000,600; for _ in $(seq 1 10); do xdotool click 4; sleep 0.1; done; sleep 1.5
-# The part's look: Vector drops the pictures, KONTRA lists the controls.
+# The part's look: Vector drops the pictures, CONTRA lists the controls.
 at 1900,1270; sleep 1; shot 6a-original
 at "$look"; xdotool click 1; sleep 1; at "$vector"; xdotool click 1; sleep 2
 at 1900,1270; sleep 1; shot 6b-vector
@@ -377,16 +377,16 @@ sys.exit(0 if all(sum(1 for p in im.crop(box).getdata() if min(p) > 100) >= 10 f
         pass "Vector: all three sliders visible without scrolling"
     else miss "Vector: all three sliders visible without scrolling"; fi
 fi
-at "$look"; xdotool click 1; sleep 1; at "$kontra"; xdotool click 1; sleep 2
-at 1900,1270; sleep 1; shot 6c-kontra
-check 6b-vector 6c-kontra "part look: KONTRA lists the controls" 205,100,880,500
+at "$look"; xdotool click 1; sleep 1; at "$contra"; xdotool click 1; sleep 2
+at 1900,1270; sleep 1; shot 6c-contra
+check 6b-vector 6c-contra "part look: CONTRA lists the controls" 205,100,880,500
 # When comparing an earlier build, check the generated control captions too.
 if [[ -n ${LABEL_BEFORE:-} ]]; then
     if python3 -I -c 'import sys; from PIL import Image, ImageChops
 a, b = (Image.open(p).convert("RGB").crop((205, 115, 760, 130)) for p in sys.argv[1:])
-sys.exit(0 if ImageChops.difference(a, b).getbbox() else 1)' "$LABEL_BEFORE" "$out/6c-kontra.png"; then
-        pass "KONTRA control captions changed"
-    else miss "KONTRA control captions changed"; fi
+sys.exit(0 if ImageChops.difference(a, b).getbbox() else 1)' "$LABEL_BEFORE" "$out/6c-contra.png"; then
+        pass "CONTRA control captions changed"
+    else miss "CONTRA control captions changed"; fi
 fi
 at "$look"; xdotool click 1; sleep 1; at "$look"; sleep 0.2
 xdotool mousemove_relative -- -90 40; xdotool click 1; sleep 2

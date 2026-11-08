@@ -1,9 +1,9 @@
 [package]
-name = "kontra-plugin"
+name = "contra-plugin"
 version = "3.0.0-dev"
 edition.workspace = true
 license = "Apache-2.0"
-description = "KONTRA v3: the plugin shell over kontra-host and kontra-ui (CLAP, VST3)"
+description = "CONTRA v3: the plugin shell over contra-host and contra-ui (CLAP, VST3)"
 publish = false
 
 [lib]
@@ -18,13 +18,13 @@ clap = ["dep:moose-clap", "dep:clap-sys"]
 vst3 = ["dep:moose-vst3"]
 
 [dependencies]
-kontra-align = {path = "../crates/app/align"}
-kontra-host = {path = "../crates/app/host", features = ["align"]}
-kontra-protocol = {path = "../crates/model/protocol"}
-kontra-ui = {path = "../crates/app/ui"}
-kontra-ui-model = {path = "../crates/model/ui-model"}
+contra-align = {path = "../crates/app/align"}
+contra-host = {path = "../crates/app/host", features = ["align"]}
+contra-protocol = {path = "../crates/model/protocol"}
+contra-ui = {path = "../crates/app/ui"}
+contra-ui-model = {path = "../crates/model/ui-model"}
 dirs = "5"
-kontra-library = {path = "../crates/app/library"}
+contra-library = {path = "../crates/app/library"}
 moose = {default-features = false, features = ["mui"], path = "../vendor/moose"}
 moose-clap = {features = ["mpe-input"], optional = true, path = "../vendor/moose-clap"}
 moose-vst3 = {optional = true, path = "../vendor/moose-vst3"}

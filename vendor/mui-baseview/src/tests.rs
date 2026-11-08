@@ -101,7 +101,7 @@ fn native_accessibility_pre_show_close_and_reopen_release_the_model() {
     for _ in 0..2 {
         let make = build(Arc::clone(&shared), Arc::clone(&requests), false);
         let window = Window::create(
-            settings("KONTRA native bridge lifecycle", (240, 200)),
+            settings("CONTRA native bridge lifecycle", (240, 200)),
             move |cx| {
                 let adapter = make(cx)?;
                 assert!(
@@ -742,7 +742,7 @@ fn cpu_presentation_fixture(resize_failure: bool) {
 }
 
 /// Run with an X11 display and compute-capable EGL driver:
-/// `WGPU_BACKEND=gl cargo test -p kontra-native-host native_surface_presents_and_reopens -- --ignored`
+/// `WGPU_BACKEND=gl cargo test -p contra-native-host native_surface_presents_and_reopens -- --ignored`
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires a live X11 display and graphics driver"]
@@ -1446,7 +1446,7 @@ fn native_temporary_grabs_preserve_gestures_but_real_focus_loss_cancels() {
     let (send, recv) = channel();
     let (id_send, id_recv) = channel();
     let child = baseview::ThreadedWindow::create(
-        settings("KONTRA native focus regression", (64, 64))
+        settings("CONTRA native focus regression", (64, 64))
             .with_parent(&Parent(NonZeroU32::new(parent).unwrap())),
         move |cx| {
             let id = match cx.window_handle()?.as_raw() {

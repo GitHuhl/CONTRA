@@ -1,6 +1,6 @@
 // List function entry points in an address range.
 //   RE_SCRIPT=ListFuncs.java tools/re/query.sh 0x140a73000 0x140a76000
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;
 

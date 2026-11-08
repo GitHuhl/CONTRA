@@ -4,8 +4,8 @@
 //! reads, each a pitch index into the exponential table `2^(i/60 − 20)`
 //! times `w = f32::from_bits(0x40c90e56)` over the rate.
 
-use kontra_ir as ir;
-use kontra_law::kontakt::PITCH_INDEX;
+use contra_ir as ir;
+use contra_law::kontakt::PITCH_INDEX;
 
 /// The table entry for index `i`.
 fn table(i: f32) -> f32 {

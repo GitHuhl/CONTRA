@@ -18,3 +18,4 @@
 /.github/scripts/__pycache__/
 __pycache__/
 /result*
+/build

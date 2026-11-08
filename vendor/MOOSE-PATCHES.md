@@ -9,7 +9,7 @@ README).
 
 ## Output port names that follow the plugin
 
-MOOSE named audio ports from the static `BusLayout` only. KONTRA names each
+MOOSE named audio ports from the static `BusLayout` only. CONTRA names each
 host output after what is routed to it ("Harp", "Harp Close", "st.5"), so
 the names must change at runtime and the host must hear of it.
 
@@ -36,7 +36,7 @@ Same idiom as `Params::parameter_presentation` / `_revision`:
   and the shim's run-loop timer, polls the revision and raises
   `restartComponent(kIoTitlesChanged)` (1 << 7).
 
-Debouncing is the plugin's job: KONTRA bumps the revision only after the
+Debouncing is the plugin's job: CONTRA bumps the revision only after the
 names have held for 500 ms (`src/routing.rs`, `PortNames`).
 
 A host that ignores the notification keeps the names it read when it last
@@ -50,14 +50,14 @@ Upstream: this is additive and default-off; worth offering to MOOSE as is.
 `on_main_thread`, which nothing scheduled when the revision moved, so a CLAP
 host saw new parameter names only after some unrelated main-thread callback.
 `process` now compares it (one atomic load) and, once per change, calls
-`clap_host::request_callback`; `on_main_thread` rescans as before. KONTRA
+`clap_host::request_callback`; `on_main_thread` rescans as before. CONTRA
 names its host automation slots after the controls they drive this way.
 Value text follows the presentation too: a presentation change adds
 `CLAP_PARAM_RESCAN_TEXT` to the rescan, and the VST3 shim raises
 `kParamValuesChanged` (1 << 0) with `kParamTitlesChanged`.
 
 `ParameterPresentation::stepped` marks a parameter whose static range holds
-only integer steps at runtime (KONTRA: a slot bound to a switch). CLAP may
+only integer steps at runtime (CONTRA: a slot bound to a switch). CLAP may
 change `CLAP_PARAM_IS_STEPPED` only via `RESCAN_ALL` while deactivated, so it
 joins the exposed index list: a change while active requests a restart and
 is published in `deactivate`. VST3 keeps the static `stepCount`: changing it
@@ -101,7 +101,7 @@ editor, a display that silently never appears. VST3 `gui_open` is unchanged.
 
 ## Explicit CLAP MPE input capability
 
-The vendored `moose-clap` has a default-off `mpe-input` feature. KONTRA
+The vendored `moose-clap` has a default-off `mpe-input` feature. CONTRA
 opts in because its configured MPE zones process member and manager MIDI
 expression. `clap.note-ports` then includes `CLAP_NOTE_DIALECT_MIDI_MPE`
 for input ports only, alongside CLAP, MIDI and the existing MIDI2 opt-in.

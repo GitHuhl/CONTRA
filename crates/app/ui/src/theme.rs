@@ -25,7 +25,7 @@ pub const SIDEBAR: f64 = TEXT * 22.;
 /// The face every view draws text with.
 pub const NOTO_SANS: &[u8] = include_bytes!("../../../../assets/NotoSans.ttf");
 
-/// A [`Ui`] in KONTRA's look.
+/// A [`Ui`] in CONTRA's look.
 #[must_use]
 pub fn ui() -> Ui {
     crate::pictures::stock::prewarm();

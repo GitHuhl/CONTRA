@@ -3,14 +3,14 @@
 //! STRINGS' own slots set to 0, .1, .25, .5, .75 and 1, each answer read
 //! back from a script title (scratch/laneB/disp, tools/kontakt-oracle dump).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::script_knobs::{
     COMP_ATTACK_MS, COMP_RELEASE_MS, LIMITER_RELEASE_MS, REVERB_PREDELAY_MS,
 };
 
 /// The readouts of `$ENGINE_PAR_*` names, by name.
-// The chorus depth and JMP amp knobs read 0.0..100.0 too, but KONTRA
+// The chorus depth and JMP amp knobs read 0.0..100.0 too, but CONTRA
 // carries neither module, so they have no row (scratch/laneB/disp).
 // ponytail: the cutoff law is the one filter measured (ANALOG's); measure
 // each filter kind when a library shows another.

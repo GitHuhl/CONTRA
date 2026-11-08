@@ -4,7 +4,7 @@
 # different. A frame that drew the click's effect only on the next input
 # (lane B: Areia's Classic Mix) fails here.
 #
-#   tools/kontra-window/click.sh <kontra-window binary> <instrument> <x,y> <out dir>
+#   tools/contra-window/click.sh <contra-window binary> <instrument> <x,y> <out dir>
 #
 # x,y is window pixels at the default 1180x780 and device scale 1.5; the
 # default is Areia's Classic Mix switch. XDISPLAY picks the display (:97).

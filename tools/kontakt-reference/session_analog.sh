@@ -10,7 +10,7 @@ NKI="/mnt/MAIN_STORAGE/Libraries/Kontakt/ANALOG STRINGS/Instruments/ANALOG STRIN
 lv() { python3 "$here/comp_levels.py" "$W/wav/$1.wav" "${2:-3}" "${3:-1}" "${4:-6}" | tee -a "$OUT"; }
 for r in ${REPS:-a b}; do
   KONTAKT_NO_VIEW_FIX=1 "$here/kontakt.sh" start "$NKI" || { say "start failed"; continue; }
-  export KONTAKT_NO_VIEW_FIX=1 KONTRA_NO_STATE_CHECK="ANALOG STRINGS GUI is wider than the 1600x1000 desktop so the golden header crops do not match; nothing touched (default state), calibration before and after"
+  export KONTAKT_NO_VIEW_FIX=1 CONTRA_NO_STATE_CHECK="ANALOG STRINGS GUI is wider than the 1600x1000 desktop so the golden header crops do not match; nothing touched (default state), calibration before and after"
   for k in c4 e4 g4; do rec an_${k}_$r analog_$k 6 1 && lv an_${k}_$r; done
   rec an_c4x2_$r analog_c4_twice 6 2 && lv an_c4x2_$r 3 2 6
   "$here/kontakt.sh" stop; sleep 3

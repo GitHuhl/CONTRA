@@ -1,8 +1,8 @@
 //! Decode coverage of Kontakt files: walks every chunk of every file given
 //! and counts, per chunk id and version, how ni-file handles it: a typed
 //! decoder that succeeds, one that fails, a named id with no decoder, or an
-//! unknown id. `cargo run --release -p kontra-format-kontakt --example chunks -- <files>`
-//! (or paths on stdin). `KONTRA_CHUNK_DUMP=<dir>` keeps the undecoded chunks.
+//! unknown id. `cargo run --release -p contra-format-kontakt --example chunks -- <files>`
+//! (or paths on stdin). `CONTRA_CHUNK_DUMP=<dir>` keeps the undecoded chunks.
 
 use std::collections::BTreeMap;
 
@@ -31,7 +31,7 @@ fn main() {
     }
     for path in paths {
         files += 1;
-        match kontra_format_kontakt::chunks(&path) {
+        match contra_format_kontakt::chunks(&path) {
             Ok(chunks) => {
                 for c in &chunks.0 {
                     walk(c, &mut by_id, &path.display().to_string(), 0);
@@ -123,10 +123,10 @@ fn inner_chunks(o: KontaktObject) -> Vec<Chunk> {
     }
 }
 
-/// With `KONTRA_CHUNK_DUMP=<dir>`, writes undecoded chunks there as
+/// With `CONTRA_CHUNK_DUMP=<dir>`, writes undecoded chunks there as
 /// `<id>-<n>.bin` for study.
 fn dump(chunk: &Chunk, n: usize) {
-    if let Some(dir) = std::env::var_os("KONTRA_CHUNK_DUMP") {
+    if let Some(dir) = std::env::var_os("CONTRA_CHUNK_DUMP") {
         let path = std::path::Path::new(&dir).join(format!("{:04x}-{n}.bin", chunk.id));
         if let Err(e) = std::fs::write(&path, &chunk.data) {
             eprintln!("{}: {e}", path.display());

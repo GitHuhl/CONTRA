@@ -1,9 +1,9 @@
 //! A shared chain of fixed filters on summed voices, or a group's own chain
 //! with the rack its sum runs (the engine fills and runs them: filters.rs).
 
-use kontra_effects::MAX_SPAN;
-use kontra_effects::summed::{Stage, stages};
-use kontra_ir as ir;
+use contra_effects::MAX_SPAN;
+use contra_effects::summed::{Stage, stages};
+use contra_ir as ir;
 
 use crate::rack::Rack;
 

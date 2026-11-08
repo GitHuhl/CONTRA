@@ -1,11 +1,11 @@
 //! Auto-align measurement on the engine: a loaded patch played as a
-//! [`kontra_align::Player`], offline, with each read waiting for the disk.
+//! [`contra_align::Player`], offline, with each read waiting for the disk.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use kontra_engine::{Engine, Event, HostNote, HostPattern, Plan, SampleTime, Timed};
-use kontra_stream::StreamClient;
+use contra_engine::{Engine, Event, HostNote, HostPattern, Plan, SampleTime, Timed};
+use contra_stream::StreamClient;
 
 use crate::rack::Hold;
 
@@ -66,7 +66,7 @@ impl Measured {
     }
 }
 
-impl kontra_align::Player for Measured {
+impl contra_align::Player for Measured {
     fn rate(&self) -> f64 {
         f64::from(self.rate)
     }
@@ -84,14 +84,14 @@ impl kontra_align::Player for Measured {
             });
         }
         let mut sink = Vec::new();
-        kontra_align::Player::render(self, self.rate as usize / 4, &mut sink);
+        contra_align::Player::render(self, self.rate as usize / 4, &mut sink);
     }
 
     fn articulation(&mut self, row: usize) {
         if let Some(&key) = self.switches.get(row) {
             self.send(key, 100, true);
             let mut sink = Vec::new();
-            kontra_align::Player::render(self, 256, &mut sink);
+            contra_align::Player::render(self, 256, &mut sink);
             self.send(key, 0, false);
         }
     }
@@ -120,8 +120,8 @@ impl kontra_align::Player for Measured {
 /// What each note of a part with `timing` waits against the `reported`
 /// latency (ms), for [`crate::rack::Rack::set_hold`].
 #[must_use]
-pub fn hold(timing: &kontra_align::Timing, reported: f32, rate: f64) -> Hold {
-    let holds = kontra_align::Holds::new(timing, reported, rate);
+pub fn hold(timing: &contra_align::Timing, reported: f32, rate: f64) -> Hold {
+    let holds = contra_align::Holds::new(timing, reported, rate);
     let mut hold = Hold {
         mono: holds.mono(None),
         ..Hold::flat(0)

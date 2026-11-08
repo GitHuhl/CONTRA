@@ -5,7 +5,7 @@
 # A session that finds another Kontakt running is retried, so this can wait behind other agents.
 set -e
 cd "$(dirname "$0")/../.."
-OUT=${1:-$HOME/.cache/kontra-ksp-conformance}
+OUT=${1:-$HOME/.cache/contra-ksp-conformance}
 mkdir -p "$OUT"
 rm -f "$OUT"/batch_*.jsonl*
 for b in tools/ksp-conformance/generated/batch_*.lua; do

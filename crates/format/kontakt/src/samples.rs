@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use kontra_ir as ir;
+use contra_ir as ir;
 use ni_file::nkr::Archive;
 
 /// A sample's bytes: a whole file, or a member of a monolith or archive.

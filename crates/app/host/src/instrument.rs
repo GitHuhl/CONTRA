@@ -3,11 +3,11 @@
 
 use std::path::Path;
 
-use kontra_engine::{Plan, ir};
-use kontra_prepare::prepare;
-use kontra_stream::Store;
+use contra_engine::{Plan, ir};
+use contra_prepare::prepare;
+use contra_stream::Store;
 
-/// A plan ready for [`kontra_engine::Engine::new`], and what did not carry over.
+/// A plan ready for [`contra_engine::Engine::new`], and what did not carry over.
 pub struct Loaded {
     pub name: String,
     pub plan: Plan,
@@ -24,7 +24,7 @@ pub struct Loaded {
 /// # Errors
 /// When the file is not an instrument this can read.
 pub fn read(path: &Path) -> Result<ir::Instrument, Box<dyn std::error::Error>> {
-    Ok(kontra_format_kontakt::load(path)?)
+    Ok(contra_format_kontakt::load(path)?)
 }
 
 /// Saved script values for an instrument held in another file, which
@@ -46,7 +46,7 @@ pub struct Preset {
 #[must_use]
 pub fn preset(path: &Path) -> Option<Preset> {
     let snapshot = (path.extension()).is_some_and(|e| e.eq_ignore_ascii_case("nksn"));
-    let p = snapshot.then(|| kontra_format_kontakt::preset(path).ok())??;
+    let p = snapshot.then(|| contra_format_kontakt::preset(path).ok())??;
     Some(Preset {
         name: p.name,
         base: p.base,
@@ -70,7 +70,7 @@ pub fn load(
 #[must_use]
 pub fn build(instrument: ir::Instrument, rate: u32, store: &mut Store) -> Loaded {
     // Each file once, however many samples it holds.
-    let files = kontra_stream::Files::new(instrument.samples.iter().map(|s| s.file.as_path()));
+    let files = contra_stream::Files::new(instrument.samples.iter().map(|s| s.file.as_path()));
     let (mut plan, mut diagnostics) = prepare(&instrument, rate, store, &|s| files.open(s));
     let mut faces = Vec::new();
     let mut persist = Vec::new();
@@ -80,7 +80,7 @@ pub fn build(instrument: ir::Instrument, rate: u32, store: &mut Store) -> Loaded
     // Discovery walks the disk, so only a KSP script triggers it, and once.
     let mut factory_folder = None;
     for (n, script) in instrument.scripts.iter().enumerate() {
-        match kontra_ksp::compile(&script.source, &[]) {
+        match contra_ksp::compile(&script.source, &[]) {
             Ok(compiled) => {
                 let mut planned = crate::script::plan(&compiled, &script.saved, &script.data);
                 planned.source_folder =
@@ -88,7 +88,7 @@ pub fn build(instrument: ir::Instrument, rate: u32, store: &mut Store) -> Loaded
                 planned.library_folder = crate::script::folder(instrument.library_path.as_deref());
                 planned.files = Some(std::sync::Arc::new(crate::rack::DiskFiles::default()));
                 planned.factory_folder = *factory_folder.get_or_insert_with(|| {
-                    factory_folder_of(kontra_library::kontakt::candidates())
+                    factory_folder_of(contra_library::kontakt::candidates())
                 });
                 planned.links = crate::script::links(&compiled, &script.links);
                 if planned.links.len() < script.links.len() {
@@ -107,10 +107,10 @@ pub fn build(instrument: ir::Instrument, rate: u32, store: &mut Store) -> Loaded
                         .any(|c| c.eq_ignore_ascii_case(part))
                 };
                 if off("NO_SYS_SCRIPT_RLS_TRIG") {
-                    plan.release_zones = kontra_engine::ReleaseZones::WithNote;
+                    plan.release_zones = contra_engine::ReleaseZones::WithNote;
                 }
                 if off("NO_SYS_SCRIPT_PEDAL") {
-                    plan.sustain_pedal = kontra_engine::SustainPedal::ToScripts;
+                    plan.sustain_pedal = contra_engine::SustainPedal::ToScripts;
                 }
                 plan.scripts.push(planned);
                 faces.push(Some(crate::ui::Face::of(&compiled, &script.data)));
@@ -147,7 +147,7 @@ fn line_at(source: &str, at: usize) -> &str {
 
 /// The folder holding the first installed executable: Kontakt's factory data
 /// folder, as `get_folder($GET_FOLDER_FACTORY_DIR)` reports it.
-fn factory_folder_of(candidates: Vec<std::path::PathBuf>) -> Option<kontra_engine::Text> {
+fn factory_folder_of(candidates: Vec<std::path::PathBuf>) -> Option<contra_engine::Text> {
     candidates
         .into_iter()
         .find(|path| path.is_file())
@@ -158,7 +158,7 @@ fn factory_folder_of(candidates: Vec<std::path::PathBuf>) -> Option<kontra_engin
 mod tests {
     #[test]
     fn factory_folder_is_the_first_installed_executables_folder() {
-        let dir = std::env::temp_dir().join(format!("kontra-factory-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("contra-factory-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("Kontakt 8.exe");
         std::fs::write(&exe, b"").unwrap();

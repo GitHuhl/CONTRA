@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CPU of real Kontakt playing the shared progression (the Kontakt side of the KONTRA cpu-* scenarios).
+"""CPU of real Kontakt playing the shared progression (the Kontakt side of the CONTRA cpu-* scenarios).
 
     tools/oracle/oracle-slot tools/oracle/cpu_bench.py --nki NKI --name NAME --out OUT.json   one instrument
     tools/oracle/oracle-slot tools/oracle/cpu_bench.py --empty --out OUT.json                 idle baseline
@@ -10,7 +10,7 @@ CC1=110 and CC11=127 at 0 s) for SECONDS (8) and reads utime+stime of the Kontak
 wall seconds * 100, so 100 means one full core. The idle baseline is the same session with an empty rack
 (no instrument loaded), so the instrument's own cost is kontakt_pct - idle_pct.
 
-Caveats: Kontakt is not pinned to one thread, so its figure can exceed 100 while KONTRA's single-thread
+Caveats: Kontakt is not pinned to one thread, so its figure can exceed 100 while CONTRA's single-thread
 figure is capped at 100. The window is measured from MIDI start, so load time is not counted.
 """
 import argparse
@@ -52,7 +52,7 @@ def main():
     args = ap.parse_args()
     if bool(args.nki) == args.empty:
         ap.error("give exactly one of --nki or --empty")
-    work = slot.work(Path.home() / ".cache/kontra-cpu-bench") / args.name
+    work = slot.work(Path.home() / ".cache/contra-cpu-bench") / args.name
     work.mkdir(parents=True, exist_ok=True)
     midi = work / "progression16.mid"
     capture.make_midi(midi, 1, notes=NOTES, cc=CC)

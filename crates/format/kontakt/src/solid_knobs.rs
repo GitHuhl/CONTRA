@@ -1,6 +1,6 @@
 //! The Solid G-EQ's script knobs (`$ENGINE_PAR_SEQ_*`).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::script_knobs::{SlotKnob, sampled};
 

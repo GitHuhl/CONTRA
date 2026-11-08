@@ -1,7 +1,7 @@
 //! Array files a script reads by path (`.nka`: the array's name on the
 //! first line, then one value per line), through a reader the host gives.
 
-use kontra_vm::Text;
+use contra_vm::Text;
 
 /// Reads the files a script names. The engine asks only while it is built,
 /// off the audio thread.

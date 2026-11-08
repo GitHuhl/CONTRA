@@ -8,7 +8,7 @@
 -- same curve against our render, the gap is shared; if only the Beat zone differs, it is the
 -- Beat voice. Saves velocity.nki for the native render.
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat6\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat6\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

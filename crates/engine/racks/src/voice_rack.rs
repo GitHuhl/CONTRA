@@ -13,14 +13,14 @@
 
 use std::sync::Arc;
 
-use kontra_dsp::drive::{Crush, Overdrive, Reduction, Shaper, Voicing};
-use kontra_dsp::filter::{Formant, Svf, VowelSet, Vowels};
-use kontra_ir as ir;
-use kontra_plan::route_depth;
+use contra_dsp::drive::{Crush, Overdrive, Reduction, Shaper, Voicing};
+use contra_dsp::filter::{Formant, Svf, VowelSet, Vowels};
+use contra_ir as ir;
+use contra_plan::route_depth;
 
-use kontra_effects::processors::{curve, shaper};
+use contra_effects::processors::{curve, shaper};
 
-use kontra_effects::summed::{VoiceEq, shape};
+use contra_effects::summed::{VoiceEq, shape};
 
 /// ponytail: the lowest damping (`1/Q`) a resonance route may reach; the
 /// stages go unstable below it.
@@ -119,7 +119,7 @@ fn reduction(c: ir::Crush, rate: u32) -> Reduction {
 }
 
 /// A group's per-voice units in slot order; empty when all of it is shared.
-pub fn template(group: &kontra_plan::Group, rate: u32) -> Arc<[Unit]> {
+pub fn template(group: &contra_plan::Group, rate: u32) -> Arc<[Unit]> {
     let last_drive = group.inserts.iter().rposition(|e| {
         e.as_ref().is_some_and(|e| {
             matches!(

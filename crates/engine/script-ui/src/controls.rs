@@ -9,7 +9,7 @@
 //! as an argument. Other parameters (hide, picture state, range) are kept per
 //! control as the script sets them.
 
-use kontra_vm::{Action, HostCall, HostValue};
+use contra_vm::{Action, HostCall, HostValue};
 
 use crate::{LookPars, Store};
 

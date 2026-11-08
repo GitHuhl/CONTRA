@@ -1,6 +1,6 @@
-use kontra_engine::{Action, Engine, Plan, Text};
-use kontra_stream::{Store, StoreConfig};
-use kontra_vm::{HostApi, HostCall, HostValue};
+use contra_engine::{Action, Engine, Plan, Text};
+use contra_stream::{Store, StoreConfig};
+use contra_vm::{HostApi, HostCall, HostValue};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
@@ -96,11 +96,11 @@ fn prepared_runtime_creations_edits_duplicates_and_refusals_allocate_nothing() {
 
 #[test]
 fn note_controller_and_ui_callbacks_do_not_allocate_for_pgs() {
-    use kontra_engine::{
+    use contra_engine::{
         Callbacks, Controls, EnginePars, Event, HostNote, Op, Program, SampleTime, ScriptPlan,
         Timed, ir,
     };
-    use kontra_vm::Returns;
+    use contra_vm::Returns;
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![], 1);
     let host = |action, ints, texts| Op::Host {

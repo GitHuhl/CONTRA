@@ -24,8 +24,8 @@
 //! transform (0x1408e4970) at resonance 0 and unity DC gain. That is the
 //! bilinear Butterworth, −3 dB at the corner.
 
-use kontra_ir as ir;
-use kontra_law::kontakt::LEGACY_REVERB_HIGH_CUT_HZ;
+use contra_ir as ir;
+use contra_law::kontakt::LEGACY_REVERB_HIGH_CUT_HZ;
 
 static COMBS: ir::CombNetwork = ir::CombNetwork {
     combs_ms: [

@@ -1,6 +1,6 @@
-//! Names for controls in the generated KONTRA view.
+//! Names for controls in the generated CONTRA view.
 
-use kontra_ui_model::{Interface, Kind, Rect, WidgetRef};
+use contra_ui_model::{Interface, Kind, Rect, WidgetRef};
 
 pub(super) fn label(tree: &Interface, id: WidgetRef) -> String {
     let Some(w) = tree.widgets.get(id.0) else {
@@ -70,7 +70,7 @@ fn clean(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_ui_model::{PageRef, Widget};
+    use contra_ui_model::{PageRef, Widget};
 
     #[test]
     fn own_text_then_nearby_label_then_clean_name() {

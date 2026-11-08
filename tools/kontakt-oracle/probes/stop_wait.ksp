@@ -6,7 +6,7 @@
     two wait(10 s),  stop_wait(.., 0): note at 12.9 s (release + 10 s)
     two wait(10 s),  stop_wait(.., 1): note at the release
   So 0 ends only the current wait; 1 also lets every later wait pass.
-  Pinned by kontra-host tests/script.rs stop_wait_ends_the_current_wait_or_every_wait. }
+  Pinned by contra-host tests/script.rs stop_wait_ends_the_current_wait_or_every_wait. }
 on init
   declare $id
 end on

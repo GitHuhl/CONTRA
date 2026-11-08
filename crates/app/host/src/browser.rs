@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
-use kontra_library::{Cache, Catalog, Prefs, Progress, Root};
+use contra_library::{Cache, Catalog, Prefs, Progress, Root};
 
-/// Where v3 keeps its own settings, beside v2's `kontra`.
-const FOLDER: &str = "kontra-v3";
+/// Where v3 keeps its own settings, beside v2's `contra`.
+const FOLDER: &str = "contra-v3";
 
 pub struct Browser {
     pub prefs: Prefs,
@@ -58,10 +58,10 @@ impl Browser {
         let (roots, cache_path) = (self.prefs.roots.clone(), self.cache_path.clone());
         let scanning = Arc::clone(&progress);
         let spawned = std::thread::Builder::new()
-            .name("kontra-scan".into())
+            .name("contra-scan".into())
             .spawn(move || {
                 let mut cache = cache_path.as_deref().map(Cache::load).unwrap_or_default();
-                if let Some(catalog) = kontra_library::scan(&roots, &scanning, &mut cache) {
+                if let Some(catalog) = contra_library::scan(&roots, &scanning, &mut cache) {
                     if let Some(path) = &cache_path {
                         let _saved = path.parent().map(std::fs::create_dir_all);
                         let _saved = cache.save(path);
@@ -177,14 +177,14 @@ impl Browser {
     }
 }
 
-/// The roots v2 scans (`<config>/kontra/settings.json`), read only.
+/// The roots v2 scans (`<config>/contra/settings.json`), read only.
 fn v2_roots(config: &Path) -> Vec<Root> {
     #[derive(serde::Deserialize)]
     struct V2 {
         #[serde(default)]
         roots: Vec<Root>,
     }
-    std::fs::read(config.join("kontra").join("settings.json"))
+    std::fs::read(config.join("contra").join("settings.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<V2>(&b).ok())
         .map(|v| v.roots)
@@ -197,8 +197,8 @@ mod tests {
 
     #[test]
     fn a_first_run_starts_from_v2s_roots_and_keeps_its_own_prefs() {
-        let dir = std::env::temp_dir().join(format!("kontra-browser-{}", std::process::id()));
-        let v2 = dir.join("kontra");
+        let dir = std::env::temp_dir().join(format!("contra-browser-{}", std::process::id()));
+        let v2 = dir.join("contra");
         std::fs::create_dir_all(&v2).unwrap();
         std::fs::write(
             v2.join("settings.json"),

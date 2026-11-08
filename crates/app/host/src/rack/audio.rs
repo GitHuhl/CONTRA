@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Play, SampleTime, Timed};
-use kontra_protocol::{Meters, Stats};
+use contra_engine::{Engine, Play, SampleTime, Timed};
+use contra_protocol::{Meters, Stats};
 
 use super::hold::{Held, Hold};
 use super::{Channels, Command, Event, HostPattern, Mix, OUTPUTS};
-use kontra_protocol::MAX_PARTS;
+use contra_protocol::MAX_PARTS;
 
 struct Playing {
     engine: Box<Engine>,
@@ -44,7 +44,7 @@ const RETIRES: usize = 1 + FADING;
 /// The audio side: renders every part into its output pair.
 pub struct RackAudio {
     channels: Arc<Channels>,
-    stream: kontra_stream::StreamClient,
+    stream: contra_stream::StreamClient,
     parts: Vec<Option<Playing>>,
     outputs: Vec<Box<[[f32; 2]]>>,
     scratch: Box<[[f32; 2]]>,
@@ -73,7 +73,7 @@ pub struct RackAudio {
 impl RackAudio {
     pub(super) fn new(
         channels: Arc<Channels>,
-        stream: kontra_stream::StreamClient,
+        stream: contra_stream::StreamClient,
         rate: u32,
         max_block: usize,
     ) -> Self {

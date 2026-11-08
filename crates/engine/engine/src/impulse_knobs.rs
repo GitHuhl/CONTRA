@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::Engine;
 use crate::script::Kind;

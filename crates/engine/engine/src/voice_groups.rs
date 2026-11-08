@@ -1,7 +1,7 @@
 //! Voice limits shared across groups: a full group gives up a voice by its
 //! steal rule, and an exclusive set silences the other voice groups in it.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::{Engine, NoteRef, Slot};
 

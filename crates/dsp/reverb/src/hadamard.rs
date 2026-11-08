@@ -13,7 +13,7 @@
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
-use kontra_law::HadamardNetwork;
+use contra_law::HadamardNetwork;
 
 use crate::Settings;
 use crate::combs::Line;

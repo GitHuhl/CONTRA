@@ -1,13 +1,13 @@
 # shared helpers for quiet sessions (source me); sets W, OUT must be set by the caller before sess_begin
-W=/home/derpcat/.cache/kontra-reference; export KONTRA_MAX_LOAD=${KONTRA_MAX_LOAD:-8}
-CAL=/mnt/MAIN_STORAGE/kontra_ref_src/calibration.nki
+W=/home/derpcat/.cache/contra-reference; export CONTRA_MAX_LOAD=${CONTRA_MAX_LOAD:-8}
+CAL=/mnt/MAIN_STORAGE/contra_ref_src/calibration.nki
 say() { echo "$@" | tee -a "$OUT"; }
 wine_pids() { pgrep -x "wineserver|services.exe|winedevice.exe|explorer.exe|plugplay.exe|svchost.exe|rpcss.exe|Kontakt 8.exe|start.exe|Xvfb" | sort; }
 sess_begin() {
   for _ in $(seq 120); do awk '{exit !($1<6)}' /proc/loadavg && break; sleep 5; done   # up to 10 min for other jobs to leave the machine
   allb=$(wine_pids); before=$(pgrep -x wineserver | sort); wineserver -p; sleep 1
   WS=$(comm -13 <(echo "$before") <(pgrep -x wineserver | sort) | head -1); say "persistent wineserver pid ${WS:-existing}"
-  export KONTRA_WS_PID=${WS:-}
+  export CONTRA_WS_PID=${WS:-}
   trap 'sleep 2; for p in $(comm -13 <(echo "$allb") <(wine_pids)); do kill $p 2>/dev/null; done; sleep 1; for p in $(comm -13 <(echo "$allb") <(wine_pids)); do kill -9 $p 2>/dev/null; done; true' EXIT
   say "load at start: $(cat /proc/loadavg)"
   "$here/kontakt.sh" start "$CAL" && "$here/kontakt.sh" calibrate | tail -2 | tee -a "$OUT" || { say "PRE-CALIBRATION FAILED"; "$here/kontakt.sh" stop; exit 1; }

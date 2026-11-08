@@ -7,7 +7,7 @@
 -- into the recording (the trigger is ignored, it only starts the timer), then 2 s later.
 -- Output: the readbacks as JSON lines, then {"ready":true} (render.py starts recording on it).
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

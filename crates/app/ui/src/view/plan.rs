@@ -2,7 +2,7 @@
 //! runtime supplies a settled interface; resolving it does no I/O and does
 //! not depend on decoded pictures or the window.
 
-use kontra_ui_model::{
+use contra_ui_model::{
     self as model, ImageUse, Interface, Kind, PageRef, Role, WidgetRef, kontakt_picture_frame,
 };
 

@@ -1,5 +1,5 @@
 //! Counts group source modes (0 Sampler, 3 DFD) and their zones over NKIs.
-//! `cargo run -p kontra-format-kontakt --example modes -- <file>...`
+//! `cargo run -p contra-format-kontakt --example modes -- <file>...`
 
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ use ni_file::kontakt::objects::{GroupList, ZoneList};
 fn main() {
     for path in std::env::args_os().skip(1) {
         let path = std::path::PathBuf::from(path);
-        let Ok(chunks) = kontra_format_kontakt::chunks(&path) else {
+        let Ok(chunks) = contra_format_kontakt::chunks(&path) else {
             println!("{}: unreadable", path.display());
             continue;
         };

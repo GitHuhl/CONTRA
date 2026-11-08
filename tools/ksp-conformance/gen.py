@@ -5,7 +5,7 @@
     tools/ksp-conformance/gen.py decode OUT.jsonl...  turn Kontakt oracle batch logs into golden.json
 
 `gen` is pure text: the same .ksp source goes to Kontakt (through a generated probe, one
-batch of at most 16 cases per oracle session) and to the KONTRA interpreter (the
+batch of at most 16 cases per oracle session) and to the CONTRA interpreter (the
 sampler-ksp conformance test reads cases/*.ksp). `decode` reads the bit strings the probe
 logged and writes the expected 32-bit results to golden.json.
 """

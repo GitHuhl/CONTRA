@@ -2,7 +2,7 @@
 
 /// The source read by this route, if it has one.
 #[must_use]
-pub fn route_source(kind: kontra_ir::ModKind) -> Option<kontra_ir::Source> {
+pub fn route_source(kind: contra_ir::ModKind) -> Option<contra_ir::Source> {
     crate::source(&kind)
 }
 

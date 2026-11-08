@@ -1,4 +1,4 @@
-use kontra_dsp_filter::{Cascade, CascadeSettings, CascadeStage};
+use contra_dsp_filter::{Cascade, CascadeSettings, CascadeStage};
 
 /// Kontakt 8's 3x2 Versatile (low pass, wet 1, shift 0, gain 0.5) at 48 kHz,
 /// its native cutoff setter (0x14095db50), resonance setter (0x140966230),

@@ -1,4 +1,4 @@
-//! `kontra-inspect law [NAME]`: the named law table, or one law with its source and
+//! `contra-inspect law [NAME]`: the named law table, or one law with its source and
 //! sample points.
 
 use std::fmt::Write as _;
@@ -11,7 +11,7 @@ const SAMPLES: u16 = 8;
 /// The table when `name` is `None`; otherwise every law whose name contains `name`
 /// (case-insensitive).
 pub(crate) fn run(name: Option<&str>) -> Result<String> {
-    let all = kontra_law::catalog();
+    let all = contra_law::catalog();
     let mut out = String::new();
     let Some(name) = name else {
         for n in &all {
@@ -25,7 +25,7 @@ pub(crate) fn run(name: Option<&str>) -> Result<String> {
         .filter(|n| n.name.to_lowercase().contains(&wanted))
         .collect();
     if hits.is_empty() {
-        bail!("no law named like {name}; `kontra-inspect law` lists them");
+        bail!("no law named like {name}; `contra-inspect law` lists them");
     }
     for n in hits {
         writeln!(

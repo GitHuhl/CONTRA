@@ -1,8 +1,8 @@
 -- Measured probe: INTMOD_INTENSITY on a pitch route against a volume route.
 -- Input: ANALOG STRINGS.nki. Groups 0..5 set LFO_Pitch_Retrigger (find_mod 7, its
 -- one route: pitch, 12 semitones), groups 6..11 set LFO_P1 (volume) to 0, .25, .5,
--- .6, .75, 1 (x 1e6); the instrument is saved and read back with KONTRA's parser
--- (`KONTRA_GROUPS=0..12 cargo run -p kontra-format-kontakt --example inspect`).
+-- .6, .75, 1 (x 1e6); the instrument is saved and read back with CONTRA's parser
+-- (`CONTRA_GROUPS=0..12 cargo run -p contra-format-kontakt --example inspect`).
 -- Result (Kontakt 8.13.1, 2026-10-29): both store (2x-1)^3: -1, -0.125, 0, 0.008,
 -- 0.125, 1. Pitch routes share the volume law; 500000 is no depth.
 local kt = Kontakt

@@ -1,4 +1,4 @@
-"""KONTRAFX filter vectors (Dual SKF saved 130, BlueMonark saved 140..143) under kemu.
+"""CONTRAFX filter vectors (Dual SKF saved 130, BlueMonark saved 140..143) under kemu.
 
 Runs the unchanged Kontakt 8 cores: BFilter factory steps, setters, prepare, the 32-frame
 tick and process. Model: tools/re/daft_kemu_vectors.py.

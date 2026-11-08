@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use kontra_library::{Cache, Folder, Prefs, Progress, Root, clean_name, natural, scan};
+use contra_library::{Cache, Folder, Prefs, Progress, Root, clean_name, natural, scan};
 
 /// A fresh folder holding `files` (path, contents).
 fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("kontra-library-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("contra-library-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, text) in files {
         let path = dir.join(path);
@@ -17,7 +17,7 @@ fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
-fn run(roots: &[Root], cache: &mut Cache) -> kontra_library::Catalog {
+fn run(roots: &[Root], cache: &mut Cache) -> contra_library::Catalog {
     scan(roots, &Progress::default(), cache).unwrap()
 }
 

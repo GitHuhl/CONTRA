@@ -5,7 +5,7 @@
 //! filt-legacy.md). Their 0..=1 knobs pass through; the engine runs the
 //! laws.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::script_knobs::SlotKnob;
 

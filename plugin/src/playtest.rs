@@ -7,16 +7,16 @@
 //! Repeats, legato and chords play again under a slow and a fast sweep of the
 //! wheel and expression: no clicks, no clipping, no jump no note explains.
 //! Then every script control is moved under a held note ([`touch`]), and one
-//! row per program goes to `$KONTRA_PLAYTEST_OUT` (JSON lines).
+//! row per program goes to `$CONTRA_PLAYTEST_OUT` (JSON lines).
 
 use std::path::{Path, PathBuf};
 
-use kontra_host::state::{Saved, SavedPart};
+use contra_host::state::{Saved, SavedPart};
 use moose::core::{ExactAddress, ExactEvent, ExactEventBody, ExactNoteAddress, ExactNoteKind};
 use moose::prelude::*;
 
 use super::tests::{BLOCK, KONTAKT, RATE, activate};
-use crate::{Dsp, Kontra, KontraParams, Tick};
+use crate::{Dsp, Contra, ContraParams, Tick};
 
 mod touch;
 
@@ -318,7 +318,7 @@ fn performance(by: i8) -> Vec<(&'static str, Vec<(usize, In)>)> {
 /// delay's next repeat) has stayed quiet in both channels for 0.1 s, so it
 /// never reads as the next segment's onset; at most 5 s. Whether it got there.
 fn ring_out(
-    params: &KontraParams,
+    params: &ContraParams,
     dsp: &mut Dsp,
     last: &mut Played,
     mut collect: impl FnMut(&Played),
@@ -347,7 +347,7 @@ fn ring_out(
 /// end below them. Measured: a short note on each, per octave, the first
 /// octave where both start a voice (more voices than before the note-on).
 /// A tail that never rings out leaves the scenario where it was.
-fn octave_shift(params: &KontraParams, dsp: &mut Dsp, last: &mut Played) -> i8 {
+fn octave_shift(params: &ContraParams, dsp: &mut Dsp, last: &mut Played) -> i8 {
     let mut sounds = |key: u8| {
         let before = last.voices;
         *last = block(params, dsp, &[(0, on(key))], last);
@@ -490,7 +490,7 @@ fn clips(peaks: [f32; 2]) -> bool {
     peaks.into_iter().any(|peak| peak > 1.0)
 }
 
-fn block(params: &KontraParams, dsp: &mut Dsp, events: &[(usize, In)], last: &Played) -> Played {
+fn block(params: &ContraParams, dsp: &mut Dsp, events: &[(usize, In)], last: &Played) -> Played {
     let mut list = EventList::with_capacity(64);
     for &(offset, e) in events {
         let offset = u32::try_from(offset).unwrap_or(0);
@@ -508,7 +508,7 @@ fn block(params: &KontraParams, dsp: &mut Dsp, events: &[(usize, In)], last: &Pl
         // Offline, so a slow debug build never starves a voice of data.
         let mut cx = ProcessContext::new(&transport, RATE, BLOCK, &mut out_events)
             .with_process_mode(ProcessMode::Offline);
-        <Kontra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+        <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
     }
     let channel_peaks = output_peaks(&channels);
     let audio = channels[0]
@@ -537,7 +537,7 @@ fn block(params: &KontraParams, dsp: &mut Dsp, events: &[(usize, In)], last: &Pl
 }
 
 /// Whether the plan limits voices anywhere a steal could be fair.
-fn limited(params: &KontraParams) -> (bool, usize) {
+fn limited(params: &ContraParams) -> (bool, usize) {
     let rack = crate::lock(&params.shared.rack);
     let plan = rack
         .as_ref()
@@ -600,7 +600,7 @@ fn perform(path: PathBuf) -> Report {
     let (params, mut dsp, mut last) = start();
     let mut failed = Vec::new();
     let mut fail = |what: String| failed.push(format!("{name}: {what}"));
-    let latency_ms = <Kontra as PluginLogic>::latency(&dsp) as f32 * 1000.0 / RATE as f32;
+    let latency_ms = <Contra as PluginLogic>::latency(&dsp) as f32 * 1000.0 / RATE as f32;
     let (limited, pool) = limited(&params);
     let mut onsets = Vec::new();
     let mut segments = Vec::new();
@@ -681,7 +681,7 @@ fn perform(path: PathBuf) -> Report {
         }
         if segment.starts_with("probe") {
             let from = starts.first().copied().unwrap_or(0);
-            let onset = kontra_align::onset_ms(&audio[from..], RATE, kontra_align::ONSET_DB);
+            let onset = contra_align::onset_ms(&audio[from..], RATE, contra_align::ONSET_DB);
             match onset {
                 Some(ms) if ms <= latency_ms + 10.0 => onsets.push(ms),
                 Some(ms) => fail(format!(
@@ -802,19 +802,19 @@ const PROGRAMS: [&str; 10] = [
 #[ignore = "real libraries, minutes: run with --ignored (release) before offering a build"]
 fn real_performances_sound_on_time_end_and_never_burst() {
     let mut failed = Vec::new();
-    // KONTRA_PLAYTEST=<part of a path> plays just the programs it names.
-    let only = std::env::var("KONTRA_PLAYTEST").unwrap_or_default();
-    let out = std::env::var_os("KONTRA_PLAYTEST_OUT").map(PathBuf::from);
-    // KONTRA_PLAYTEST_LIST=<file>: plays the programs it lists, one path a
-    // line, instead of the user's ten; KONTRA_PLAYTEST_SHARD=i/n plays every
+    // CONTRA_PLAYTEST=<part of a path> plays just the programs it names.
+    let only = std::env::var("CONTRA_PLAYTEST").unwrap_or_default();
+    let out = std::env::var_os("CONTRA_PLAYTEST_OUT").map(PathBuf::from);
+    // CONTRA_PLAYTEST_LIST=<file>: plays the programs it lists, one path a
+    // line, instead of the user's ten; CONTRA_PLAYTEST_SHARD=i/n plays every
     // nth from the ith, so n processes share a corpus.
-    let list = std::env::var_os("KONTRA_PLAYTEST_LIST")
-        .map(|f| std::fs::read_to_string(f).expect("KONTRA_PLAYTEST_LIST"));
+    let list = std::env::var_os("CONTRA_PLAYTEST_LIST")
+        .map(|f| std::fs::read_to_string(f).expect("CONTRA_PLAYTEST_LIST"));
     let programs: Vec<&str> = match &list {
         Some(l) => l.lines().filter(|l| !l.is_empty()).collect(),
         None => PROGRAMS.to_vec(),
     };
-    let (shard, shards) = std::env::var("KONTRA_PLAYTEST_SHARD")
+    let (shard, shards) = std::env::var("CONTRA_PLAYTEST_SHARD")
         .ok()
         .and_then(|s| {
             let (i, n) = s.split_once('/')?;

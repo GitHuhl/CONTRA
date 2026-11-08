@@ -1,6 +1,6 @@
 # MUI popup wheel ownership patch
 
-Source: installed MUI 0.4.0 at dcf0796082feec053af1418e3a38a302ee61da0a, MIT. Only the mui crate is vendored; sibling crates stay pinned by KONTRA Cargo.lock. Cargo metadata is expanded from upstream workspace inheritance, unused examples omitted, and doctest include paths point at the included unchanged documentation.
+Source: installed MUI 0.4.0 at dcf0796082feec053af1418e3a38a302ee61da0a, MIT. Only the mui crate is vendored; sibling crates stay pinned by CONTRA Cargo.lock. Cargo metadata is expanded from upstream workspace inheritance, unused examples omitted, and doctest include paths point at the included unchanged documentation.
 
 The consolidation review ports two bounded stability corrections from upstream
 `65ab5baa58143c2b78a734a380b5aad0b0bc34ef`: retained memo captures are destroyed
@@ -35,6 +35,6 @@ the application's exact `mapped_accessibility_set_value_uses_authored_units`.
 
 `Ui::time()` reads the frame clock (the sum of each frame's `dt`), and
 `Ui::repaint_in(secs)` adds a caller deadline to `Ui::repaint_after`, the
-earliest one winning. KONTRA's value-edit arrows repeat while held and its
+earliest one winning. CONTRA's value-edit arrows repeat while held and its
 level meters fall and hold on Kontakt's GUI tick; both need a frame when no
 input arrives. No change to painting or input.

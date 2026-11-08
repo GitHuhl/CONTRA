@@ -10,7 +10,7 @@ Run it on the original three-case vector file (the derived cases are regenerated
 Per case: 'rate' (Hz), 'mode' (taps selector, core+0x44: 3 = LP4, 9 = BP4), 'flag49' (cutoff path,
 core+0x49), 'hq' (quality, setter index 3), 'schedule' ([gain, cutoff, resonance] per 32-frame
 block), 'stim' (left, right). Setter order and fields follow the probe in
-PluginArtifacts/kontra-native-ladder-20261015 (native_audio_probe.py). Cases in IN_JSON keep their
+PluginArtifacts/contra-native-ladder-20261015 (native_audio_probe.py). Cases in IN_JSON keep their
 stimuli and schedules; new cases are derived from them with the fields listed in NEW_CASES.
 """
 import copy

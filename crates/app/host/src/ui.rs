@@ -1,12 +1,12 @@
-//! A KSP script's performance view as a `kontra_ui_model` tree, built once
+//! A KSP script's performance view as a `contra_ui_model` tree, built once
 //! per load from the declarations and the control store as `on init` left it
 //! (07-APP.md §5.1). The UI draws from the tree and needs nothing else from
 //! the engine until a control moves.
 
 use std::collections::HashMap;
 
-use kontra_engine::{ControlLook, Page};
-use kontra_ksp::{Cells, Control, ControlKind, FIRST_UI_ID, SYMBOL_BASE, Script};
+use contra_engine::{ControlLook, Page};
+use contra_ksp::{Cells, Control, ControlKind, FIRST_UI_ID, SYMBOL_BASE, Script};
 
 use crate::perf_view::{View, ViewControl};
 
@@ -14,7 +14,7 @@ mod keybed;
 mod looks;
 mod picture;
 mod widget;
-use kontra_ui_model as ui;
+use contra_ui_model as ui;
 pub use looks::Looks;
 pub use picture::{Library, meta as picture_meta};
 use widget::{Decl, widget};

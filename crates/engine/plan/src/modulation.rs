@@ -1,6 +1,6 @@
 //! Closed-form time-varying modulation sources.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// When a voice is being read, in seconds.
 #[derive(Clone, Copy, Debug)]

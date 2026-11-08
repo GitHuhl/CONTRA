@@ -4,7 +4,7 @@ import os
 import re, subprocess, sys
 from pathlib import Path
 from pathlib import Path
-SRC = Path(os.environ.get("KONTAKT8_SRC", "/data/dev/workspace/Research/KONTRA/source/kontakt8"))
+SRC = Path(os.environ.get("KONTAKT8_SRC", "/data/dev/workspace/Research/CONTRA/source/kontakt8"))
 hdr = {}
 for f in SRC.glob("*.c"):
     for m in re.finditer(r"^// ==== ([0-9a-f]+) (\S+) size=(\d+)", f.read_text(errors="replace"), re.M):

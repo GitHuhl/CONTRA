@@ -1,8 +1,8 @@
-//! KSP front end: Kontakt script source → a [`kontra_vm::Program`] plus what
+//! KSP front end: Kontakt script source → a [`contra_vm::Program`] plus what
 //! the engine needs to run it (callbacks, UI controls, variables, symbols).
 //!
 //! The pipeline is lexer → condition preprocessor → parser → one compiler pass.
-//! Builtins that are not lowered to bytecode become [`kontra_vm::Action`]s,
+//! Builtins that are not lowered to bytecode become [`contra_vm::Action`]s,
 //! the front-end-neutral vocabulary the engine implements.
 
 mod builtins;
@@ -16,7 +16,7 @@ use std::fmt;
 
 pub use builtins::{Arg, Builtin, Ret, Sig};
 pub use consts::{FIRST_UI_ID, SYMBOL_BASE, int as constant};
-use kontra_vm::Program;
+use contra_vm::Program;
 pub use persist::{Restore, restore};
 
 /// Compiles a script. `conditions` are the `SET_CONDITION` symbols already set
@@ -156,7 +156,7 @@ pub struct Variable {
     pub persistence: Persistence,
 }
 
-/// Where a variable lives in the [`kontra_vm::Instance`].
+/// Where a variable lives in the [`contra_vm::Instance`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cells {
     Int {

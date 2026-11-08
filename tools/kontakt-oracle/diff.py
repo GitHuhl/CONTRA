@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diff KONTRA's translation against Kontakt's own post-load state.
+"""Diff CONTRA's translation against Kontakt's own post-load state.
 
     tools/kontakt-oracle/diff.py NATIVE.jsonl OURS.json [--examples N]   # one instrument
     tools/kontakt-oracle/diff.py NATIVE.jsonl                            # all records; runs ir_json
@@ -42,12 +42,12 @@ def semitones(p):
 
 
 def pan_percent(p):
-    # KONTRA stores pan as -1..1 position; Kontakt's Lua API reports -100..100.
+    # CONTRA stores pan as -1..1 position; Kontakt's Lua API reports -100..100.
     return None if p is None else p.get("position", 0) * 100
 
 
 def sample_tail(path):
-    # Kontakt: D:\...\Samples\<<<UC005.nkx>>>\Samples\x.ncw  KONTRA: /.../UC005.nkx/Samples/x.ncw
+    # Kontakt: D:\...\Samples\<<<UC005.nkx>>>\Samples\x.ncw  CONTRA: /.../UC005.nkx/Samples/x.ncw
     if not path:
         return None
     return path.replace("\\", "/").replace("<<<", "").replace(">>>", "").rsplit("/", 2)[-2:]
@@ -97,7 +97,7 @@ def diff_record(native, ours, examples=3):
 
     hv = o.get("host_volume") or {}
     d.eq("instrument.volume_db", "instrument", k["volume_db"], db(hv.get("saved", 1.0)), near(TOL_DB))
-    # KONTRA folds instrument volume/pan into every zone (topology T01); compare
+    # CONTRA folds instrument volume/pan into every zone (topology T01); compare
     # zone values net of that fold so a per-zone error is not hidden by it.
     fold_db = db(hv.get("saved", 1.0)) if hv else 0.0
     vl = o.get("voice_limit") or {}
@@ -173,7 +173,7 @@ def report(d):
     for field in d.checked:
         n = d.count[field]
         mark = "" if n == 0 else "   <-- " + "; ".join(
-            f"{w}: kontakt={nv!r} kontra={ov!r}" for w, nv, ov in d.examples[field])
+            f"{w}: kontakt={nv!r} contra={ov!r}" for w, nv, ov in d.examples[field])
         print(f"{field:<{width}}  {n:>6} / {d.checked[field]:<6}{mark}")
     total = sum(d.count.values())
     print(f"\n{total} mismatches across {sum(d.checked.values())} checked values")
@@ -212,7 +212,7 @@ def main():
         print(f"{name:<60} {sum(d.checked.values()):>8} {sum(d.count.values()):>8}  {top}")
         for f, ex in d.examples.items():
             if d.count[f]:
-                print(f"    {f}: " + "; ".join(f"{w}: kontakt={nv!r} kontra={ov!r}" for w, nv, ov in ex[:2])[:300])
+                print(f"    {f}: " + "; ".join(f"{w}: kontakt={nv!r} contra={ov!r}" for w, nv, ov in ex[:2])[:300])
 
 
 if __name__ == "__main__":

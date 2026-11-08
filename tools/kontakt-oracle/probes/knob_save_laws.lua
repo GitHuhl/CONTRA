@@ -1,7 +1,7 @@
 -- Measured probe: the saved values a script's knob writes leave in compressor, delay and
 -- LFO slots. Input: ANALOG STRINGS.nki: instrument insert 1 = Compressor, send 3 = Delay,
 -- group k's LFO_P1 = slot 3. For each x the knobs are set, the instrument saved, and the
--- saves read back with KONTRA's parser.
+-- saves read back with CONTRA's parser.
 -- Result (Kontakt 8.13.1, 2026-10-28), saved Compressor (mode 0) attack / release ms for x = 0, .1,
 -- .25, .5, .75, .9, 1: 1, 3.364, 10.825, 52.827, 232.386, 558.393, 1000 / 50, 74.601, 134.954,
 -- 358.699, 947.984, 1696.474, 2500 = lo + (hi - lo)(e^(kx) - 1)/(e^k - 1), k 5.811 / 3.874.

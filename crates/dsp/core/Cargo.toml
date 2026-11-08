@@ -1,5 +1,5 @@
 [package]
-name = "kontra-dsp-core"
+name = "contra-dsp-core"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -9,5 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
-kontra-law = { path = "../../base/law" }
-kontra-time = { path = "../../base/time" }
+contra-law = { path = "../../base/law" }
+contra-time = { path = "../../base/time" }

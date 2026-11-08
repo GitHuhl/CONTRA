@@ -1,8 +1,8 @@
 //! The editor's view state as the project keeps it ([`SavedView`]): put
 //! back when the editor opens, saved again whenever it changes.
 
-use kontra_host::state::{SavedPartView, SavedView};
-use kontra_ui::app::{App, FaceLook, PartTab, Shelf, Tab, View};
+use contra_host::state::{SavedPartView, SavedView};
+use contra_ui::app::{App, FaceLook, PartTab, Shelf, Tab, View};
 
 const TABS: [Tab; 3] = [Tab::Rack, Tab::Mixer, Tab::Report];
 const PART_TABS: [PartTab; 6] = [
@@ -101,10 +101,10 @@ mod tests {
         app.view.scale = 2;
         app.view.split = 0.3;
         app.view.face_look = FaceLook::Vector;
-        app.parts = vec![kontra_ui::app::Part {
+        app.parts = vec![contra_ui::app::Part {
             open: false,
             tab: PartTab::Mapping,
-            look: Some(FaceLook::Kontra),
+            look: Some(FaceLook::Contra),
             ..Default::default()
         }];
         let saved = SavedView::read(&saved(&app, &[3]).write());
@@ -118,14 +118,14 @@ mod tests {
         assert!((again.view.split - 0.3).abs() < 1e-6, "the browser's split");
         assert_eq!(again.view.face_look, FaceLook::Vector);
         let mut waiting = saved.parts.clone();
-        again.parts = vec![kontra_ui::app::Part::default()];
+        again.parts = vec![contra_ui::app::Part::default()];
         parts(&mut again, &[0], &mut waiting);
         assert_eq!(waiting.len(), 1, "slot 3 has not loaded yet");
         parts(&mut again, &[3], &mut waiting);
         assert!(waiting.is_empty());
         assert_eq!(
             (again.parts[0].open, again.parts[0].tab, again.parts[0].look),
-            (false, PartTab::Mapping, Some(FaceLook::Kontra))
+            (false, PartTab::Mapping, Some(FaceLook::Contra))
         );
     }
 }

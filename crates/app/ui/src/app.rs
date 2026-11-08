@@ -17,7 +17,7 @@ mod sound;
 
 pub use sound::{Envelope, Filter, Lower, Param, Pass, Sound};
 
-use kontra_ui_model::Interface;
+use contra_ui_model::Interface;
 use mui::prelude::*;
 
 use crate::Pictures;
@@ -181,13 +181,13 @@ pub enum FaceLook {
     Original,
     /// The same controls in the same places, without the pictures.
     Vector,
-    /// The controls one after another in KONTRA's own look.
-    Kontra,
+    /// The controls one after another in CONTRA's own look.
+    Contra,
 }
 
 impl FaceLook {
-    pub const ALL: [Self; 3] = [Self::Original, Self::Vector, Self::Kontra];
-    pub const LABELS: [&str; 3] = ["Original", "Vector", "KONTRA"];
+    pub const ALL: [Self; 3] = [Self::Original, Self::Vector, Self::Contra];
+    pub const LABELS: [&str; 3] = ["Original", "Vector", "CONTRA"];
 }
 
 /// The engine's load, for the header.
@@ -339,7 +339,7 @@ pub enum Action {
         /// The cell of a table set; `None` for any other control.
         cell: Option<u32>,
         value: f64,
-        keys: kontra_ui_model::UiModifiers,
+        keys: contra_ui_model::UiModifiers,
     },
     /// Text the user typed into a library's text edit.
     ControlText {
@@ -562,7 +562,7 @@ fn header(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     }
     let mut items = vec![
         side.el,
-        body("KONTRA").text_weight(Weight::SEMIBOLD),
+        body("CONTRA").text_weight(Weight::SEMIBOLD),
         spacer(),
         load,
         spacer(),
@@ -612,7 +612,7 @@ fn sheet_view(ui: &mut Ui, app: &mut App, which: Sheet, out: &mut Vec<Action>) -
         Sheet::About => (
             "About",
             col![
-                title("KONTRA"),
+                title("CONTRA"),
                 body(app.build.clone()).id("about-build"),
                 caption(
                     "A free sampler that plays Kontakt libraries as they were written."

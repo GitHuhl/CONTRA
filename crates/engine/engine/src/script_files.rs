@@ -2,7 +2,7 @@
 //! queues the request, the control side reads or writes the file off the
 //! audio thread and answers, and `on async_complete` follows the answer.
 
-use kontra_plan::files::{ArrayKind, FileReply, FileRequest};
+use contra_plan::files::{ArrayKind, FileReply, FileRequest};
 
 use crate::Engine;
 use crate::queue::Exit;

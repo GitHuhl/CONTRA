@@ -1,4 +1,4 @@
-use kontra_dsp_drive::{Circuit, Clipper, Crush, Curve, Reduction, Shaper, Tone};
+use contra_dsp_drive::{Circuit, Clipper, Crush, Curve, Reduction, Shaper, Tone};
 
 /// Steady-state peak of a sine at `hz` through `s`, in dB.
 fn gain_db(mut s: Shaper, hz: f64, rate: u32) -> f64 {

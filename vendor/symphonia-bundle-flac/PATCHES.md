@@ -50,7 +50,7 @@ validator SHA256:
 
 No new production allocation, decoder field, parser, registry, thread, codec
 workspace buffer or DSP law is introduced. Existing ordinary Decoder::decode
-clears its output on a returned error. The KONTRA checked owner additionally
+clears its output on a returned error. The CONTRA checked owner additionally
 permanently poisons itself on that returned error; no production unwind handler
 is installed. Generic decoder entrypoint hardening outside these checks and
 complete whole-decoder/stereo-33-bit certification are not claimed.

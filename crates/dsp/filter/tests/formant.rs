@@ -1,4 +1,4 @@
-use kontra_dsp_filter::{Formant, VowelSet, Vowels};
+use contra_dsp_filter::{Formant, VowelSet, Vowels};
 
 /// Kontakt 8's Formant I/II magnitude at 48 kHz (Wine oracle,
 /// tools/kontakt-oracle/eqrender.py, impulse against the bypass reference):

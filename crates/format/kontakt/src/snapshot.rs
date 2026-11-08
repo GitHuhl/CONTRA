@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kontra_ir as ir;
+use contra_ir as ir;
 use ni_file::kontakt::objects::{Snapshot, snapshot_metadata_names};
 
 use crate::{Error, container, translate};
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_finds_its_base_by_its_folder_and_never_guesses() {
-        let root = std::env::temp_dir().join(format!("kontra-snapshot-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("contra-snapshot-{}", std::process::id()));
         let snap = root.join("Snapshots/Lib/Factory/a.nksn");
         let inst = root.join("Instruments");
         std::fs::create_dir_all(snap.parent().unwrap()).unwrap();

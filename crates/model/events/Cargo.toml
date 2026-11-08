@@ -1,5 +1,5 @@
 [package]
-name = "kontra-events"
+name = "contra-events"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"

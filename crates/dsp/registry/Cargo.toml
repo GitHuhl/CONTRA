@@ -1,5 +1,5 @@
 [package]
-name = "kontra-dsp"
+name = "contra-dsp"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -9,13 +9,13 @@ publish = false
 workspace = true
 
 [dependencies]
-kontra-dsp-core = { path = "../core" }
-kontra-dsp-filter = { path = "../filter" }
-kontra-dsp-eq = { path = "../eq" }
-kontra-dsp-dynamics = { path = "../dynamics" }
-kontra-dsp-delay = { path = "../delay" }
-kontra-dsp-reverb = { path = "../reverb" }
-kontra-dsp-drive = { path = "../drive" }
-kontra-dsp-spatial = { path = "../spatial" }
-kontra-dsp-modulators = { path = "../modulators" }
-kontra-params = { path = "../../model/params" }
+contra-dsp-core = { path = "../core" }
+contra-dsp-filter = { path = "../filter" }
+contra-dsp-eq = { path = "../eq" }
+contra-dsp-dynamics = { path = "../dynamics" }
+contra-dsp-delay = { path = "../delay" }
+contra-dsp-reverb = { path = "../reverb" }
+contra-dsp-drive = { path = "../drive" }
+contra-dsp-spatial = { path = "../spatial" }
+contra-dsp-modulators = { path = "../modulators" }
+contra-params = { path = "../../model/params" }

@@ -1,4 +1,4 @@
-# KONTRA
+# CONTRA
 
 A Kontakt-compatible sampler plugin (CLAP, VST3) for NixOS. Read
 [README.md](README.md) first.

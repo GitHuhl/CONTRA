@@ -4,7 +4,7 @@
 
 use crate::ledger::{Note, NoteRef, Origin};
 use crate::{Engine, Slot, Trigger};
-use kontra_voice::FadeTarget;
+use contra_voice::FadeTarget;
 
 impl Engine {
     /// Enters `note` in the table. When it is full, the note that matters

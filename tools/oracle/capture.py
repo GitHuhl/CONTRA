@@ -9,7 +9,7 @@ group. Instrument k of a group gets MIDI channel k+1 and time slot k of WINDOW s
 scenario notes play on its channel, then All Sound Off (CC 120) on that channel closes the slot,
 so no tail leaks into the next slot.
 
-Audio: Kontakt's outputs are linked to the PipeWire null sink `kontra_ref` only (re-checked
+Audio: Kontakt's outputs are linked to the PipeWire null sink `contra_ref` only (re-checked
 throughout the session, because PipeWire re-links new ports to the default output = speakers).
 The recording is that sink's monitor, 48 kHz float stereo, sliced per slot into OUTDIR/<name>.wav:
 PRE seconds before the slot start, then WINDOW seconds.
@@ -18,7 +18,7 @@ Kontakt's audio device is chosen once per session through the Options dialog (GU
 coordinates as tools/kontakt-oracle/render.py); the choice does not persist across launches.
 
 Accuracy: slot starts come from the monotonic clock at MIDI start; slices are good to a few ms.
-Absolute latency is not calibrated here: compare.py aligns each capture to the KONTRA render.
+Absolute latency is not calibrated here: compare.py aligns each capture to the CONTRA render.
 """
 import argparse
 import math
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import slot  # noqa: E402  (oracle-slot environment; legacy single session when unset)
 
 KONTAKT_ORACLE = Path(__file__).resolve().parent.parent / "kontakt-oracle"
-CACHE = slot.work(Path.home() / ".cache/kontra-native-oracle")
+CACHE = slot.work(Path.home() / ".cache/contra-native-oracle")
 
 
 def _load(name, path):
@@ -50,7 +50,7 @@ def _load(name, path):
 dump = _load("dump", KONTAKT_ORACLE / "dump.py")  # EXE, winpath, dismiss_dialogs
 wavutil = _load("wavutil", KONTAKT_ORACLE / "wavutil.py")
 
-SINK = slot.sink("kontra_ref")
+SINK = slot.sink("contra_ref")
 PER_SESSION = slot.channel_block()[1]  # MIDI channels this session may use (16 in legacy mode, 5 per slot of 3)
 PRE = 0.5  # seconds kept before each slot
 DISPLAY = slot.display(":79")  # dump.py uses :78, the reference harness :77
@@ -163,7 +163,7 @@ def log(work, msg):
 
 
 def kontakt_links():
-    return [l.strip() for l in sh("pw-link", "-l").splitlines() if "Kontakt" in l or "kontra_ref" in l][:8]
+    return [l.strip() for l in sh("pw-link", "-l").splitlines() if "Kontakt" in l or "contra_ref" in l][:8]
 
 
 def kontakt_ports():
@@ -171,7 +171,7 @@ def kontakt_ports():
 
 
 def route_kontakt_to_sink(wait=0):
-    """Link Kontakt's outputs to kontra_ref and remove every other link from them. Idempotent:
+    """Link Kontakt's outputs to contra_ref and remove every other link from them. Idempotent:
     PipeWire re-creates the ports when the audio device opens and auto-links them to the default
     output (the speakers). Returns the number of Kontakt output ports (0 = none yet)."""
     if slot.active():  # this session's Kontakt nodes only (see slot.route_slot)
@@ -209,7 +209,7 @@ def click(env, x, y, wait=1.2):
 
 
 def select_device(env):
-    """File > Options: Audio device = kontra_ref; MIDI: Midi Through Port-0 -> Port A.
+    """File > Options: Audio device = contra_ref; MIDI: Midi Through Port-0 -> Port A.
     Coordinates from tools/kontakt-oracle/render.py (1600x1000 desktop); no screenshots."""
     time.sleep(5)
     click(env, 1089, 440)

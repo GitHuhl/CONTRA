@@ -2,8 +2,8 @@
 
 mod buffer;
 pub use buffer::Trace;
-use kontra_vm::Action;
-use kontra_voice::Gain;
+use contra_vm::Action;
+use contra_voice::Gain;
 
 /// One event captured by the engine at its sample clock.
 #[derive(Clone, Copy, Debug)]
@@ -52,7 +52,7 @@ pub enum TraceEvent {
         zone: usize,
         mod_slot: u16,
         target: u16,
-        kind: kontra_ir::ModKind,
+        kind: contra_ir::ModKind,
         source: Option<f32>,
     },
     /// A voice was started, stolen, cut or ended.
@@ -106,7 +106,7 @@ pub struct RouteValue {
     pub controller: u8,
     pub mod_slot: u16,
     pub target: u16,
-    pub kind: kontra_ir::ModKind,
+    pub kind: contra_ir::ModKind,
     pub source: Option<f32>,
     pub value: f64,
     pub unit: RouteUnit,
@@ -124,7 +124,7 @@ pub struct RouteSample {
     pub controller: u8,
     pub mod_slot: u16,
     pub target: u16,
-    pub kind: kontra_ir::ModKind,
+    pub kind: contra_ir::ModKind,
     pub source: Option<f32>,
     pub value: f64,
     pub unit: RouteUnit,
@@ -269,13 +269,13 @@ mod route_tests {
     #[test]
     fn route_buffer_is_bounded_and_assigns_onset_voice() {
         let buffer = RouteBuffer::new(1);
-        let route = kontra_ir::Mod {
+        let route = contra_ir::Mod {
             name: "x".into(),
             slot: 1,
             target: 0,
             bypass: false,
-            kind: kontra_ir::ModKind::Pan {
-                source: kontra_ir::Source::Controller(1),
+            kind: contra_ir::ModKind::Pan {
+                source: contra_ir::Source::Controller(1),
                 amount: 1.0,
             },
         };

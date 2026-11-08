@@ -6,15 +6,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kontra_engine::{Callbacks, Engine, ir::Law};
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::{Callbacks, Engine, ir::Law};
+use contra_stream::{Store, StoreConfig};
 use serde_json::{Value, json};
 
 use super::RATE;
 
 pub fn run(path: &Path) -> Result<(Value, String)> {
     let (instrument, law_applications) =
-        kontra_law::collect(|| kontra_host::instrument::read(path));
+        contra_law::collect(|| contra_host::instrument::read(path));
     let instrument = instrument.map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     // Prepare requests samples referenced by at least one non-purged group.
     let resident_samples: HashSet<usize> = instrument
@@ -79,7 +79,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         "sends": format!("{:?}", instrument.sends), "main": format!("{:?}", instrument.main),
         "buses": format!("{:?}", instrument.buses), "slot_laws": format!("{:?}", instrument.slot_laws)});
     let mut store = Store::new(StoreConfig::DEFAULT).context("creating sample store")?;
-    let loaded = kontra_host::instrument::build(instrument, RATE, &mut store);
+    let loaded = contra_host::instrument::build(instrument, RATE, &mut store);
     let original_slots: Vec<_> = loaded.persist.iter().map(|vars| vars.script).collect();
     let mapping = script_mapping(scripts.len(), &original_slots, loaded.plan.scripts.len());
     let mut callback_count = 0usize;
@@ -114,7 +114,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                 fields.insert(
                     "reverb_laws".into(),
                     json!(
-                        kontra_engine::ir::ReverbPar::ALL
+                        contra_engine::ir::ReverbPar::ALL
                             .iter()
                             .enumerate()
                             .map(|(index, par)| json!({"index":index, "law":law(script.reverb_laws.get(*par))}))
@@ -174,7 +174,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         .collect();
     let plan = Arc::new(loaded.plan);
     let engine = Engine::new(Arc::clone(&plan), store.client(), RATE);
-    let library = RefCell::new(kontra_host::ui::Library::open(path));
+    let library = RefCell::new(contra_host::ui::Library::open(path));
     let asset_cache = RefCell::new(HashMap::<String, Option<usize>>::new());
     let metadata = |name: &str| library.borrow_mut().meta(name);
     let asset_size = |name: &str| {
@@ -187,7 +187,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
     };
     let ui: Vec<_> = loaded.faces.iter().enumerate().map(|(slot, face)| {
         if let (Some(face), Ok(slot_id)) = (face, u8::try_from(slot)) {
-            match kontra_host::ui::interface(face, slot_id, &engine, &metadata) {
+            match contra_host::ui::interface(face, slot_id, &engine, &metadata) {
                 Ok(tree) => json!({"runtime_slot": slot, "original_slot": mapping.as_ref().and_then(|_| loaded.persist.get(slot)).map(|p| p.script), "widgets": tree.widgets.iter().map(|w| json!({"name": w.name, "source_id": w.source_id, "kind": format!("{:?}", w.kind), "hidden": w.hidden, "enabled": w.enabled, "text": w.text, "details": format!("{w:?}")})).collect::<Vec<_>>(), "assets": tree.assets.iter().map(|a| {
                     let size = asset_size(&a.path);
                     json!({"path": a.path, "kind": format!("{:?}", a.kind),
@@ -353,7 +353,7 @@ fn absent_reason(sample: usize, sample_count: usize, resident: &HashSet<usize>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_engine::ir::FormulaId;
+    use contra_engine::ir::FormulaId;
 
     #[test]
     fn law_shapes_preserve_parameters_and_points() {

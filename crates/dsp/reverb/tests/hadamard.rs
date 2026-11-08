@@ -2,8 +2,8 @@
 //! the low band at its own decay.
 #![cfg(test)]
 
-use kontra_dsp_reverb::{Hadamard, Settings};
-use kontra_law::HadamardNetwork;
+use contra_dsp_reverb::{Hadamard, Settings};
+use contra_law::HadamardNetwork;
 
 const RATE: u32 = 48_000;
 

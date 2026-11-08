@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use kontra_engine::{Engine, Prepared, SampleTime, Timed};
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::{Engine, Prepared, SampleTime, Timed};
+use contra_stream::{Store, StoreConfig};
 use serde_json::{Value, json};
 
 use super::{RATE, scenario};
@@ -53,7 +53,7 @@ fn run_events(
         .max()
         .context("scenario needs a note-off")?;
     let stop = end.max(last_off + TAIL_SECONDS * u64::from(RATE));
-    let ir = kontra_host::instrument::read(path)
+    let ir = contra_host::instrument::read(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let samples: Vec<_> = ir.samples.iter().map(|s| s.name.clone()).collect();
     let group_samples: Vec<Vec<usize>> = ir
@@ -62,7 +62,7 @@ fn run_events(
         .map(|g| g.zones.iter().map(|z| z.sample).collect())
         .collect();
     let mut store = Store::new(StoreConfig::DEFAULT).context("creating sample store")?;
-    let loaded = kontra_host::instrument::build(ir, RATE, &mut store);
+    let loaded = contra_host::instrument::build(ir, RATE, &mut store);
     let diagnostics: Vec<_> = loaded
         .diagnostics
         .iter()

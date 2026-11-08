@@ -13,7 +13,7 @@
 //! - twice the rate inside at 48 kHz and below, through a halfband pair
 //!   (the native's is 0x14163cdc0 up, 0x14163cec0 down).
 
-use kontra_dsp_core::{Halfband, flush};
+use contra_dsp_core::{Halfband, flush};
 
 /// Per mode (low 1..4 poles, high 1..4, band 2 and 4, notch 2 and 4): the
 /// weights of the saturated input and the four poles.

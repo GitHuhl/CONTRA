@@ -2,7 +2,7 @@
 -- and what Kontakt does with out-of-range values (clamp vs keep). One instrument, one zone per
 -- group, every value set through the Lua API, then saved to Z:\tmp\w3\audit\levels.nki.
 -- The same session logs what Kontakt's own getters return, so the stored file, the getters and
--- KONTRA's IR (ir_json) can be compared.
+-- CONTRA's IR (ir_json) can be compared.
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))
 local DIR = "Z:\\tmp\\w3\\audit\\"

@@ -2,17 +2,17 @@
 //! envelope stages and controller values. Values arrive in KSP's 0..=1_000_000
 //! encoding; the laws are Kontakt's (sampler-core `EngineParameterLaw`).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::plan::{Group, Holder, addressed};
 use crate::{Engine, EnginePar, Level};
-use kontra_plan::par_laws::{
+use contra_plan::par_laws::{
     CUBE, SIGNED_CUBE, SQUARE, STAGE_10S, STAGE_15S, STAGE_25S, attack_shape, attack_x,
     routed_envelope, routed_index, setting, stage_point, stage_setting,
 };
-use kontra_plan::route_depth::{depth, set_signed, signed};
+use contra_plan::route_depth::{depth, set_signed, signed};
 
-pub(crate) use kontra_plan::par_values::{BUS_OFFSET, LevelPar, effect_par, level_par};
+pub(crate) use contra_plan::par_values::{BUS_OFFSET, LevelPar, effect_par, level_par};
 
 impl Engine {
     /// What the running script's parameter id `id` changes.
@@ -151,17 +151,17 @@ impl Engine {
     }
 
     /// [`Action::GroupVolume`], `GroupPan` or `GroupTune` in their units.
-    pub(crate) fn set_group_level(&mut self, action: kontra_vm::Action, group: i32, value: i32) {
+    pub(crate) fn set_group_level(&mut self, action: contra_vm::Action, group: i32, value: i32) {
         let Some(level) = self.group_mut(group).map(|g| &mut g.level) else {
             return;
         };
         match action {
-            kontra_vm::Action::GroupVolume if value <= -200_000 => level.gain = 0.0,
-            kontra_vm::Action::GroupVolume => {
+            contra_vm::Action::GroupVolume if value <= -200_000 => level.gain = 0.0,
+            contra_vm::Action::GroupVolume => {
                 level.gain = ir::common::MILLIBEL_GAIN.eval_unclamped(value as f32);
             }
-            kontra_vm::Action::GroupPan => level.pan = (value as f32 / 1000.0).clamp(-1.0, 1.0),
-            kontra_vm::Action::GroupTune => level.tune = f64::from(value) / 100_000.0,
+            contra_vm::Action::GroupPan => level.pan = (value as f32 / 1000.0).clamp(-1.0, 1.0),
+            contra_vm::Action::GroupTune => level.tune = f64::from(value) / 100_000.0,
             _ => return,
         }
         self.refresh_all(None);
@@ -285,7 +285,7 @@ impl Engine {
     }
 
     /// Sets the amount of every route named with `#key` to `micros`
-    /// millionths ([`kontra_vm::Action::RouteAmount`]).
+    /// millionths ([`contra_vm::Action::RouteAmount`]).
     pub(crate) fn set_route_amount(&mut self, key: i32, micros: i32) {
         let v = micros as f32 / 1e6;
         let mut any = false;

@@ -6,7 +6,7 @@
 import os
 from pathlib import Path
 
-SCRATCH = os.environ.get("ORACLE_SCRATCH", str(Path.home() / ".cache/kontra-oracle"))
+SCRATCH = os.environ.get("ORACLE_SCRATCH", str(Path.home() / ".cache/contra-oracle"))
 import sys
 from pathlib import Path
 

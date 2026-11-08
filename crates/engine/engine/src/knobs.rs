@@ -1,7 +1,7 @@
 //! Script knobs: a 0..=1 setting through the translator's law into an
 //! effect control or an LFO setting (`EnginePar::Knob`).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use std::sync::Arc;
 

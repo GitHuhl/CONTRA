@@ -2,8 +2,8 @@
 //! width mixes the channels toward their mean.
 #![cfg(test)]
 
-use kontra_dsp_reverb::{Combs, Settings};
-use kontra_law::CombNetwork;
+use contra_dsp_reverb::{Combs, Settings};
+use contra_law::CombNetwork;
 
 static LAW: CombNetwork = CombNetwork {
     combs_ms: [25.3, 26.9, 29.0, 30.7, 32.2, 33.8, 35.3, 36.7],

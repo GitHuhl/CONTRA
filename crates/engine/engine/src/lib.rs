@@ -39,30 +39,30 @@ mod voice_rack;
 
 use std::sync::Arc;
 
-use kontra_ledger::{group_masks, ledger, queue};
-use kontra_racks::group_racks;
+use contra_ledger::{group_masks, ledger, queue};
+use contra_racks::group_racks;
 
-use kontra_plan as plan;
+use contra_plan as plan;
 
-use kontra_stream::StreamClient;
-use kontra_time::Frames;
-use kontra_voice::{KeyUp, Voice, VoiceStart};
+use contra_stream::StreamClient;
+use contra_time::Frames;
+use contra_voice::{KeyUp, Voice, VoiceStart};
 
 pub use fx_types::{EffectRequest, Prepared};
 pub use inspect::{
     BusRouteObservation, EqRouteObservation, RouteObservation, SharedEffectObservation,
     VoiceEffectObservation, VoiceObservation,
 };
-pub use kontra_effects::response;
-pub use kontra_effects::stem;
-pub use kontra_events::{Event, HostNote, HostPattern, NoteExpression};
-pub use kontra_ir as ir;
-pub use kontra_plan::{EnginePar, EnginePars, Recall, Saved, files};
-pub use kontra_script_ui::FIRST_FONT;
-pub use kontra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
-pub use kontra_time::SampleTime;
-pub use kontra_vm::{Action, Faults, Op, Program, Text, Vm};
-pub use kontra_voice::{Ahdsr, Loop, Region};
+pub use contra_effects::response;
+pub use contra_effects::stem;
+pub use contra_events::{Event, HostNote, HostPattern, NoteExpression};
+pub use contra_ir as ir;
+pub use contra_plan::{EnginePar, EnginePars, Recall, Saved, files};
+pub use contra_script_ui::FIRST_FONT;
+pub use contra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
+pub use contra_time::SampleTime;
+pub use contra_vm::{Action, Faults, Op, Program, Text, Vm};
+pub use contra_voice::{Ahdsr, Loop, Region};
 pub use ledger::NoteRef;
 pub use pgs::PgsBudget;
 pub use plan::{
@@ -77,13 +77,13 @@ pub use transport::Play;
 
 use buses::BusState;
 use group_masks::GroupMasks;
-use kontra_behaviour::Behaviour;
+use contra_behaviour::Behaviour;
 use ledger::{Ledger, Note, Origin, Releases};
 use queue::{EventQueue, Work};
 use script::{Kind, Running};
 
-use kontra_effects::MAX_SPAN;
-use kontra_effects::matrix as effects;
+use contra_effects::MAX_SPAN;
+use contra_effects::matrix as effects;
 /// A voice ended early outside a voice group fades this long, a cut that never clicks.
 const FADE_SECONDS: f64 = 0.010;
 
@@ -160,7 +160,7 @@ pub struct Engine {
     ended: Vec<HostNote>,
     stats: Stats,
     /// Each script slot's state; taken out while its callback runs.
-    vms: Box<[Option<kontra_vm::Vm>]>,
+    vms: Box<[Option<contra_vm::Vm>]>,
     running: Running,
     /// Notes through every script slot, starting once the callback returns.
     pending: Vec<NoteRef>,
@@ -185,7 +185,7 @@ pub struct Engine {
     /// True while `new` runs the scripts' `init`, off the audio thread.
     building: bool,
     /// Array files scripts asked to load or save, for the control side.
-    files: Vec<kontra_plan::files::FileRequest>,
+    files: Vec<contra_plan::files::FileRequest>,
     /// Calls per action the engine does not implement yet, by action id.
     unhandled: Box<[u32]>,
     called: Box<[u32]>,
@@ -196,7 +196,7 @@ pub struct Engine {
     expression: f32,
     /// How the output's pan turns the far channel down.
     balance: ir::Balance,
-    output: kontra_dsp::core::Fader,
+    output: contra_dsp::core::Fader,
     /// The instrument insert rack, on the final mix.
     rack: racks::Rack,
     /// One single-slot rack per send slot, its input, then the main rack.
@@ -204,7 +204,7 @@ pub struct Engine {
     taps: Box<[Box<[[f32; 2]]>]>,
     main: racks::Rack,
     ids: callbacks::Ids,
-    ui: kontra_script_ui::Store,
+    ui: contra_script_ui::Store,
     /// The picture names scripts asked a font id for, by script slot, in
     /// the order asked.
     /// The plan's groups as scripts have changed them.
@@ -287,11 +287,11 @@ impl Engine {
             .scripts
             .iter()
             .map(|s| {
-Some(kontra_vm::Vm::new(&s.program, s.coroutines))
+Some(contra_vm::Vm::new(&s.program, s.coroutines))
             })
             .collect();
         let timers = vec![[None; 2]; plan.scripts.len()].into();
-        let ui = kontra_script_ui::Store::new(plan.scripts.iter().map(|s| s.controls.cells.len()));
+        let ui = contra_script_ui::Store::new(plan.scripts.iter().map(|s| s.controls.cells.len()));
         let mut engine = Self {
             #[cfg(feature = "trace")]
             trace: _trace_capacity.map(trace::Trace::new),
@@ -336,14 +336,14 @@ Some(kontra_vm::Vm::new(&s.program, s.coroutines))
             recalled: Box::new([]),
             building: true,
             files: Vec::with_capacity(script_files::FILES),
-            unhandled: vec![0; kontra_vm::Action::all().len()].into(),
-            called: vec![0; kontra_vm::Action::all().len()].into(),
+            unhandled: vec![0; contra_vm::Action::all().len()].into(),
+            called: vec![0; contra_vm::Action::all().len()].into(),
             ui,
             ids: callbacks::Ids::START,
             instrument: Level::panned(ir::common::DB_GAIN.eval_unclamped(out.volume_db), out.pan),
             expression: 1.0,
             balance: out.balance,
-            output: kontra_dsp::core::Fader::new(rate, out.volume_tau_ms, out.pan_slew_ms),
+            output: contra_dsp::core::Fader::new(rate, out.volume_tau_ms, out.pan_slew_ms),
             rack,
             sends,
             taps,
@@ -625,7 +625,7 @@ Some(kontra_vm::Vm::new(&s.program, s.coroutines))
         let fade = self.fade_frames();
         let mut hits = std::mem::take(&mut self.hits);
         self.notes.matching(pattern, &mut hits);
-        self.fade_notes(&hits, fade, kontra_voice::FadeTarget::End);
+        self.fade_notes(&hits, fade, contra_voice::FadeTarget::End);
         self.hits = hits;
     }
 

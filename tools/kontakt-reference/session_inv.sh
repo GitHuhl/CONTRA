@@ -6,7 +6,7 @@ here=$(cd "$(dirname "$0")" && pwd); . "$here/session_lib.sh"; . "$here/gui_lib.
 export KONTAKT_RES=1600x1400 DISPLAY=:77
 OUT=$W/log/session_inv.txt; : >"$OUT"
 sess_begin
-export KONTAKT_NO_VIEW_FIX=1 KONTRA_NO_STATE_CHECK="GUI edited (Inverter FX added, taller desktop); calibration before and after on the unedited instrument"
+export KONTAKT_NO_VIEW_FIX=1 CONTRA_NO_STATE_CHECK="GUI edited (Inverter FX added, taller desktop); calibration before and after on the unedited instrument"
 "$here/kontakt.sh" start "$CAL" || { say "start failed"; exit 1; }
 two() { rec "$1_a" inv_note 6 1; rec "$1_b" inv_note 6 1; }
 setfs() { setf "$1" "$2" "$3"; shot "inv_$4"; }

@@ -3,9 +3,9 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 
-use kontra_events::Event;
-use kontra_time::SampleTime;
-use kontra_vm::CoId;
+use contra_events::Event;
+use contra_time::SampleTime;
+use contra_vm::CoId;
 
 use crate::NoteRef;
 

@@ -3,8 +3,8 @@
 //! 0x140d01f20, via v2 sampler-kontakt effects/mod.rs) and knob laws.
 //! Group racks only: the engine runs these on each voice.
 
-use kontra_format::Notes;
-use kontra_ir as ir;
+use contra_format::Notes;
+use contra_ir as ir;
 
 /// Lo-Fi's controls at or above this are off (native threshold 0x3f7fff58).
 const ACTIVE_BELOW: f32 = f32::from_bits(0x3f7f_ff58);

@@ -10,7 +10,7 @@ use crate::{RATE, midi, scenario::Input};
 
 fn tool_dir() -> Result<PathBuf> {
     let mut choices = Vec::new();
-    if let Some(p) = std::env::var_os("KONTRA_ORACLE_DIR") {
+    if let Some(p) = std::env::var_os("CONTRA_ORACLE_DIR") {
         choices.push(PathBuf::from(p));
     }
     if let Ok(cwd) = std::env::current_dir() {
@@ -18,16 +18,16 @@ fn tool_dir() -> Result<PathBuf> {
     }
     choices.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../oracle"));
     choices.push(PathBuf::from(
-        "/data/dev/projects/AudioPlugins/KONTRA/tools/oracle",
+        "/data/dev/projects/AudioPlugins/CONTRA/tools/oracle",
     ));
     choices
         .into_iter()
         .find(|p| p.join("capture.py").is_file() && p.join("compare.py").is_file())
-        .context("cannot find tools/oracle; set KONTRA_ORACLE_DIR")
+        .context("cannot find tools/oracle; set CONTRA_ORACLE_DIR")
 }
 
 fn directory() -> Result<PathBuf> {
-    let root = std::env::var_os("KONTRA_INSPECT_ORACLE_DIR")
+    let root = std::env::var_os("CONTRA_INSPECT_ORACLE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/data/dev/workspace/PluginArtifacts/inspect-oracle"));
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;

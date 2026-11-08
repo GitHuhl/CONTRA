@@ -15,7 +15,7 @@ pub mod readout;
 
 pub use controls::Controls;
 
-use kontra_vm::{Action, HostCall, HostValue, Text};
+use contra_vm::{Action, HostCall, HostValue, Text};
 
 /// One control's number parameters, by parameter id, in the order set.
 type Pars = Vec<(i32, i32)>;

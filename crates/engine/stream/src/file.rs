@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
@@ -620,7 +620,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("kontra-stream-file-tests");
+        let dir = std::env::temp_dir().join("contra-stream-file-tests");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();

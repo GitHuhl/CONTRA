@@ -1,6 +1,6 @@
 -- Measured probe: the saved Hz, octaves and dB a script's EQ knobs leave in the 1/2/3-band EQ.
 -- Input: ANALOG STRINGS.nki, instrument insert 0 = 3-band EQ. For each x every band's FREQ,
--- BW and GAIN are set, the instrument saved, and the saves read back with KONTRA's parser.
+-- BW and GAIN are set, the instrument saved, and the saves read back with CONTRA's parser.
 -- Result (Kontakt 8.13.1, 2026-10-28), every band alike, x = 0, .1, .25, .5, .75, .9, 1:
 -- Hz 20, 39.905, 112.468, 632.456, 3556.56, 10023.7, 20000 = 20 * 1000^x; octaves 0.333, 0.6, 1,
 -- 1.667, 2.333, 2.733, 3 = 1/3 + 8x/3; dB -18, -14.4, -9, 0, 9, 14.4, 18 = -18 + 36x.

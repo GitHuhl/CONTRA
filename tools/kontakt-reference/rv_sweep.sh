@@ -3,7 +3,7 @@
 # Needs $W/wav/dry.wav = same scenario with the reverb bypassed.
 # Usage: rv_sweep.sh TAG FIELDX FIELDY VALUE...   types each VALUE (or `keep`), records a 14 s note, prints reverb_report; deletes the WAV.
 set -euo pipefail
-here=$(cd "$(dirname "$0")" && pwd); W=${KONTRA_REFERENCE_DIR:-/home/derpcat/.cache/kontra-reference}; export DISPLAY=:77
+here=$(cd "$(dirname "$0")" && pwd); W=${CONTRA_REFERENCE_DIR:-/home/derpcat/.cache/contra-reference}; export DISPLAY=:77
 python3 "$here/scenario.py" "$here/scenarios/reverb_burst.txt" "$W/rb.mid"
 tag=$1; fx=$2; fy=$3; shift 3
 for v in "$@"; do

@@ -1,26 +1,26 @@
 //! Loads instruments and builds each KSP script's UI tree after `on init`;
 //! prints load time, tree build time and what the tree holds, per file.
-//! `cargo run --release -p kontra-host --example ui_tree -- <file>...`
+//! `cargo run --release -p contra-host --example ui_tree -- <file>...`
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use kontra_engine::Engine;
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::Engine;
+use contra_stream::{Store, StoreConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in std::env::args_os().skip(1) {
         let path = std::path::PathBuf::from(path);
         let t = Instant::now();
         let mut store = Store::new(StoreConfig::DEFAULT)?;
-        let loaded = kontra_host::instrument::load(&path, 48_000, &mut store)?;
+        let loaded = contra_host::instrument::load(&path, 48_000, &mut store)?;
         let mut engine = Engine::new(Arc::new(loaded.plan), store.client(), 48_000);
         let init = t.elapsed();
         for (slot, face) in loaded.faces.iter().enumerate() {
             let Some(face) = face else { continue };
             let t = Instant::now();
-            let tree = kontra_host::ui::interface(face, slot as u8, &engine, &|_| None);
+            let tree = contra_host::ui::interface(face, slot as u8, &engine, &|_| None);
             let built = t.elapsed();
             let tree = match tree {
                 Ok(tree) => tree,
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             let visible = (0..tree.widgets.len())
-                .filter(|&n| tree.visible(kontra_ui_model::WidgetRef(n)))
+                .filter(|&n| tree.visible(contra_ui_model::WidgetRef(n)))
                 .count();
             let mut gaps = BTreeMap::<&str, usize>::new();
             for u in &tree.unsupported {
@@ -39,8 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut gaps: Vec<_> = gaps.into_iter().collect();
             gaps.sort_by_key(|g| std::cmp::Reverse(g.1));
             gaps.truncate(6);
-            if std::env::var_os("KONTRA_UI_GAPS").is_some() {
-                if let Ok(id) = std::env::var("KONTRA_UI_ID") {
+            if std::env::var_os("CONTRA_UI_GAPS").is_some() {
+                if let Ok(id) = std::env::var("CONTRA_UI_ID") {
                     for w in tree
                         .widgets
                         .iter()
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             // Idle frames, then one knob moved per frame.
-            let mut live = kontra_host::ui::Live::new(face, slot as u8, &engine, &|_| None)?;
+            let mut live = contra_host::ui::Live::new(face, slot as u8, &engine, &|_| None)?;
             let mut block = vec![[0f32; 2]; 512];
             let (mut idle, mut spent) = (0, std::time::Duration::ZERO);
             let mut last = None;
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if frame >= 10 {
                     spent += t.elapsed();
                 }
-                if std::env::var_os("KONTRA_UI_IDLE").is_some() && !changed.is_empty() {
+                if std::env::var_os("CONTRA_UI_IDLE").is_some() && !changed.is_empty() {
                     let names: Vec<_> = changed
                         .iter()
                         .filter_map(|w| live.tree.widgets.get(w.0))
@@ -90,10 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Listeners and waits run in the first blocks (Morphology closes
             // its source drawers there): what a settled editor shows.
             let settled = (0..live.tree.widgets.len())
-                .filter(|&n| live.tree.visible(kontra_ui_model::WidgetRef(n)))
+                .filter(|&n| live.tree.visible(contra_ui_model::WidgetRef(n)))
                 .count();
             let knob = tree.widgets.iter().find_map(|w| match w.kind {
-                kontra_ui_model::Kind::Knob { .. } | kontra_ui_model::Kind::Slider { .. }
+                contra_ui_model::Kind::Knob { .. } | contra_ui_model::Kind::Slider { .. }
                     if !w.hidden =>
                 {
                     w.source_id
@@ -117,9 +117,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             // The sustain pedal down, then up: what a controller callback lights.
             let pedal = [127, 0].map(|v| {
-                let cc = kontra_engine::Timed {
-                    at: kontra_engine::SampleTime(0),
-                    body: kontra_engine::Event::midi1(0xB0, 64, v),
+                let cc = contra_engine::Timed {
+                    at: contra_engine::SampleTime(0),
+                    body: contra_engine::Event::midi1(0xB0, 64, v),
                 };
                 engine.process(&mut block, &[cc]);
                 let mut changed = std::collections::BTreeSet::new();
@@ -140,8 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .enumerate()
                 .filter(|(n, w)| {
-                    matches!(w.kind, kontra_ui_model::Kind::Switch)
-                        && live.tree.visible(kontra_ui_model::WidgetRef(*n))
+                    matches!(w.kind, contra_ui_model::Kind::Switch)
+                        && live.tree.visible(contra_ui_model::WidgetRef(*n))
                 })
                 .filter_map(|(_, w)| w.source_id)
                 .collect();

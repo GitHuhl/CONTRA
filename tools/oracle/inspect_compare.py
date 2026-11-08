@@ -10,7 +10,7 @@ import numpy as np
 
 
 def module(path):
-    spec = importlib.util.spec_from_file_location("kontra_compare", path)
+    spec = importlib.util.spec_from_file_location("contra_compare", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -89,8 +89,8 @@ def main():
         npk, vpk = db(nm["peak"]), db(vm["peak"])
         print(json.dumps({"status":"ok", "alignment":"first onset, 10 ms envelope bins; 2 s after each onset",
             "native_onset_ms": no[0] * 10, "v3_onset_ms": vo[0] * 10,
-            "comparison":{"kontakt_rms_db":nr, "kontra_rms_db":vr, "level_diff_db":delta(nr,vr),
-                          "kontakt_peak_db":npk, "kontra_peak_db":vpk, "peak_diff_db":delta(npk,vpk)},
+            "comparison":{"kontakt_rms_db":nr, "contra_rms_db":vr, "level_diff_db":delta(nr,vr),
+                          "kontakt_peak_db":npk, "contra_peak_db":vpk, "peak_diff_db":delta(npk,vpk)},
             "native_metrics":nm, "v3_metrics":vm,
             "native_minus_v3":{"octave_band_rms_db":[delta(a,b) for a,b in zip(nm["octave_band_rms_dbfs"], vm["octave_band_rms_dbfs"])]},
             "octave_centers_hz":[31.25,62.5,125,250,500,1000,2000,4000,8000,16000],

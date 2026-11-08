@@ -2,13 +2,13 @@
 //! envelope stage times, the attack curve, levels, and the text a knob shows.
 //! Each is a named [`Law`]; the law evaluator does the maths.
 
-use kontra_ir::{self as ir, Law};
-use kontra_script_ui::readout::{Readout, write};
-use kontra_vm::Text;
+use contra_ir::{self as ir, Law};
+use contra_script_ui::readout::{Readout, write};
+use contra_vm::Text;
 
 use crate::{EnginePar, EnginePars, Group, source};
 
-pub use kontra_ir::common::{
+pub use contra_ir::common::{
     ATTACK_CURVE, BIPOLAR, CUBE, LFO_FADE_IN, SIGNED_CUBE, SQUARE, STAGE_10S, STAGE_15S, STAGE_25S,
 };
 

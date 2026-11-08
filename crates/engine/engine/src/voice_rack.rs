@@ -1,12 +1,12 @@
-//! The engine's side of the per-voice racks (kontra-racks): building and
+//! The engine's side of the per-voice racks (contra-racks): building and
 //! tuning each voice's units for its note.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::ledger::Note;
 use crate::modulators::Age;
 use crate::{Engine, Zone};
-pub(crate) use kontra_racks::voice_rack::{
+pub(crate) use contra_racks::voice_rack::{
     Kind, MIN_DAMPING, Ramp, Tune, Unit, process, template, tune_unit,
 };
 

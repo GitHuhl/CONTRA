@@ -1,14 +1,14 @@
 //! Loads an instrument, plays one note and writes what the engine renders to
 //! a WAV file, for listening and A/B against other samplers. Prints load time,
 //! gaps and the script actions the engine does not answer yet.
-//! `cargo run --release -p kontra-host --example render -- <file> <key> <out.wav>`
+//! `cargo run --release -p contra-host --example render -- <file> <key> <out.wav>`
 //! `<file>` is a Kontakt instrument.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, SampleTime, Timed};
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, SampleTime, Timed};
+use contra_stream::{Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 
@@ -26,9 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optional: the mod wheel moves to this value one second in.
     let wheel: Option<u8> = args.next().and_then(|a| a.to_str()?.parse().ok());
 
-    // KONTRA_SCRIPT_DUMP=<dir> writes each script's source, data and saved values there.
-    if let Some(dir) = std::env::var_os("KONTRA_SCRIPT_DUMP") {
-        for (n, s) in kontra_host::instrument::read(&path)?
+    // CONTRA_SCRIPT_DUMP=<dir> writes each script's source, data and saved values there.
+    if let Some(dir) = std::env::var_os("CONTRA_SCRIPT_DUMP") {
+        for (n, s) in contra_host::instrument::read(&path)?
             .scripts
             .iter()
             .enumerate()
@@ -52,16 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  script {n} data files: {data:?}");
         }
     }
-    // KONTRA_SAMPLES=<part of a name>: those samples' peaks, decoded directly.
-    if let Ok(part) = std::env::var("KONTRA_SAMPLES") {
-        let ir = kontra_host::instrument::read(&path)?;
+    // CONTRA_SAMPLES=<part of a name>: those samples' peaks, decoded directly.
+    if let Ok(part) = std::env::var("CONTRA_SAMPLES") {
+        let ir = contra_host::instrument::read(&path)?;
         for s in ir
             .samples
             .iter()
             .filter(|s| s.name.contains(&part))
             .take(12)
         {
-            let Ok((source, fmt)) = kontra_stream::open(s) else {
+            let Ok((source, fmt)) = contra_stream::open(s) else {
                 println!("  {}: does not open", s.name);
                 continue;
             };
@@ -85,10 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let t = std::time::Instant::now();
     let mut store = Store::new(StoreConfig::DEFAULT)?;
-    let mut ir = kontra_host::instrument::read(&path)?;
-    // KONTRA_SCRIPT_SOURCE=<dir>: script n's source is replaced by <dir>/n.ksp
+    let mut ir = contra_host::instrument::read(&path)?;
+    // CONTRA_SCRIPT_SOURCE=<dir>: script n's source is replaced by <dir>/n.ksp
     // when that file exists (edit a dump, add messages, render again).
-    if let Some(dir) = std::env::var_os("KONTRA_SCRIPT_SOURCE") {
+    if let Some(dir) = std::env::var_os("CONTRA_SCRIPT_SOURCE") {
         for (n, s) in ir.scripts.iter_mut().enumerate() {
             if let Ok(source) =
                 std::fs::read_to_string(std::path::Path::new(&dir).join(format!("{n}.ksp")))
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // <dir>/append.ksp plays as one more script slot (a probe the oracle runs too).
         if let Ok(source) = std::fs::read_to_string(std::path::Path::new(&dir).join("append.ksp")) {
-            ir.scripts.push(kontra_engine::ir::Script {
+            ir.scripts.push(contra_engine::ir::Script {
                 name: "append".into(),
                 slot: ir.scripts.len(),
                 source,
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let scripts: Vec<String> = ir.scripts.iter().map(|s| s.source.clone()).collect();
-    let loaded = kontra_host::instrument::build(ir, RATE, &mut store);
+    let loaded = contra_host::instrument::build(ir, RATE, &mut store);
     println!(
         "{}: {} zones, loaded in {:?}",
         loaded.name,
@@ -155,8 +155,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (what, n) in kinds.iter().take(8) {
         println!("    {n}× {what}");
     }
-    // KONTRA_FX=1 prints the effect racks that reach the voices.
-    if std::env::var_os("KONTRA_FX").is_some() {
+    // CONTRA_FX=1 prints the effect racks that reach the voices.
+    if std::env::var_os("CONTRA_FX").is_some() {
         let plan = &loaded.plan;
         println!("instrument inserts {:?}", plan.inserts);
         println!("sends {:?}", plan.sends);
@@ -187,8 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    // KONTRA_MODS=1 prints each distinct group modulation.
-    if std::env::var_os("KONTRA_MODS").is_some() {
+    // CONTRA_MODS=1 prints each distinct group modulation.
+    if std::env::var_os("CONTRA_MODS").is_some() {
         let mut seen = Vec::new();
         for m in loaded.plan.groups.iter().flat_map(|g| &g.mods) {
             if !seen.contains(&m.kind) {
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if let Ok(zone) = std::env::var("KONTRA_ZONE") {
+    if let Ok(zone) = std::env::var("CONTRA_ZONE") {
         let plan = &loaded.plan;
         let z = zone.parse::<usize>().ok().and_then(|z| plan.zones.get(z));
         if let Some((z, g)) = z.and_then(|z| Some((z, plan.groups.get(z.group as usize)?))) {
@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let stream = store.client();
-    if let Some(z) = std::env::var("KONTRA_ZONE")
+    if let Some(z) = std::env::var("CONTRA_ZONE")
         .ok()
         .and_then(|z| loaded.plan.zones.get(z.parse::<usize>().ok()?))
     {
@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = Arc::new(loaded.plan);
     let mut engine = Engine::new(Arc::clone(&plan), store.client(), RATE);
     println!("init: unanswered {:?}", engine.unhandled_actions());
-    if std::env::var_os("KONTRA_MODS").is_some() {
+    if std::env::var_os("CONTRA_MODS").is_some() {
         let mut seen = Vec::new();
         for m in engine.mods().filter(|m| !m.bypass) {
             let line = format!("{} {:?}", m.name, m.kind);
@@ -271,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     // The program as its scripts leave it, without playing it.
-    if std::env::var_os("KONTRA_INIT_ONLY").is_some() {
+    if std::env::var_os("CONTRA_INIT_ONLY").is_some() {
         return Ok(());
     }
     let (filtered, cutoffs) = engine.voice_filters();
@@ -300,13 +300,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine.process(&mut silent, &[]);
         install_requests(&mut engine, &plan);
     }
-    // KONTRA_CONTROL=name=value,...: each script control (a KSP one named
+    // CONTRA_CONTROL=name=value,...: each script control (a KSP one named
     // without its type prefix) moves there
     // in turn and its callbacks run, as a user's edit would; its effect loads
     // install over a quarter second. "name=value@1.5" moves it 1.5 s into
     // the render instead, at the start of that block.
     let mut timed_controls = Vec::new();
-    for entry in std::env::var("KONTRA_CONTROL")
+    for entry in std::env::var("CONTRA_CONTROL")
         .iter()
         .flat_map(|s| s.split(','))
     {
@@ -342,10 +342,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // By default the oracle's note: velocity 100 held 1.5 s (librender2.py: 1440 ticks at
     // 480 PPQ and 120 bpm), so a comparison never sets its release against a held note.
-    // KONTRA_VELOCITY (1..=127) and KONTRA_HOLD (seconds) override it.
+    // CONTRA_VELOCITY (1..=127) and CONTRA_HOLD (seconds) override it.
     let env = |name: &str| std::env::var(name).ok()?.parse::<f32>().ok();
-    let velocity = env("KONTRA_VELOCITY").unwrap_or(100.0) / 127.0;
-    let hold_s = env("KONTRA_HOLD").unwrap_or(1.5);
+    let velocity = env("CONTRA_VELOCITY").unwrap_or(100.0) / 127.0;
+    let hold_s = env("CONTRA_HOLD").unwrap_or(1.5);
     let hold = (hold_s * RATE as f32) as usize / 512;
     let on = Timed {
         at: SampleTime(0),
@@ -366,9 +366,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         at: SampleTime(0),
         body: Event::NoteOff(pattern),
     };
-    let live = std::env::var_os("KONTRA_LIVE").is_some();
-    // KONTRA_WATCH=102,104: the controllers the block lines print (110, 111).
-    let watched: Vec<usize> = std::env::var("KONTRA_WATCH")
+    let live = std::env::var_os("CONTRA_LIVE").is_some();
+    // CONTRA_WATCH=102,104: the controllers the block lines print (110, 111).
+    let watched: Vec<usize> = std::env::var("CONTRA_WATCH")
         .unwrap_or_else(|_| "110,111".into())
         .split(',')
         .filter_map(|c| c.trim().parse().ok())
@@ -377,8 +377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut block = vec![[0.0f32; 2]; 512];
     // Time inside `Engine::process` alone (not disk waits): the render's CPU.
     let mut busy = std::time::Duration::ZERO;
-    // KONTRA_BEND=0: pitch bend (its high 7 bits) sent with the wheel at 1 s.
-    let bend = std::env::var("KONTRA_BEND")
+    // CONTRA_BEND=0: pitch bend (its high 7 bits) sent with the wheel at 1 s.
+    let bend = std::env::var("CONTRA_BEND")
         .ok()
         .and_then(|b| b.parse::<u32>().ok());
     let cc: Vec<_> = (wheel.map(|v| 0x20B0_0100 | u32::from(v)).into_iter())
@@ -388,10 +388,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             body: Event::Ump([word, 0]),
         })
         .collect();
-    // KONTRA_CC="11=127,1=100": controllers sent with the note-on;
+    // CONTRA_CC="11=127,1=100": controllers sent with the note-on;
     // "7:64@1.5" (or "7=64@1.5") sends one 1.5 s into the render, on its frame;
     // "pb:16383@1" is a 14-bit pitch bend.
-    let mut rides: Vec<(usize, Event)> = std::env::var("KONTRA_CC")
+    let mut rides: Vec<(usize, Event)> = std::env::var("CONTRA_CC")
         .unwrap_or_default()
         .split(',')
         .filter_map(|entry| {
@@ -406,9 +406,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(((at * RATE as f32) as usize, Event::Ump([word, 0])))
         })
         .collect();
-    // KONTRA_REPEATS=62:16:70:45: after the note, 16 notes on key 62, one
+    // CONTRA_REPEATS=62:16:70:45: after the note, 16 notes on key 62, one
     // every 70 ms from 0.1 s, each 45 ms long (a fast repeat).
-    if let Some([k, count, period, len]) = std::env::var("KONTRA_REPEATS").ok().and_then(|r| {
+    if let Some([k, count, period, len]) = std::env::var("CONTRA_REPEATS").ok().and_then(|r| {
         let v: Vec<u32> = r.split(':').filter_map(|x| x.parse().ok()).collect();
         <[u32; 4]>::try_from(v).ok()
     }) {
@@ -442,16 +442,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     first.push(on);
-    // KONTRA_CHORDS=1: instead of the one note, 64 steps of 4-note chords
+    // CONTRA_CHORDS=1: instead of the one note, 64 steps of 4-note chords
     // 128 ms apart across the keyboard, each held two steps (contracts C2/C8;
-    // with KONTRA_LIVE=1 and a cold page cache, late pages show as missing).
+    // with CONTRA_LIVE=1 and a cold page cache, late pages show as missing).
     let cc_off: Vec<_> = cc.iter().copied().chain([off]).collect();
-    let chords = std::env::var_os("KONTRA_CHORDS").is_some();
+    let chords = std::env::var_os("CONTRA_CHORDS").is_some();
     let hold = if chords { 64 * 12 + 24 } else { hold };
     let keys = |step: usize| (0..4).map(move |i| 36 + ((step * 7 + i * 5) % 60) as u8);
-    // KONTRA_TAIL: seconds rendered after the key-up (2); the voices left
+    // CONTRA_TAIL: seconds rendered after the key-up (2); the voices left
     // at the end are printed with their state.
-    let tail = env("KONTRA_TAIL").unwrap_or(2.0);
+    let tail = env("CONTRA_TAIL").unwrap_or(2.0);
     let tail_blocks = (tail * RATE as f32 / 512.0) as usize;
     for n in 0..(hold + tail_blocks) {
         let step = n / 12;
@@ -495,7 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .chain(input.iter().copied())
             .collect();
         let input = ridden.as_slice();
-        // A bounce waits for the disk; KONTRA_LIVE=1 plays in real time
+        // A bounce waits for the disk; CONTRA_LIVE=1 plays in real time
         // without waiting, as a host would, so late pages show as missing frames.
         let started = std::time::Instant::now();
         if !live {
@@ -625,10 +625,10 @@ fn control(plan: &Plan, scripts: &[String], name: &str, value: &str) -> Option<(
         .enumerate()
         .find_map(|(n, (_, source))| {
             let slot = u8::try_from(n).ok()?;
-            let compiled = kontra_ksp::compile(source, &[]).ok()?;
+            let compiled = contra_ksp::compile(source, &[]).ok()?;
             let bare = |v: &str| v.trim_start_matches(['$', '%', '~', '?', '@', '!']) == name;
             let at = compiled.variables.iter().position(|v| bare(&v.name))?;
-            let id = kontra_ksp::FIRST_UI_ID + i32::try_from(at).ok()?;
+            let id = contra_ksp::FIRST_UI_ID + i32::try_from(at).ok()?;
             Some((slot, id, value.parse().ok()?))
         })
 }
@@ -639,7 +639,7 @@ fn install_requests(engine: &mut Engine, plan: &Plan) {
     let mut asked = Vec::new();
     engine.drain_requests(|r| asked.push(r));
     for r in asked {
-        if std::env::var_os("KONTRA_FX").is_some() {
+        if std::env::var_os("CONTRA_FX").is_some() {
             let kind = r.effect.as_ref().map(|e| &e.kind);
             println!(
                 "installs {:?} slot {} type {:?}: {kind:?}",

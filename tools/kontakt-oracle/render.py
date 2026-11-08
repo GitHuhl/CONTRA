@@ -5,7 +5,7 @@
 
 The probe builds an instrument, attaches a KSP script that plays notes on a timer, and writes
 {"ready":true} to ORACLE_OUT when playback has started (then {"done":true} is not needed here).
-Kontakt's output is forced onto a private PipeWire null sink (`kontra_ref`, created if missing, so
+Kontakt's output is forced onto a private PipeWire null sink (`contra_ref`, created if missing, so
 the user's speakers/DAC are never used); the recording is that sink's monitor, 48 kHz float stereo.
 Kontakt is killed afterwards. One Kontakt session at a time (same guard as dump.py).
 """
@@ -24,7 +24,7 @@ spec.loader.exec_module(dump)
 sys.path.insert(0, str(HERE.parent / "oracle"))
 import slot  # noqa: E402  (oracle-slot environment; see tools/oracle/slot.py)
 
-SINK = slot.sink("kontra_ref")
+SINK = slot.sink("contra_ref")
 
 
 def sh(*a):
@@ -39,12 +39,12 @@ def click(env, x, y, wait=1.2):
 
 
 def shot(env, name):
-    subprocess.run(["import", "-window", "root", str(Path(os.environ.get("ORACLE_SCRATCH", Path.home() / ".cache/kontra-oracle")) / f"{name}.png")], env=env, check=False)
+    subprocess.run(["import", "-window", "root", str(Path(os.environ.get("ORACLE_SCRATCH", Path.home() / ".cache/contra-oracle")) / f"{name}.png")], env=env, check=False)
 
 
 def select_device(env):
     """The audio device choice does not persist across launches (tools/kontakt-reference/kontakt.sh
-    setup): open File > Options > Audio and pick the kontra_ref output with the harness's coordinates."""
+    setup): open File > Options > Audio and pick the contra_ref output with the harness's coordinates."""
     time.sleep(5)
     shot(env, "r0")
     click(env, 1089, 440)
@@ -70,7 +70,7 @@ def select_device(env):
 
 def trigger(midi=None):
     """One MIDI note into Kontakt (ALSA Midi Through 14:0) starts the probe's KSP sequence."""
-    mid = Path(midi) if midi else slot.work(Path.home() / ".cache/kontra-oracle") / "trigger.mid"
+    mid = Path(midi) if midi else slot.work(Path.home() / ".cache/contra-oracle") / "trigger.mid"
     first = slot.channel_block()[0]  # this session's MIDI channel block (shared ALSA port)
     trk = bytes([0x00, 0x90 | first, 36, 100, 0x60, 0x80 | first, 36, 0, 0x00, 0xFF, 0x2F, 0x00])
     if not midi:
@@ -111,7 +111,7 @@ def main() -> int:
             select_device(env)
         time.sleep(6)
         print(sh("pactl", "list", "short", "sink-inputs"))
-        print([l for l in sh("pw-link", "-o").splitlines() if "kontra" not in l][:20])
+        print([l for l in sh("pw-link", "-o").splitlines() if "contra" not in l][:20])
         ports = [l for l in sh("pw-link", "-o").splitlines() if "Kontakt:output_" in l]
         print("kontakt output ports:", len(ports))
         if slot.active():  # only this session's nodes (ALSO other slots run their own Kontakt)

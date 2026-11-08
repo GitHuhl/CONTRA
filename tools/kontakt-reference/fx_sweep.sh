@@ -3,7 +3,7 @@
 # is white noise with the filter in Group Insert FX slot 1 (edit mode open, cutoff field at 845,562).
 # Usage: fx_sweep.sh TAG HZ... ; writes wav/fx_TAG_HZ.wav ; first record "ref" with Byp on (tag ref, no Hz).
 set -euo pipefail
-here=$(cd "$(dirname "$0")" && pwd); W=${KONTRA_REFERENCE_DIR:-/home/derpcat/.cache/kontra-reference}
+here=$(cd "$(dirname "$0")" && pwd); W=${CONTRA_REFERENCE_DIR:-/home/derpcat/.cache/contra-reference}
 export DISPLAY=:77
 tag=$1; shift
 printf '0.0 on 60 100\n 2.5 off 60\n3.0 end\n' | sed 's/^/ch=1 /;/end/d' > "$W/fx.txt"

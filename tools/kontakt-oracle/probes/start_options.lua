@@ -1,5 +1,5 @@
 -- Probe: how group start options are stored. Sets known start conditions through
--- Kontakt's own API, reads them back, and saves the instrument so KONTRA's reader
+-- Kontakt's own API, reads them back, and saves the instrument so CONTRA's reader
 -- can be checked against the stored fields (crates/sampler-kontakt/tests/native_oracle.rs).
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))

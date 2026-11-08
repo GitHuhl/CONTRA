@@ -1,8 +1,8 @@
-# MUI's mui-baseview at cc4e61e (crates/mui-baseview), retaining KONTRA's
+# MUI's mui-baseview at cc4e61e (crates/mui-baseview), retaining CONTRA's
 # accelerated wheel scrolling, pointer hide/restore and resize cursor,
 # bounded native timing capture and GPU diagnostics. See PATCHES.md.
 [package]
-name = "kontra-native-host"
+name = "contra-native-host"
 version = "0.4.0"
 edition = "2024"
 rust-version = "1.98"

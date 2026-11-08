@@ -32,4 +32,4 @@ fn run(text: &str) {
     );
 }
 
-kontra_macros::vectors!("vectors/*.json", |v| run(v));
+contra_macros::vectors!("vectors/*.json", |v| run(v));

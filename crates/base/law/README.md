@@ -1,4 +1,4 @@
-# kontra-law
+# contra-law
 
 Parameter laws: curves that map a normalized knob position `x` in `0..=1` to a
 parameter value (Hz, dB, ms, ...). A law is applied once when a value arrives, never
@@ -47,7 +47,7 @@ points = [[0.0, 0.0, 0.0], [0.5, 0.2, 2.0], [1.0, 1.0, 0.0]]
 Paths are relative to the file that invokes the macro. There is no directory globbing.
 
 ```rust
-kontra_law::laws!(
+contra_law::laws!(
     SOLID_BUS_COMP => "laws/vendor/solid_bus_comp.toml",
     FILTER_CUTOFF => "laws/vendor/filter_cutoff.toml",
 );

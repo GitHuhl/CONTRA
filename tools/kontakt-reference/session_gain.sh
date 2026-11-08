@@ -6,7 +6,7 @@ here=$(cd "$(dirname "$0")" && pwd); . "$here/session_lib.sh"; . "$here/gui_lib.
 export KONTAKT_RES=1600x1400 DISPLAY=:77
 OUT=$W/log/session_gain.txt; : >"$OUT"
 sess_begin
-export KONTAKT_NO_VIEW_FIX=1 KONTRA_NO_STATE_CHECK="GUI edited (Gainer added, taller desktop); calibration before and after on the unedited instrument"
+export KONTAKT_NO_VIEW_FIX=1 CONTRA_NO_STATE_CHECK="GUI edited (Gainer added, taller desktop); calibration before and after on the unedited instrument"
 "$here/kontakt.sh" start "$CAL" || { say "start failed"; exit 1; }
 classic_group_editor; shot gain_setup0
 addfx 700 580 1041 1; edit_open || say "edit panel did not open"; shot gain_setup1

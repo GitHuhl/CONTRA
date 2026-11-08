@@ -1,5 +1,5 @@
 //! Prints what the reader makes of an instrument: groups, residency, zones,
-//! samples and diagnostics. `cargo run -p kontra-format-kontakt --example inspect -- <file>`
+//! samples and diagnostics. `cargo run -p contra-format-kontakt --example inspect -- <file>`
 
 use std::path::PathBuf;
 
@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: inspect <file>")?
         .into();
     let t = std::time::Instant::now();
-    let i = kontra_format_kontakt::load(&path)?;
+    let i = contra_format_kontakt::load(&path)?;
     let zones = |purged: bool| -> usize {
         i.groups
             .iter()
@@ -36,8 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (m, n) in mods {
         println!("  mod {n}× {m}");
     }
-    // KONTRA_GROUPS=<a>..<b> lists those groups' modulations one by one.
-    if let Some((a, b)) = std::env::var("KONTRA_GROUPS")
+    // CONTRA_GROUPS=<a>..<b> lists those groups' modulations one by one.
+    if let Some((a, b)) = std::env::var("CONTRA_GROUPS")
         .ok()
         .and_then(|r| {
             r.split_once("..")
@@ -54,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    // KONTRA_SCRIPT_DIR=<dir> writes each script's source there.
-    if let Some(dir) = std::env::var_os("KONTRA_SCRIPT_DIR") {
+    // CONTRA_SCRIPT_DIR=<dir> writes each script's source there.
+    if let Some(dir) = std::env::var_os("CONTRA_SCRIPT_DIR") {
         for (n, script) in i.scripts.iter().enumerate() {
             std::fs::write(
                 std::path::Path::new(&dir).join(format!("{n}.txt")),

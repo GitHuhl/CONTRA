@@ -1,6 +1,6 @@
 // Driver-free actual-shim regression:
-// g++ -std=c++17 vendor/moose-vst3/tests/editor_attach.cpp -o /tmp/kontra-editor-attach
-// /tmp/kontra-editor-attach
+// g++ -std=c++17 vendor/moose-vst3/tests/editor_attach.cpp -o /tmp/contra-editor-attach
+// /tmp/contra-editor-attach
 #include "../shim/vst3_shim.cpp"
 
 static int context_token;

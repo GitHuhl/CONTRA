@@ -3,11 +3,11 @@
 This change builds on UI integration `1a1931d` and keeps the MUI lock at
 `822b1922ad1872aaee15b371a31410b0f3580b88`.
 
-The newer framework integration had lost KONTRA's `c96ad3a` X11 visibility
+The newer framework integration had lost CONTRA's `c96ad3a` X11 visibility
 behavior. The vendored native baseview retains the child while discarding its
 former parent ancestry and refreshes cached visibility when reparented to root.
 The application's MUI source patch consumes this baseview through its existing
-local kontra-native-host. Its sibling xim-rs path dependencies are included with
+local contra-native-host. Its sibling xim-rs path dependencies are included with
 upstream licenses and provenance. The generated baseview library lock is ignored;
 the application Cargo.lock remains authoritative for the plugin.
 
@@ -43,7 +43,7 @@ readback or real DAW/macOS/Windows runtime behavior.
 
 ## Shared accessibility and IME bridge
 
-The custom host is now named `kontra-native-host`; the upstream mui-baseview
+The custom host is now named `contra-native-host`; the upstream mui-baseview
 patch is removed. moose-mui keeps its stable dependency alias and `window`
 re-export, while the custom host consumes upstream NativeAccessibility,
 AccessibilityUi and IME helpers at the existing pinned MUI revision.
@@ -60,9 +60,9 @@ only converts physical values to baseview's representation.
 Run the custom host's headless tests with:
 
 ```sh
-cargo test --locked -p kontra-native-host --lib
+cargo test --locked -p contra-native-host --lib
 WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a \
-  cargo test --locked -p kontra-native-host --lib -- --ignored --test-threads=1
+  cargo test --locked -p contra-native-host --lib -- --ignored --test-threads=1
 ```
 
 The ignored lifecycle test uses the production adapter builder and closes it
@@ -81,4 +81,4 @@ larger migration, an application speedup or full framework runtime parity.
 
 ## Optional Kontakt stock artwork
 
-KONTRA looks for installed Kontakt executables in the usual Windows and macOS locations and, on Linux, under Wine prefixes. `KONTAKT_STOCK_EXECUTABLE` overrides discovery. Discovery, extraction and decoding run on a background worker when the editor is created. Decoded artwork is cached in the user's cache directory under the executable's SHA-256; unchanged installs reuse that cache. No artwork is bundled. Unknown or unreadable versions use the vector fallback. Restart the host after changing the override.
+CONTRA looks for installed Kontakt executables in the usual Windows and macOS locations and, on Linux, under Wine prefixes. `KONTAKT_STOCK_EXECUTABLE` overrides discovery. Discovery, extraction and decoding run on a background worker when the editor is created. Decoded artwork is cached in the user's cache directory under the executable's SHA-256; unchanged installs reuse that cache. No artwork is bundled. Unknown or unreadable versions use the vector fallback. Restart the host after changing the override.

@@ -1,8 +1,8 @@
 #![cfg(test)]
 //! KSP source compiled and run on the VM with a recording host.
 
-use kontra_ksp::{CallbackKind, Cells, FIRST_UI_ID, Persistence, Script, compile};
-use kontra_vm::{Action, HostApi, HostCall, HostValue, Instance, Step};
+use contra_ksp::{CallbackKind, Cells, FIRST_UI_ID, Persistence, Script, compile};
+use contra_vm::{Action, HostApi, HostCall, HostValue, Instance, Step};
 
 #[derive(Default)]
 struct Host {
@@ -321,16 +321,16 @@ fn type_and_name_errors() {
     assert_eq!(e.line_column(source), (3, 1));
 }
 
-/// Areia's 275k-line script, from `KONTRA_AREIA_KSP` (a library dump; run
+/// Areia's 275k-line script, from `CONTRA_AREIA_KSP` (a library dump; run
 /// with `--ignored`).
 fn areia() -> String {
-    let path = std::env::var("KONTRA_AREIA_KSP").expect("KONTRA_AREIA_KSP names the script");
+    let path = std::env::var("CONTRA_AREIA_KSP").expect("CONTRA_AREIA_KSP names the script");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
 /// The Areia script compiles.
 #[test]
-#[ignore = "needs the Areia library dump in KONTRA_AREIA_KSP"]
+#[ignore = "needs the Areia library dump in CONTRA_AREIA_KSP"]
 fn areia_compiles() {
     let source = areia();
     let script = compile(&source, &[]).unwrap_or_else(|e| {
@@ -345,7 +345,7 @@ fn areia_compiles() {
 /// Areia's `on init` runs to the end on the VM without faults beyond the
 /// host builtins this recording host leaves unanswered.
 #[test]
-#[ignore = "needs the Areia library dump in KONTRA_AREIA_KSP"]
+#[ignore = "needs the Areia library dump in CONTRA_AREIA_KSP"]
 fn areia_init_runs() {
     let source = areia();
     let started = std::time::Instant::now();

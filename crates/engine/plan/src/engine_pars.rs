@@ -2,7 +2,7 @@
 //! names them by its own ids; the host maps those to [`EnginePar`] once, so the
 //! engine never sees a format's parameter names.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 pub use ir::EnginePar;
 

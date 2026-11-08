@@ -1,12 +1,12 @@
 -- Measured probe: the saved values a script's reverb, limiter, IR-convolution and amp knobs leave.
 -- Input: ANALOG STRINGS.nki, at the slots its own script writes: bus 2 (1026) slot 7 = Reverb,
 -- slot 4 = amp (JMP); instrument insert 4 = Limiter; send 5 = Convolution. For each x the knobs
--- are set, the instrument saved, and the saves read back with KONTRA's parser.
+-- are set, the instrument saved, and the saves read back with CONTRA's parser.
 -- Result (Kontakt 8.13.1, 2026-10-28), x = 0, .1, .25, .5, .75, .9, 1: Reverb predelay ms 0, 1.140,
 -- 4.177, 17.079, 56.927, 113.922, 180 = 180 (e^(4.511x) - 1)/(e^4.511 - 1); size, colour, stereo,
 -- damping saved as x. Limiter input dB -24 + 48x; release ms 10, 16.679, 34.275, 107.654, 329.471,
 -- 641.723, 1000 = 10 + 990 (e^(4.425x) - 1)/(e^4.425 - 1). Amp (0x4d): all six saved as x (not
--- carried by KONTRA). Convolution (send 5, 0x16): no IRC_* write moved any saved field.
+-- carried by CONTRA). Convolution (send 5, 0x16): no IRC_* write moved any saved field.
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))
 local function log(t) out:write(t .. "\n") out:flush() end

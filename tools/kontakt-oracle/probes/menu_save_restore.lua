@@ -2,7 +2,7 @@
 -- Input: ANALOG STRINGS.nki (slot 0 empty; slots 1-4 bypassed). Fresh run selects $m := 30
 -- (entries 10/20/30), $n := 1 (entries -1/0/1) and $p := 30, saves, reloads the save.
 -- Result (Kontakt 8.13.1, 2026-10-29): the save holds "$m 2", "$n 2", "$p 2" (the selected
--- entry's index, read with KONTRA's parser); read_persistent_var restores $m = 30, $n = 1,
+-- entry's index, read with CONTRA's parser); read_persistent_var restores $m = 30, $n = 1,
 -- SELECTED_ITEM_IDX 2. A new menu holds its first entry's value ($p reads 10 before restore).
 -- Group k's tune is case k: st = 0.72 * (written - 500000) / 10000.
 local kt = Kontakt

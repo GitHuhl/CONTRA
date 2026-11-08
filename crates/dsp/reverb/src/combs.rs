@@ -8,8 +8,8 @@
 use crate::Settings;
 use crate::fade::flush;
 use crate::fdn::MAX_PREDELAY_MS;
-use kontra_dsp_core::Biquad;
-use kontra_law::CombNetwork;
+use contra_dsp_core::Biquad;
+use contra_law::CombNetwork;
 
 /// A power-of-two ring with one read head `delay` frames behind its write.
 pub(crate) struct Line {

@@ -57,10 +57,10 @@ its resident images clean, so the next full-size atlas came back empty and those
 images never drew again, while newly seen images did. A 0x0 resolve now reuses
 the persistent atlas. Grep `KONTAKTO patch`. Belongs upstream in MUI.
 
-The atlas fix remains absent from MUI `cc4e61e6` (2026-10-04), so KONTRA
+The atlas fix remains absent from MUI `cc4e61e6` (2026-10-04), so CONTRA
 retains this override when updating the remaining MUI packages.
 
-## 6. KONTRA: recover coarse GPU allocation before fine/present
+## 6. CONTRA: recover coarse GPU allocation before fine/present
 
 `src/lib.rs` now reads the 32-byte GPU bump allocator after coarse work in both
 render entry points. Failed stages grow their buffers and rerun coarse, with

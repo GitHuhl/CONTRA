@@ -12,10 +12,10 @@
 -- Set rule: `if ($s = 0)` writes the value and sets $s := 1. The writer runs it. A load
 -- that restores $s sees 1 and skips it, so the value shown is what the file carried.
 --
--- Run: flock /tmp/kontra-oracle.lock env ORACLE_LUA=<this file> \
+-- Run: flock /tmp/contra-oracle.lock env ORACLE_LUA=<this file> \
 --        python3 tools/kontakt-oracle/dump.py OUT.jsonl
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-pers\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-pers\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local function log(t) out:write(t .. "\n") out:flush() end
 

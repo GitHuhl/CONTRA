@@ -57,7 +57,7 @@ pub enum HostValue {
     Wait(u64),
 }
 
-/// The engine side of every non-pure action, implemented once (`kontra-engine`).
+/// The engine side of every non-pure action, implemented once (`contra-engine`).
 pub trait HostApi {
     fn call(&mut self, call: HostCall<'_>) -> HostValue;
 }

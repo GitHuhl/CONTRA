@@ -1,7 +1,7 @@
 // List functions whose instructions use ALL of the given displacements/constants as
 // memory-operand offsets (find a class's constructor or setter from its field offsets).
 //   RE_SCRIPT=DispScan.java tools/re/query.sh 0x270 0x2b0 0x230
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;

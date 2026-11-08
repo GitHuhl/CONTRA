@@ -1,7 +1,7 @@
 //! A compiled script as the engine runs it: its program, where its
 //! callbacks start, and where its controls' values live.
 
-use kontra_vm::{Program, Text};
+use contra_vm::{Program, Text};
 
 use crate::{EnginePar, EnginePars};
 
@@ -28,11 +28,11 @@ pub struct ScriptPlan {
     pub controls: Controls,
     pub engine_pars: EnginePars,
     /// The translator's law for each reverb control, keyed by its control identity.
-    pub reverb_laws: kontra_ir::ReverbControls<kontra_ir::Law>,
+    pub reverb_laws: contra_ir::ReverbControls<contra_ir::Law>,
     /// The networks [`EnginePar::ReverbNetwork`] picks from, in order.
-    pub reverb_networks: Vec<kontra_ir::Network>,
+    pub reverb_networks: Vec<contra_ir::Network>,
     /// What each [`EnginePar::Knob`] sets, through the translator's law.
-    pub knobs: Vec<(kontra_ir::KnobTarget, kontra_ir::Law)>,
+    pub knobs: Vec<(contra_ir::KnobTarget, contra_ir::Law)>,
     /// Reads the array files the script names by path while it initialises.
     pub files: Option<std::sync::Arc<dyn crate::files::Files>>,
     /// The script's arrays: first cell, whether they are text cells, and
@@ -69,7 +69,7 @@ impl ScriptPlan {
     /// instrument lacks.
     #[must_use]
     pub fn holder(&self, par: EnginePar) -> Holder {
-        use kontra_ir::KnobTarget as K;
+        use contra_ir::KnobTarget as K;
         match par {
             EnginePar::Knob(n) => match self.knobs.get(usize::from(n)).map(|k| k.0) {
                 Some(K::Effect(_) | K::Slot(_) | K::Impulse(_)) => Holder::Slot,
@@ -149,7 +149,7 @@ impl CcLink {
     }
 }
 
-pub use kontra_script_ui::{Controls, LookPars};
+pub use contra_script_ui::{Controls, LookPars};
 
 /// Entry points; a missing callback lets events through unchanged.
 #[derive(Clone, Debug, Default)]

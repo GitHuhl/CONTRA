@@ -10,14 +10,14 @@
 
 use std::sync::Arc;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
-pub(crate) use kontra_effects::summed::{Stage, run, sections};
+pub(crate) use contra_effects::summed::{Stage, run, sections};
 
 use crate::{Engine, MAX_SPAN, group_racks};
 
 use crate::racks::Rack;
-pub(crate) use kontra_racks::chain::{Chain, on_bus};
+pub(crate) use contra_racks::chain::{Chain, on_bus};
 
 impl Engine {
     /// One chain per distinct (sections, bus) the zones' groups carry, less

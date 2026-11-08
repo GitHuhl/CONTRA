@@ -1,10 +1,10 @@
 //! Scans library roots as the browser does and prints each library with its
 //! instrument count, then the scan's time, cold and with the cache.
-//! `cargo run --release -p kontra-host --example library -- <root>...`
+//! `cargo run --release -p contra-host --example library -- <root>...`
 
 use std::time::Instant;
 
-use kontra_library::{Cache, Progress, Root};
+use contra_library::{Cache, Progress, Root};
 
 fn main() {
     let roots: Vec<Root> = std::env::args_os()
@@ -17,7 +17,7 @@ fn main() {
     let mut cache = Cache::default();
     for pass in ["cold", "cached"] {
         let start = Instant::now();
-        let Some(catalog) = kontra_library::scan(&roots, &Progress::default(), &mut cache) else {
+        let Some(catalog) = contra_library::scan(&roots, &Progress::default(), &mut cache) else {
             return;
         };
         let ms = start.elapsed().as_secs_f64() * 1e3;

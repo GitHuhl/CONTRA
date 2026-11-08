@@ -1,7 +1,7 @@
 //! Original GPU-free native regressions. Use an isolated X11 server.
 #![cfg(target_os = "linux")]
 
-use kontra_native_host::baseview as moose_baseview;
+use contra_native_host::baseview as moose_baseview;
 use moose_baseview::{
     Event, EventStatus, HandlerError, ThreadedWindow, Window, WindowEvent, WindowHandler,
     WindowSettings, WindowSize,

@@ -75,7 +75,7 @@ struct Host {
     clap_host_thread_check_t threads{
         [](const clap_host_t* h) { return std::this_thread::get_id() == static_cast<Host*>(h->host_data)->main; },
         [](const clap_host_t*) { return on_audio_thread; }};
-    clap_host_t api{CLAP_VERSION, this, "KONTRA live performance gate", "KONTRA", "", "1",
+    clap_host_t api{CLAP_VERSION, this, "CONTRA live performance gate", "CONTRA", "", "1",
         [](const clap_host_t* h, const char* id)->const void* {
             auto& s = *static_cast<Host*>(h->host_data);
             return std::strcmp(id, CLAP_EXT_THREAD_CHECK) == 0 ? &s.threads : nullptr;
@@ -203,7 +203,7 @@ int main(int argc, char** argv) {
     auto* state = static_cast<const clap_plugin_state_t*>(p->get_extension(p, CLAP_EXT_STATE));
     std::ifstream file(argv[2], std::ios::binary);
     Stream stream{{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()}};
-    const bool load_probe = std::getenv("KONTRA_LOAD_HOST") && std::strcmp(std::getenv("KONTRA_LOAD_HOST"), "1") == 0;
+    const bool load_probe = std::getenv("CONTRA_LOAD_HOST") && std::strcmp(std::getenv("CONTRA_LOAD_HOST"), "1") == 0;
     const auto memory_before = load_probe ? read_memory() : Memory{};
     Memory memory_ready{}; double ready_ms = -1, first_audio_wall_ms = -1; int64_t first_audio_frame = -1;
     const auto load_begin = Clock::now();
@@ -242,19 +242,19 @@ int main(int argc, char** argv) {
     transport.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_IS_PLAYING;
     transport.tempo = 120; process.transport = &transport;
     require(p->activate(p, 48000, block, block), "activate");
-    auto perf = reinterpret_cast<ReadPerf>(dlsym(module, "__kontra_clap_perf"));
+    auto perf = reinterpret_cast<ReadPerf>(dlsym(module, "__contra_clap_perf"));
     std::atomic<bool> ready{false}, finished{false};
     std::vector<double> wall, cpu, steady_wall, steady_cpu; const uint64_t frames = uint64_t(seconds * 48000);
     wall.reserve(frames / block + 1); cpu.reserve(wall.capacity());
     steady_wall.reserve(wall.capacity()); steady_cpu.reserve(wall.capacity());
     FamilyAudio family;
-    if (const char* flag = std::getenv("KONTRA_FAMILY_AUDIO"); flag && std::strcmp(flag, "1") == 0) {
+    if (const char* flag = std::getenv("CONTRA_FAMILY_AUDIO"); flag && std::strcmp(flag, "1") == 0) {
         require(pcm[0].size() == 2, "stereo family fingerprint output");
         family.pcm.resize(frames);
     }
     Io io_start{}, io_end{};
     uint64_t misses = 0, wake_misses = 0, nonfinite = 0, dispatched = 0, audit_epoch_ns = 0; double peak = 0, steady_peak = 0;
-    const auto* diagnostic_env=std::getenv("KONTRA_HOST_SCHED_DIAGNOSTIC");
+    const auto* diagnostic_env=std::getenv("CONTRA_HOST_SCHED_DIAGNOSTIC");
     const bool scheduling_diagnostic=diagnostic_env && std::strcmp(diagnostic_env,"1")==0;
     int scheduler_policy=-1; sched_param scheduler_parameters{};
     // ponytail: retain the first 256 misses; enlarge only if omitted_misses prevents diagnosis.

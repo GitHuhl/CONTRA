@@ -2,13 +2,13 @@
 //! the pointer as a user would. Saves `<out>/<state>-<width>.png` and prints
 //! one JSON line per state: what a frame costs when one is due, and how
 //! many frames its motion runs before the editor is idle again (and stops
-//! drawing). `cargo run --release -p kontra-ui --example app_shot -- <out>`
+//! drawing). `cargo run --release -p contra-ui --example app_shot -- <out>`
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use kontra_ui::app::{
+use contra_ui::app::{
     self, Action, App, Envelope, Filter, Library, Part, PartTab, Pass, Sound, Stats, Zone,
 };
 use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
@@ -110,7 +110,7 @@ fn specimen() -> App {
         level: 0.4,
         report: vec![
             "Areia 16 Violins: the convolution reverb's impulse is not in the library\nThe library names Hall.wav in its reverb, and no file of that name ships with it; the dry signal plays.".into(),
-            "2 Horns KS: script line 912 asks for an unknown effect's display\nget_engine_par_disp on slot 3 names no effect; Kontakt answers an empty text and so does KONTRA.".into(),
+            "2 Horns KS: script line 912 asks for an unknown effect's display\nget_engine_par_disp on slot 3 names no effect; Kontakt answers an empty text and so does CONTRA.".into(),
         ],
         folders: vec!["/data/main/Libraries/Kontakt".into()],
         ..App::default()
@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(&out)?;
     for size in [(900, 600), (1180, 900)] {
         let mut s = Shot {
-            ui: kontra_ui::ui(),
+            ui: contra_ui::ui(),
             app: specimen(),
             size,
             out: out.clone(),

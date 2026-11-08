@@ -1,7 +1,7 @@
 //! A wavetable zone's cycles, band-limited at every level a voice may read.
 
-use kontra_stream::{Sample, StreamClient};
-use kontra_voice::{CYCLE, LEVELS, Read, SIZE, TOP, Table};
+use contra_stream::{Sample, StreamClient};
+use contra_voice::{CYCLE, LEVELS, Read, SIZE, TOP, Table};
 use realfft::RealFftPlanner;
 use realfft::num_complex::Complex;
 

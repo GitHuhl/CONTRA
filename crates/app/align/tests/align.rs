@@ -1,7 +1,7 @@
 //! Auto-align: measured delays, reported latency and holds.
 #![cfg(test)]
 
-use kontra_align::{Delay, Holds, Player, Step, Timing, measure, onset_ms, reported_ms};
+use contra_align::{Delay, Holds, Player, Step, Timing, measure, onset_ms, reported_ms};
 
 const RATE: f64 = 48_000.0;
 

@@ -1,5 +1,5 @@
 //! The prepared reverb map is accessed directly in an audio callback.
-use kontra_params::{ReverbControls, ReverbPar};
+use contra_params::{ReverbControls, ReverbPar};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

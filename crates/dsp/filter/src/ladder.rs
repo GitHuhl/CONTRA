@@ -16,7 +16,7 @@
 //! ponytail: the native 32/4-frame control clock is left out; the engine's
 //! spans move the cutoff instead.
 
-use kontra_dsp_core::flush;
+use contra_dsp_core::flush;
 
 const FEEDBACK: f64 = 4.16;
 

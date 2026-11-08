@@ -4,7 +4,7 @@
 -- One JSON line per instrument. Every API call goes through pcall, so an API that
 -- refuses (protected content, missing feature) is recorded as {"error": ...} instead
 -- of aborting. Script sources are NEVER written: only length + FNV-1a 64 hash, so the
--- dump can be compared with KONTRA's decrypted source without storing library code.
+-- dump can be compared with CONTRA's decrypted source without storing library code.
 
 local kt = Kontakt
 

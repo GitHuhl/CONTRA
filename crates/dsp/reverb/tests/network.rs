@@ -1,7 +1,7 @@
 #![cfg(test)]
 
-use kontra_dsp_reverb::{Network, Settings};
-use kontra_law::ReverbNetwork;
+use contra_dsp_reverb::{Network, Settings};
+use contra_law::ReverbNetwork;
 
 const RATE: u32 = 48_000;
 

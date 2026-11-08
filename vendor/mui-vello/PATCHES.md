@@ -3,7 +3,7 @@
 Vendored from MUI `dcf0796082feec053af1418e3a38a302ee61da0a`,
 `crates/mui-vello`, with its MIT license. Cargo workspace dependencies are
 made explicit; the application Cargo.lock retains the same MUI revision.
-The sibling vello dependency uses KONTRA's existing patched renderer.
+The sibling vello dependency uses CONTRA's existing patched renderer.
 
 ## Partial vector repaint
 

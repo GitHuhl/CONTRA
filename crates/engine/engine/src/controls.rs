@@ -1,9 +1,9 @@
 //! The control store, as the running script addresses it: what it reads
 //! back with `get_control_par` and sets with `set_control_par`. The rules
-//! live with the store ([`kontra_script_ui::Controls`]); the engine names
+//! live with the store ([`contra_script_ui::Controls`]); the engine names
 //! the script and lends its cells.
 
-use kontra_script_ui::{Controls, Store};
+use contra_script_ui::{Controls, Store};
 
 use crate::Engine;
 
@@ -62,8 +62,8 @@ impl Engine {
     /// Answers the menu, control-text, look and keyboard actions; `None` for others.
     pub(crate) fn ui_call(
         &mut self,
-        call: &mut kontra_vm::HostCall<'_>,
-    ) -> Option<kontra_vm::HostValue> {
+        call: &mut contra_vm::HostCall<'_>,
+    ) -> Option<contra_vm::HostValue> {
         match self.controls() {
             Some((c, ui, slot)) => ui.ui_call(c, slot, call),
             None => self.ui.call(self.running.slot, None, None, call),

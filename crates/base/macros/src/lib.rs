@@ -1,4 +1,4 @@
-//! Proc macros for kontra; the design is in docs/architecture-v3/08-MACROS.md.
+//! Proc macros for contra; the design is in docs/architecture-v3/08-MACROS.md.
 //!
 //! `vectors!` turns a glob of JSON test vectors into one `#[test]` per file.
 

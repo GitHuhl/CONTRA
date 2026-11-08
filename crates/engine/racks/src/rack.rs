@@ -2,17 +2,17 @@
 //! slot with state (an EQ, a convolution) sits where the format put it.
 //! Group racks fold into each voice's matrix instead (voice_gain.rs).
 
-use kontra_dsp::core::Levels;
-use kontra_effects::matrix as effects;
-use kontra_effects::summed as filters;
-use kontra_ir as ir;
-use kontra_ledger::ledger::{self, Ramp};
-use kontra_plan::Response;
-use kontra_time::SampleTime;
+use contra_dsp::core::Levels;
+use contra_effects::matrix as effects;
+use contra_effects::summed as filters;
+use contra_ir as ir;
+use contra_ledger::ledger::{self, Ramp};
+use contra_plan::Response;
+use contra_time::SampleTime;
 
-use kontra_behaviour::Behaviour;
-use kontra_effects::processors::processor;
-pub use kontra_effects::processors::{Dsp, Responses};
+use contra_behaviour::Behaviour;
+use contra_effects::processors::processor;
+pub use contra_effects::processors::{Dsp, Responses};
 
 pub struct Rack {
     /// The plan's slots as scripts have changed them.

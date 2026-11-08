@@ -1,8 +1,8 @@
 //! What the host reads of the scripts' UI: keys, menus, pages and each
-//! control's look, from [`kontra_script_ui::Store`] and the script cells.
+//! control's look, from [`contra_script_ui::Store`] and the script cells.
 
-use kontra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
-use kontra_vm::Text;
+use contra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
+use contra_vm::Text;
 
 use crate::Engine;
 
@@ -90,17 +90,17 @@ impl Engine {
     }
 
     /// Script `slot`'s machine.
-    pub fn vm(&self, slot: u8) -> Option<&kontra_vm::Vm> {
+    pub fn vm(&self, slot: u8) -> Option<&contra_vm::Vm> {
         self.vms.get(usize::from(slot))?.as_ref()
     }
-    pub fn vm_mut(&mut self, slot: u8) -> Option<&mut kontra_vm::Vm> {
+    pub fn vm_mut(&mut self, slot: u8) -> Option<&mut contra_vm::Vm> {
         self.vms.get_mut(usize::from(slot))?.as_mut()
     }
 
     /// Every group's amplitude envelope and inserts as they play now (after
     /// init, as its scripts left them). Not real-time.
     #[must_use]
-    pub fn group_sounds(&self) -> Vec<(kontra_voice::Ahdsr, Vec<Option<kontra_ir::Effect>>)> {
+    pub fn group_sounds(&self) -> Vec<(contra_voice::Ahdsr, Vec<Option<contra_ir::Effect>>)> {
         (self.groups.iter())
             .map(|g| (g.envelope, g.inserts.clone()))
             .collect()
@@ -112,8 +112,8 @@ impl Engine {
     pub fn set_group_sound(
         &mut self,
         group: usize,
-        envelope: kontra_voice::Ahdsr,
-        insert: Option<(usize, kontra_ir::Effect)>,
+        envelope: contra_voice::Ahdsr,
+        insert: Option<(usize, contra_ir::Effect)>,
     ) {
         let Some(g) = self.groups.get_mut(group) else {
             return;

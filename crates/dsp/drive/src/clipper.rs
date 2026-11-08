@@ -14,7 +14,7 @@
 
 use std::f64::consts::TAU;
 
-/// The circuit in physical terms (as [`kontra_ir::Clipper`]).
+/// The circuit in physical terms (as [`contra_ir::Clipper`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Circuit {
     pub drive: f32,
@@ -90,7 +90,7 @@ impl Clipper {
             }
         }
         for c in &mut self.state {
-            kontra_dsp_core::flush(c);
+            contra_dsp_core::flush(c);
         }
     }
 

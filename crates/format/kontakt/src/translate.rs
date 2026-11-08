@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use kontra_format::Notes;
-use kontra_ir as ir;
+use contra_format::Notes;
+use contra_ir as ir;
 use ni_file::kontakt::KontaktChunks;
 use ni_file::kontakt::objects::{
     BParScript, Group, GroupList, InternalModArray16, LoopArray, Modulator, StartCriteriaParams,
@@ -145,8 +145,8 @@ pub(crate) fn instrument(
     out.slot_laws = slots.laws;
     if !slots.shape_slots.is_empty() {
         out.slot_shapes.shapes = crate::laws::filter_shapes();
-        kontra_law::record(|| kontra_law::Application {
-            id: kontra_law::LawId("kontakt.filter_shapes.v1"),
+        contra_law::record(|| contra_law::Application {
+            id: contra_law::LawId("kontakt.filter_shapes.v1"),
             location: "slot_shapes/shapes".into(),
             input: "()".into(),
             output: format!("{:?}", out.slot_shapes.shapes),
@@ -184,8 +184,8 @@ pub(crate) fn instrument(
         }
         if !open.is_empty() && out.slot_shapes.shapes.is_empty() {
             out.slot_shapes.shapes = crate::laws::filter_shapes();
-            kontra_law::record(|| kontra_law::Application {
-                id: kontra_law::LawId("kontakt.filter_shapes.v1"),
+            contra_law::record(|| contra_law::Application {
+                id: contra_law::LawId("kontakt.filter_shapes.v1"),
                 location: "slot_shapes/shapes".into(),
                 input: "()".into(),
                 output: format!("{:?}", out.slot_shapes.shapes),
@@ -284,8 +284,8 @@ pub(crate) fn instrument(
         if let Some(translated) =
             translate_zone(&z, loops.as_ref(), sample, frames, reverse, &mut notes)
         {
-            kontra_law::record(|| kontra_law::Application {
-                id: kontra_law::LawId("kontakt.zone_gain_pan_tune.v1"),
+            contra_law::record(|| contra_law::Application {
+                id: contra_law::LawId("kontakt.zone_gain_pan_tune.v1"),
                 location: format!("groups/{group}/zones/{}", g.zones.len()),
                 input: format!(
                     "volume={:?}, pan={:?}, tune_ratio={:?}",
@@ -343,7 +343,7 @@ struct Base {
 }
 
 pub(crate) fn db(linear: f32) -> f32 {
-    kontra_law::common::DB_GAIN
+    contra_law::common::DB_GAIN
         .inverse(linear.max(1e-6))
         .unwrap_or(0.0)
 }
@@ -351,7 +351,7 @@ pub(crate) fn db(linear: f32) -> f32 {
 /// Slots in each Kontakt effect rack.
 const SLOTS: usize = 8;
 fn semitones(ratio: f32) -> f64 {
-    kontra_law::common::SEMITONE_RATIO
+    contra_law::common::SEMITONE_RATIO
         .inverse_f64(f64::from(ratio.max(1e-6)))
         .unwrap_or(0.0)
 }
@@ -491,14 +491,14 @@ fn translate_group(
         stream: laws::stream(stream_mode, base.preload),
         ..ir::Group::DEFAULT
     };
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.stream.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.stream.v1"),
         location: format!("groups/{group_index}/stream"),
         input: format!("mode={stream_mode:?}, preload={:?}", base.preload),
         output: format!("{:?}", out.stream),
     });
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.group_gain_pan_tune.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.group_gain_pan_tune.v1"),
         location: format!("groups/{group_index}"),
         input: format!(
             "volume={:?}, pan={:?}, tune_ratio={:?}, base_tune={:?}",
@@ -517,8 +517,8 @@ fn translate_group(
     let slot = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
     let mut modulated = Vec::new();
     let release_counter = laws::release_counter(v.release_trigger, v.rls_trig_counter);
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.release_counter.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.release_counter.v1"),
         location: format!("groups/{group_index}/release_counter"),
         input: format!(
             "release_trigger={:?}, time_ms={:?}",
@@ -551,8 +551,8 @@ fn translate_group(
                             .any(|m| matches!(m.kind, ir::ModKind::Envelope)) =>
                 {
                     out.envelope = laws::envelope(e);
-                    kontra_law::record(|| kontra_law::Application {
-                        id: kontra_law::LawId("kontakt.ahdsr_envelope.v1"),
+                    contra_law::record(|| contra_law::Application {
+                        id: contra_law::LawId("kontakt.ahdsr_envelope.v1"),
                         location: format!("groups/{group_index}/envelope"),
                         input: format!("{e:?}"),
                         output: format!("{:?}", out.envelope),

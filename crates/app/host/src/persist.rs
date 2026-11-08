@@ -10,9 +10,9 @@
 
 use std::collections::HashMap;
 
-use kontra_engine::{Engine, Text};
+use contra_engine::{Engine, Text};
 
-use kontra_ksp::{Cells, FIRST_UI_ID, Persistence, Script};
+use contra_ksp::{Cells, FIRST_UI_ID, Persistence, Script};
 
 /// One script slot's persistent number variables, and the instrument script
 /// it was compiled from.
@@ -69,8 +69,8 @@ impl Vars {
     /// for a recall into the running engine. Entries naming no persistent
     /// variable write nothing.
     #[must_use]
-    pub fn recall(&self, saved: &[String]) -> kontra_engine::Saved {
-        let restore = kontra_ksp::restore(saved, |key| {
+    pub fn recall(&self, saved: &[String]) -> contra_engine::Saved {
+        let restore = contra_ksp::restore(saved, |key| {
             let var = (self.vars.iter())
                 .find(|v| v.name.trim_start_matches(SIGILS).eq_ignore_ascii_case(key))?;
             let (base, len) = (var.base, var.len);
@@ -80,7 +80,7 @@ impl Vars {
                 (false, false) => Cells::Int { base, len },
             })
         });
-        kontra_engine::Saved {
+        contra_engine::Saved {
             ints: restore.ints,
             texts: (restore.texts.iter())
                 .map(|(cell, text)| (*cell, Text::from_str_cut(text).0))
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn captured_values_replace_the_loaded_ones_in_kontakts_form() {
-        let script = kontra_ksp::compile(
+        let script = contra_ksp::compile(
             "on init
                 declare ui_knob $vol(0, 100, 1)
                 declare ~tone

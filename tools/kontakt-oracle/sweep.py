@@ -59,7 +59,7 @@ def main():
     steps = spec["steps"]
     x = None
     ys, rs, names = [], [], []
-    with tempfile.TemporaryDirectory(dir=Path.home() / ".cache" / "kontra-amps-b") as tmp:
+    with tempfile.TemporaryDirectory(dir=Path.home() / ".cache" / "contra-amps-b") as tmp:
         work = Path(tmp)
         for start in range(0, len(steps), batch):
             d = run_batch(spec, steps[start:start + batch], work)

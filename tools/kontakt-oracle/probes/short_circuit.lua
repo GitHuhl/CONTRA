@@ -2,7 +2,7 @@
 -- Slot 1's init sets a marker tune on group 460+k after each case; a case that aborts the
 -- callback leaves the later markers unset. Group 470+k marks a taken branch; 472 is the read.
 -- Kontakt 8.13.1, 2026-10-28: every marker set (no abort); 470 unset, 471 set, read 0, 474
--- set: an out-of-range read answers 0 and a store is dropped. KONTRA's VM answers the same.
+-- set: an out-of-range read answers 0 and a store is dropped. CONTRA's VM answers the same.
 -- ANALOG STRINGS' 6684 out_of_range faults per render are all such reads, under guards like
 -- `(%x[$i] # -1) and (... %arr[%x[$i]] ...)`, so its state matches Kontakt's.
 local kt = Kontakt

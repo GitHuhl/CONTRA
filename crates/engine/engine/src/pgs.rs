@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use kontra_vm::{Action, HostCall, HostValue, Text};
+use contra_vm::{Action, HostCall, HostValue, Text};
 
 use crate::Engine;
 use crate::queue::Work;

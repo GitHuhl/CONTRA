@@ -161,7 +161,7 @@ pub(super) fn widget(
                 .then(|| p.int("level_meter_generic"))
                 .flatten()
                 .and_then(|b| u8::try_from(b).ok())
-                .filter(|&b| usize::from(b) < kontra_protocol::BUSES),
+                .filter(|&b| usize::from(b) < contra_protocol::BUSES),
         },
         ControlKind::FileSelector => ui::Kind::FileSelector {
             base_path: p.text("$CONTROL_PAR_BASEPATH").map(Into::into),

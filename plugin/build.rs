@@ -1,4 +1,4 @@
-//! Stamps the build with its source revision (`KONTRA_REVISION`): the
+//! Stamps the build with its source revision (`CONTRA_REVISION`): the
 //! checkout's short SHA, else CI's `GITHUB_SHA`, else "unknown".
 
 use std::process::Command;
@@ -18,7 +18,7 @@ fn main() {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "unknown".to_owned());
-    println!("cargo:rustc-env=KONTRA_REVISION={revision}");
+    println!("cargo:rustc-env=CONTRA_REVISION={revision}");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     // A commit or a checkout appends to HEAD's log.
     for path in ["HEAD", "logs/HEAD"] {

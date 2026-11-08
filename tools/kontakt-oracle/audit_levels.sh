@@ -1,5 +1,5 @@
 #!/bin/bash
-# Audit batch A: save the levels probe instrument with Kontakt, re-dump it natively, diff against KONTRA's IR.
+# Audit batch A: save the levels probe instrument with Kontakt, re-dump it natively, diff against CONTRA's IR.
 # Outputs in /tmp/w3/audit (mkdir first).  IR_JSON = the ir_json example binary.
 set -e
 cd "$(dirname "$0")/../.."

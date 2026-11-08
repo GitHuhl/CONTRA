@@ -2,7 +2,7 @@
 //! probes (2026-10-29); pan follows the binary's formatter at 0x1407b7ac0
 //! (f32, Center inside ±0.0075, else half up).
 
-use kontra_vm::Text;
+use contra_vm::Text;
 
 /// What a knob's text shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,7 +30,7 @@ pub enum Readout {
 /// A cubic level's knob `x` in dB over its unity point `top`, `18·log2(x) + top`: the inverse
 /// of a `2^((dB − top)/18)` law.
 fn db_readout(top: f64, x: f64) -> f64 {
-    let law = kontra_law::Law::PowIndex {
+    let law = contra_law::Law::PowIndex {
         base: 2.0,
         origin: top as f32,
         divisor: 18.0,

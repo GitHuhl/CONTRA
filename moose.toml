@@ -1,15 +1,15 @@
 [vendor]
-name = "Matari Audio"
-id = "audio.matari"
-url = "https://github.com/Matari-Audio"
-au_manufacturer = "Mtri"
+name = "GitHuhl"
+id = "io.github.githuhl"
+url = "https://github.com/GitHuhl/CONTRA"
+au_manufacturer = "Ghul"
 
 [[plugin]]
-name = "KONTRA"
-bundle_id = "kontra-v3"
-crate = "kontra-plugin"
+name = "CONTRA"
+bundle_id = "contra"
+crate = "contra-plugin"
 category = "instrument"
-fourcc = "Knt3"
+fourcc = "Cntr"
 vst3_subcategory = "Sampler"
 
 midi_input = true

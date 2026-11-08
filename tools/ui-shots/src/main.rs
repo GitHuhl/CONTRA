@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kontra_engine::Engine;
-use kontra_host::ui::{Library, Live};
-use kontra_stream::{Store, StoreConfig};
-use kontra_ui::{Pictures, view};
-use kontra_ui_model::{Kind, PageRef, WidgetRef};
+use contra_engine::Engine;
+use contra_host::ui::{Library, Live};
+use contra_stream::{Store, StoreConfig};
+use contra_ui::{Pictures, view};
+use contra_ui_model::{Kind, PageRef, WidgetRef};
 use mui::prelude::{Input, Size, Ui};
 use mui::vello;
 
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in args.map(PathBuf::from) {
         let t = Instant::now();
         let mut store = Store::new(StoreConfig::DEFAULT)?;
-        let loaded = kontra_host::instrument::load(&path, 48_000, &mut store)?;
+        let loaded = contra_host::instrument::load(&path, 48_000, &mut store)?;
         let mut engine = Engine::new(Arc::new(loaded.plan), store.client(), 48_000);
         let load = t.elapsed();
         let mut block = vec![[0f32; 2]; 512];
@@ -52,12 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let meta = |p: &str| library.borrow_mut().meta(p);
             let mut live = Live::new(face, slot, &engine, &meta)?;
             let all = 0..live.tree.widgets.len();
-            kontra_ui::layout::resolve(&mut live.tree, all);
+            contra_ui::layout::resolve(&mut live.tree, all);
             // What a settled editor shows: listeners run in the first blocks.
             for _ in 0..10 {
                 engine.process(&mut block, &[]);
                 let changed = live.refresh(face, slot, &engine, &meta);
-                kontra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
+                contra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
             }
             let tree_ms = t.elapsed();
             let Some(p) = live.tree.pages.first() else {
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .get_or_insert_with(|| Library::open(&reader))
                     .read(p)
             }));
-            let mut ui = kontra_ui::ui();
+            let mut ui = contra_ui::ui();
             let frame = |ui: &mut Ui, pictures: &mut Pictures, live: &Live| {
                 let (el, built) = view::page(ui, 0, &live.tree, PageRef(0), pictures, (1., &[]));
                 ui.frame(
@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let t = Instant::now();
                 let changed = live.refresh(face, slot, &engine, &meta);
                 if pictures.poll() || !changed.is_empty() {
-                    kontra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
+                    contra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
                     idle_built += frame(&mut ui, &mut pictures, &live)?;
                     idle_frames += 1;
                 }
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.set_control(slot, id, 1);
                 engine.process(&mut block, &[]);
                 let changed = live.refresh(face, slot, &engine, &meta);
-                kontra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
+                contra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
                 let mut built = frame(&mut ui, &mut pictures, &live)?;
                 while pictures.pending() > 0 {
                     pictures.poll();
@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for _ in 0..10 {
                     engine.process(&mut block, &[]);
                     let changed = live.refresh(face, slot, &engine, &meta);
-                    kontra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
+                    contra_ui::layout::resolve(&mut live.tree, changed.widgets.iter().map(|w| w.0));
                 }
                 frame(&mut ui, &mut pictures, &live)?;
                 while pictures.pending() > 0 {
@@ -156,16 +156,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // lights (Una Corda's pedal light), and what that repaints.
             let mut pedal = [0; 2];
             for (built, v) in pedal.iter_mut().zip([127, 0]) {
-                let cc = kontra_engine::Timed {
-                    at: kontra_engine::SampleTime(0),
-                    body: kontra_engine::Event::midi1(0xB0, 64, v),
+                let cc = contra_engine::Timed {
+                    at: contra_engine::SampleTime(0),
+                    body: contra_engine::Event::midi1(0xB0, 64, v),
                 };
                 engine.process(&mut block, &[cc]);
                 for _ in 0..50 {
                     engine.process(&mut block, &[]);
                     let changed = live.refresh(face, slot, &engine, &meta);
                     if pictures.poll() || !changed.is_empty() {
-                        kontra_ui::layout::resolve(
+                        contra_ui::layout::resolve(
                             &mut live.tree,
                             changed.widgets.iter().map(|w| w.0),
                         );
@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             save(&file, w, h, &rgba)?;
             let drawn = (0..live.tree.widgets.len())
-                .filter(|&n| live.tree.visible(kontra_ui_model::WidgetRef(n)))
+                .filter(|&n| live.tree.visible(contra_ui_model::WidgetRef(n)))
                 .count();
             let knob_built = moved.map_or("null".into(), |m: usize| m.to_string());
             println!(
@@ -226,11 +226,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// once its pictures are in.
 fn in_rack(
     name: &str,
-    tree: kontra_ui_model::Interface,
+    tree: contra_ui_model::Interface,
     pictures: Pictures,
     file: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use kontra_ui::app::{self, App, Face, Part, PartTab};
+    use contra_ui::app::{self, App, Face, Part, PartTab};
     let mut app = App {
         parts: vec![Part {
             name: name.to_owned(),
@@ -241,7 +241,7 @@ fn in_rack(
             face: Some(Face {
                 tree,
                 pictures,
-                gesture: kontra_ui::input::Gesture::default(),
+                gesture: contra_ui::input::Gesture::default(),
                 meters: Default::default(),
             }),
             open: true,
@@ -252,7 +252,7 @@ fn in_rack(
         ..App::default()
     };
     let (w, h) = (1180u16, 900u16);
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let frame = |ui: &mut Ui, app: &mut App| -> Result<bool, Box<dyn std::error::Error>> {
         let r = app::view(ui, app);
         let f = ui

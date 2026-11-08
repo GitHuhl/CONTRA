@@ -4,7 +4,7 @@ Usage: fx_types_report.py [WAVDIR]. Reference: fx_svlp2_ref.wav (filter bypassed
 import sys, glob, os, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fx_response as r
-W = sys.argv[1] if len(sys.argv) > 1 else '/home/derpcat/.cache/kontra-reference/wav'
+W = sys.argv[1] if len(sys.argv) > 1 else '/home/derpcat/.cache/contra-reference/wav'
 ref = f'{W}/fx_svlp2_ref.wav'
 types = sorted({os.path.basename(p)[3:].rsplit('_', 1)[0] for p in glob.glob(f'{W}/fx_t_*_0.wav')})
 print(f"{'type':12}{'reso':>5}{'pass dB':>9}{'fc3dB':>8}{'slope/oct':>10}{'peak dB':>9}{'peak Hz':>9}")

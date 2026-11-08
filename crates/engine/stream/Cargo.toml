@@ -1,5 +1,5 @@
 [package]
-name = "kontra-stream"
+name = "contra-stream"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 bytemuck = { version = "1", features = ["extern_crate_alloc", "zeroable_atomics"] }
 crossbeam-queue.workspace = true
-kontra-ir = { path = "../../model/ir" }
+contra-ir = { path = "../../model/ir" }
 ncw = { path = "../../../vendor/ncw" }
 symphonia = { version = "0.5", default-features = false, features = ["flac"] }
 

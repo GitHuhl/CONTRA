@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use kontra_engine::ir::RackAt;
+use contra_engine::ir::RackAt;
 
 use crate::rack::{Delays, Mix, Rack};
 
@@ -117,7 +117,7 @@ pub struct SavedView {
     pub descending: bool,
     /// The browser's library list's share of its height; 0 is the default.
     pub split: f32,
-    /// How a library's view is drawn: Original, Vector, KONTRA.
+    /// How a library's view is drawn: Original, Vector, CONTRA.
     pub look: u8,
     pub parts: Vec<SavedPartView>,
 }

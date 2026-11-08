@@ -1,7 +1,7 @@
 -- Measured probe: the laws of the modulation engine parameters a script sets.
 -- Input: ANALOG STRINGS.nki (group k's internal LFO_P1 is slot 3: route 0 = volume,
 -- route 2 = cutoff; external VEL_VOLUME is index 16, Phase_P1 33). Case k sets one
--- parameter on group k; the instrument is saved and read back with KONTRA's parser
+-- parameter on group k; the instrument is saved and read back with CONTRA's parser
 -- (route intensity and invert, LFO delay and frequency).
 -- Result (Kontakt 8.13.1, 2026-10-28): MOD_TARGET_INTENSITY depth = x^2, sign kept;
 -- INTMOD_INTENSITY / MOD_TARGET_MP_INTENSITY depth = (2x-1)^3; generic -1 = route 0;

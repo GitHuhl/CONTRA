@@ -4,9 +4,9 @@
 //! reports its release, a table sets the cells a drag crosses, a text edit
 //! takes typed text.
 
-use kontra_ui::input::{self, Edit, Gesture, Set};
-use kontra_ui::{Pictures, view};
-use kontra_ui_model::{
+use contra_ui::input::{self, Edit, Gesture, Set};
+use contra_ui::{Pictures, view};
+use contra_ui_model::{
     self as model, Interface, Kind, MenuItem, Page, PageRef, Range, Rect, Size, Widget, WidgetRef,
 };
 use mui::prelude::{
@@ -104,7 +104,7 @@ impl Face {
         );
         tree.widgets.extend([knob, switch, menu, edit, table, text]);
         Self {
-            ui: kontra_ui::ui(),
+            ui: contra_ui::ui(),
             tree,
             pictures: Pictures::new(Box::new(|_| None)),
             gesture: Gesture::default(),
@@ -211,7 +211,7 @@ fn library_controls_answer_the_pointer_as_kontakt_plays_them() {
     assert!(reset.contains(&Edit {
         widget: WidgetRef(0),
         to: Set::Value(25.),
-        keys: kontra_ui_model::UiModifiers {
+        keys: contra_ui_model::UiModifiers {
             ctrl: true,
             ..Default::default()
         },

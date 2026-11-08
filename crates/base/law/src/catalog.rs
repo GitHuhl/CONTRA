@@ -6,7 +6,7 @@ use crate::{Law, common, kontakt};
 /// A named law and its provenance.
 #[derive(Clone, Debug)]
 pub struct Named {
-    /// The constant's path under `kontra_law`.
+    /// The constant's path under `contra_law`.
     pub name: &'static str,
     /// The law.
     pub law: Law,

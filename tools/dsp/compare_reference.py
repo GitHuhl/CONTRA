@@ -35,7 +35,7 @@ def db_ratio(a,b):return 10*math.log10(max(a,1e-20)/max(b,1e-20))
 cache=pathlib.Path(sys.argv[1]); results=[]
 for path in sorted(cache.glob('fresh-*.wav')):
     name=path.stem.removeprefix('fresh-')
-    refdir=pathlib.Path('/home/derpcat/.cache/kontra-reference/probe')/name
+    refdir=pathlib.Path('/home/derpcat/.cache/contra-reference/probe')/name
     a,sr=wav(refdir/'kontakt.wav'); b,sr2=wav(path); assert sr==sr2
     ia,ib=first_onset(a),first_onset(b)
     # MIDI and native capture have the same grid; remove each file's first onset.

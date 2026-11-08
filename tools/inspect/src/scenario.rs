@@ -1,6 +1,6 @@
 //! Timed note and controller input for the offline player.
 use anyhow::{Context, Result, bail, ensure};
-use kontra_engine::{Event, HostNote, HostPattern};
+use contra_engine::{Event, HostNote, HostPattern};
 use serde_json::{Value, json};
 use std::path::Path;
 

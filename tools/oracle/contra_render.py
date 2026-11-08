@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Render the same notes as capture.py through KONTRA (sampler-native render-kontakt-midi).
+"""Render the same notes as capture.py through CONTRA (sampler-native render-kontakt-midi).
 
-    tools/oracle/kontra_render.py LIST.tsv OUTDIR [--midi FILE | --scenario NAME]
+    tools/oracle/contra_render.py LIST.tsv OUTDIR [--midi FILE | --scenario NAME]
 
 LIST.tsv: `name<TAB>nki_path` (the same list as capture.py --batch). Writes OUTDIR/<name>.wav.
-The binary is $SAMPLER_NATIVE, else the release build under the KONTRA cargo target root
+The binary is $SAMPLER_NATIVE, else the release build under the CONTRA cargo target root
 (build with `build-slot cargo build --release -p sampler-native`).
 """
 import argparse
@@ -27,7 +27,7 @@ def binary():
     env = os.environ.get("SAMPLER_NATIVE")
     if env:
         return env
-    root = Path("/data/dev/workspace/Toolchains/User/cargo-target/KONTRA")
+    root = Path("/data/dev/workspace/Toolchains/User/cargo-target/CONTRA")
     found = sorted(root.glob("*/release/sampler-native"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not found:
         sys.exit("sampler-native not built: build-slot cargo build --release -p sampler-native")

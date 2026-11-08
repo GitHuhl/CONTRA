@@ -7,15 +7,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kontra_engine::{EffectRequest, Engine, Prepared, ir};
+use contra_engine::{EffectRequest, Engine, Prepared, ir};
 
 use crate::persist::Capture;
 pub(crate) use files::DiskFiles;
 pub use files::user_saves;
-pub use kontra_engine::{Event, HostNote, HostPattern, NoteExpression, Plan};
-use kontra_protocol::{MAX_PARTS, MeterCells, Meters, Ring, StatCells, Stats};
-pub use kontra_stream::{Store, StoreConfig};
-use kontra_ui_model::UiModifiers;
+pub use contra_engine::{Event, HostNote, HostPattern, NoteExpression, Plan};
+use contra_protocol::{MAX_PARTS, MeterCells, Meters, Ring, StatCells, Stats};
+pub use contra_stream::{Store, StoreConfig};
+use contra_ui_model::UiModifiers;
 
 mod audio;
 mod files;
@@ -94,14 +94,14 @@ pub enum Command {
     Recall {
         part: usize,
         generation: u64,
-        saved: Box<[kontra_engine::Saved]>,
+        saved: Box<[contra_engine::Saved]>,
     },
     /// Answer a part's file request ([`files`]), if the part is still
     /// that load; the box comes back.
     File {
         part: usize,
         generation: u64,
-        reply: Box<kontra_engine::files::FileReply>,
+        reply: Box<contra_engine::files::FileReply>,
     },
     /// Copy what a part's interface reads of its script and send it back.
     Look(Box<crate::view::LookFrame>),
@@ -123,13 +123,13 @@ pub enum Command {
         slot: u8,
         id: i32,
         cell: u32,
-        text: Box<kontra_engine::Text>,
+        text: Box<contra_engine::Text>,
     },
     /// The user edited a group's sound (the Sound tab).
     Sound {
         part: usize,
         group: usize,
-        envelope: kontra_engine::Ahdsr,
+        envelope: contra_engine::Ahdsr,
         insert: Option<(usize, ir::Effect)>,
     },
 }
@@ -140,18 +140,18 @@ pub struct Channels {
     pub retired: Ring<Box<Engine>>,
     pub captured: Ring<Box<Capture>>,
     /// Saved values recalled into a part, to free on the control side.
-    pub recalled: Ring<Box<[kontra_engine::Saved]>>,
+    pub recalled: Ring<Box<[contra_engine::Saved]>>,
     /// Effect types the parts' scripts asked for: (part, its load, request).
     pub requests: Ring<(usize, u64, EffectRequest)>,
     /// Array files the parts' scripts asked for: (part, its load, request).
-    pub files: Ring<(usize, u64, kontra_engine::files::FileRequest)>,
+    pub files: Ring<(usize, u64, contra_engine::files::FileRequest)>,
     /// Answered file requests, by part and load: a save's values to write,
     /// the rest to free.
-    pub filed: Ring<(usize, u64, Box<kontra_engine::files::FileReply>)>,
+    pub filed: Ring<(usize, u64, Box<contra_engine::files::FileReply>)>,
     /// Effect units swapped out, to free on the control side.
     pub units: Ring<Box<Option<Prepared>>>,
     /// Typed texts the audio side wrote ([`Command::ControlText`]), to free here.
-    pub typed: Ring<Box<kontra_engine::Text>>,
+    pub typed: Ring<Box<contra_engine::Text>>,
     /// Interface reads filled on the audio side ([`Command::Look`]).
     pub looks: Ring<Box<crate::view::LookFrame>>,
     pub meters: MeterCells,
@@ -166,7 +166,7 @@ pub struct Part {
     /// instrument): a preset of the same source recalls into this part.
     pub source: Option<PathBuf>,
     /// What a recall does to its scripts, as they asked in `on init`.
-    pub recall: kontra_engine::Recall,
+    pub recall: contra_engine::Recall,
     pub name: String,
     pub diagnostics: Vec<ir::Diagnostic>,
     /// By script slot, what its UI tree is built from.
@@ -537,7 +537,7 @@ impl Rack {
         let Some(cell) = face.zip(name).and_then(|(f, name)| f.text_cell(name)) else {
             return;
         };
-        let text = Box::new(kontra_engine::Text::from_str_cut(text).0);
+        let text = Box::new(contra_engine::Text::from_str_cut(text).0);
         self.send(Command::ControlText {
             part,
             slot,

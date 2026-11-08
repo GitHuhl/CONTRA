@@ -1,7 +1,7 @@
 // Print the function pointers of a vtable.
 //   RE_SCRIPT=DumpVtable.java tools/re/query.sh 0x144e93130 12
 // Args: <vtable address> [slot count, default 12]. Output: one `slot offset target` line each.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;

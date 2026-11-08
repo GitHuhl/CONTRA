@@ -7,7 +7,7 @@ into golden values for the interpreter test.
 Each variant's encoded points are 8-bit values. Bit b of point k is group base_k + b;
 a group read back below -100 dB is a set bit (a set bit is -167 dB, a clear one stays at
 0 dB). Output: {variant: {"source": <loader script of the writer A>, "points": {A,B,C,D,S}}}.
-The writer's source is the script text; the sources are KONTRA probe text, not library code.
+The writer's source is the script text; the sources are CONTRA probe text, not library code.
 """
 import json
 import sys

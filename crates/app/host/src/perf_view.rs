@@ -4,7 +4,7 @@
 //! `src/ksp/performance_view.rs`). The view gives each control its type and
 //! look; `on init` then sets on top of it.
 
-use kontra_ksp::ControlKind;
+use contra_ksp::ControlKind;
 use serde_json::Value as Json;
 
 /// The view's page and controls, in file order (a panel before its children).

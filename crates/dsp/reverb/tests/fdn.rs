@@ -1,4 +1,4 @@
-use kontra_dsp_reverb::{Fdn, Settings};
+use contra_dsp_reverb::{Fdn, Settings};
 
 const RATE: u32 = 48_000;
 

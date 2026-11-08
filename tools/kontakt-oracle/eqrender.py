@@ -72,7 +72,7 @@ f:close()
 """
 
 
-SCRATCH_ROOT = Path.home() / ".cache" / "kontra-oracle"
+SCRATCH_ROOT = Path.home() / ".cache" / "contra-oracle"
 
 
 def scratch_dir() -> Path:

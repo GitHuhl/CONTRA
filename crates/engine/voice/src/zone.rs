@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use kontra_stream::{Mix, Sample};
+use contra_stream::{Mix, Sample};
 
 /// A loop over source frames `start..end`, inside the region.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -273,7 +273,7 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+    use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
 
     fn region(start: u64, end: u64, loops: Vec<Loop>, reverse: bool) -> Region {
         let fmt = SampleFmt {

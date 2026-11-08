@@ -2,7 +2,7 @@
 //   RE_SCRIPT=FieldRefs.java tools/re/query.sh 0x2c4,0x2c8 [rangeLow rangeHigh]
 // Args: comma-separated hex offsets; optional address range. Output: `fn <entry> <name> hits=N` for
 // functions that touch ALL the offsets (writes marked with W). Operand text match, so keep offsets distinctive.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;

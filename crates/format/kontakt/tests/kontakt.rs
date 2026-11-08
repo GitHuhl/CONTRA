@@ -11,7 +11,7 @@ fn areia_violins_load_with_their_samples_and_script() {
     if !path.exists() {
         return;
     }
-    let i = kontra_format_kontakt::load(path).unwrap();
+    let i = contra_format_kontakt::load(path).unwrap();
     let zones: usize = i.groups.iter().map(|g| g.zones.len()).sum();
     eprintln!(
         "{}: {} groups, {} zones, {} samples, {} scripts, stream {:?}",
@@ -41,17 +41,17 @@ fn an_analog_strings_snapshot_is_its_instrument_with_its_saved_values() {
     if !path.exists() {
         return;
     }
-    let snap = kontra_format_kontakt::load(path).unwrap();
+    let snap = contra_format_kontakt::load(path).unwrap();
     let base = Path::new("/data/main/Libraries/Kontakt/ANALOG STRINGS/Instruments");
     let nki = std::fs::read_dir(base).unwrap().flatten().map(|e| e.path());
     let nki = nki
         .into_iter()
         .find(|p| p.extension().is_some_and(|e| e == "nki"))
         .unwrap();
-    let base = kontra_format_kontakt::load(&nki).unwrap();
+    let base = contra_format_kontakt::load(&nki).unwrap();
     assert_eq!(snap.name, "9001 Punch");
     assert_eq!(snap.groups.len(), base.groups.len());
-    let saved = |i: &kontra_ir::Instrument| {
+    let saved = |i: &contra_ir::Instrument| {
         i.scripts
             .iter()
             .map(|s| s.saved.clone())

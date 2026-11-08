@@ -1,4 +1,4 @@
-# KONTRA native window patches
+# CONTRA native window patches
 
 Based on MUI `cc4e61e6ebdf46ecf5a473dd05211c7e7abfe105`, including its
 native IME, cross-platform accessibility, display ownership and shared scene
@@ -13,7 +13,7 @@ the native provider uses runtime class names that coexist with other Matari
 plugins loaded by the same host. Its Git revision
 matches the other MUI packages in `Cargo.lock`. The combined accessibility
 adapter now uses upstream `NativeAccessibility` and `AccessibilityUi` through
-the distinct `kontra-native-host` package. It does not override upstream
+the distinct `contra-native-host` package. It does not override upstream
 `mui-baseview`; provider/action/X11 bounds implementation is shared instead of
 copied. The native endpoint stays on the window thread, portable actions/tree
 preparation run under the model lock, and provider publication happens after
@@ -29,7 +29,7 @@ and clears it before native close, outside the UI model lock. The local
 `on_x11_window` adapter hook forwards that lifetime to the portal picker;
 closing an older window cannot clear a newly opened window's parent.
 
-Retained KONTRA behavior:
+Retained CONTRA behavior:
 
 - Five list rows per wheel notch, with acceleration across a fling.
 - Pointer hide and restore during knob drags, and diagonal resize cursor.
@@ -38,12 +38,12 @@ Retained KONTRA behavior:
   backend selection that avoids implicitly initializing Vulkan in DAW hosts.
 
 Raw key-down/up interception is now provided by upstream MUI's `KeyHook` and
-`Requests::on_key`; KONTRA's adapter continues to use that contract. Local
+`Requests::on_key`; CONTRA's adapter continues to use that contract. Local
 native timing capture coexists with upstream MUI's profiling phases.
 
 GPU errors use `Host::observe_gpu_error` once per observer and device
 generation. The upstream callback keeps recording errors and losses; the
-window forwards them to KONTRA's sink before/after present, outside the model
+window forwards them to CONTRA's sink before/after present, outside the model
 lock. Errors between ticks coalesce according to MUI's observation contract.
 
 Native rendering also uses MUI's retained CPU rasterizer and native presenter.
@@ -62,11 +62,11 @@ re-presentation after Expose, idle retention, close/reopen, and recovery after
 a destroyed GPU device causes resize failure. Run on an isolated X11 server:
 
 ```sh
-MUI_RENDERER=cpu xvfb-run -a cargo test --locked -p kontra-native-host \
+MUI_RENDERER=cpu xvfb-run -a cargo test --locked -p contra-native-host \
   native_cpu_fallback_presents_and_reopens -- --ignored --test-threads=1
-WGPU_BACKEND=metal xvfb-run -a cargo test --locked -p kontra-native-host \
+WGPU_BACKEND=metal xvfb-run -a cargo test --locked -p contra-native-host \
   native_cpu_fallback_presents_and_reopens -- --ignored --test-threads=1
-xvfb-run -a cargo test --locked -p kontra-native-host \
+xvfb-run -a cargo test --locked -p contra-native-host \
   native_resize_failure_falls_back_and_presents -- --ignored --test-threads=1
 ```
 

@@ -1,6 +1,6 @@
 //! Auto-align on the audio side: each note held by its own frames.
 
-use kontra_engine::Play;
+use contra_engine::Play;
 
 use super::{Event, HostPattern};
 

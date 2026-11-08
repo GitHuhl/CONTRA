@@ -42,7 +42,7 @@ pub use reverb::{reverb, reverb_laws, reverb_networks};
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// Why an instrument could not be read at all.
 #[derive(Debug, thiserror::Error)]

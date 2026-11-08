@@ -1,4 +1,4 @@
-use kontra_dsp_dynamics::{
+use contra_dsp_dynamics::{
     Compressor, CompressorSettings, Detector, Limiter, LimiterSettings, Transient,
     TransientSettings,
 };

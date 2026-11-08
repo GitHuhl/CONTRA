@@ -726,7 +726,7 @@ unsafe fn wnd_proc_inner(
             }
         }
         WM_PAINT => {
-            // KONTRA: validate the expose, then force the GPU to repaint its retained scene.
+            // CONTRA: validate the expose, then force the GPU to repaint its retained scene.
             let mut paint = PAINTSTRUCT::default();
             BeginPaint(window.as_raw(), &mut paint);
             EndPaint(window.as_raw(), &paint);

@@ -3,14 +3,14 @@
 
 use std::sync::Arc;
 
-use kontra_engine::ir::{self, Join};
-use kontra_engine::{
+use contra_engine::ir::{self, Join};
+use contra_engine::{
     Atom, Bus, Control, Crossfade, Engine, Plan, RoundRobin, RrCounter, Timed, Trigger, Zone,
 };
-use kontra_events::{Event, HostNote, HostPattern};
-use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
-use kontra_time::SampleTime;
-use kontra_voice::Region;
+use contra_events::{Event, HostNote, HostPattern};
+use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+use contra_time::SampleTime;
+use contra_voice::Region;
 
 const RATE: u32 = 48_000;
 const FMT: SampleFmt = SampleFmt {
@@ -395,7 +395,7 @@ fn a_cc_crossfade_moves_sounding_voices() {
         fade_out: None,
     }];
     let mut looped = z.region.clone();
-    looped.loops = vec![kontra_voice::Loop {
+    looped.loops = vec![contra_voice::Loop {
         start: 0,
         end: 48_000,
         crossfade: 0,
@@ -438,7 +438,7 @@ fn a_disabled_mic_bus_starts_no_voices() {
 
 #[test]
 fn a_bus_sends_before_its_fader() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].bus = 1;
@@ -483,7 +483,7 @@ fn a_bus_sends_before_its_fader() {
 
 #[test]
 fn a_controller_scales_a_send_level_live() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].bus = 1;
@@ -552,7 +552,7 @@ fn a_voice_group_steals_by_its_rule_and_an_exclusive_set_silences_the_others() {
         keyed(70, 0.8, 1),
     ];
     let mut plan = Plan::new(zones, 8);
-    let group = |voices, steal| kontra_ir::VoiceGroup {
+    let group = |voices, steal| contra_ir::VoiceGroup {
         voices,
         steal,
         prefer_released: true,
@@ -560,8 +560,8 @@ fn a_voice_group_steals_by_its_rule_and_an_exclusive_set_silences_the_others() {
         exclusive: Some(3),
     };
     plan.voice_groups = vec![
-        group(2, kontra_ir::Steal::Highest),
-        group(4, kontra_ir::Steal::Oldest),
+        group(2, contra_ir::Steal::Highest),
+        group(4, contra_ir::Steal::Oldest),
     ];
     let mut e = engine(&store, plan);
     level(&mut e, &[on(60, 1.0), on(64, 1.0)]);
@@ -592,13 +592,13 @@ fn a_one_shot_ignores_key_up() {
 fn pitch_bend_moves_sounding_voices_by_its_route() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
-    plan.groups[0].mods = vec![kontra_engine::ir::Mod {
+    plan.groups[0].mods = vec![contra_engine::ir::Mod {
         name: String::new(),
         slot: 0,
         target: 0,
         bypass: false,
-        kind: kontra_engine::ir::ModKind::Pitch {
-            source: kontra_engine::ir::Source::PitchBend,
+        kind: contra_engine::ir::ModKind::Pitch {
+            source: contra_engine::ir::Source::PitchBend,
             semitones: 2.0,
             depth: 1.0,
             tau_ms: 0.0,
@@ -629,7 +629,7 @@ fn pitch_bend_moves_sounding_voices_by_its_route() {
 
 #[test]
 fn a_sample_start_route_moves_the_start_within_its_range() {
-    use kontra_engine::ir::{Mod, ModKind, Source};
+    use contra_engine::ir::{Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     // A ramp: each frame's value is its index / 4096, so the output names the frame.
     let frames = 4096u64;
@@ -686,7 +686,7 @@ fn a_sample_start_route_moves_the_start_within_its_range() {
 
 #[test]
 fn a_group_eq_shapes_its_voices() {
-    use kontra_engine::ir::{Bell, Effect, EffectKind};
+    use contra_engine::ir::{Bell, Effect, EffectKind};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let region = sine(&mut store);
     let peak = |gain_db: f32| {
@@ -719,7 +719,7 @@ fn a_group_eq_shapes_its_voices() {
 
 #[test]
 fn a_shaped_controller_reads_its_start_until_a_message_arrives() {
-    use kontra_engine::ir::{Curve, Mod, ModKind, Source, Transfer};
+    use contra_engine::ir::{Curve, Mod, ModKind, Source, Transfer};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     plan.groups[0].shapers = vec![Transfer {
@@ -751,7 +751,7 @@ fn a_shaped_controller_reads_its_start_until_a_message_arrives() {
 
 #[test]
 fn a_blended_macro_moves_one_cell_of_a_sounding_voices_matrix() {
-    use kontra_engine::ir::{Blend, Factor, Mod, ModKind, Source, Term, Transfer};
+    use contra_engine::ir::{Blend, Factor, Mod, ModKind, Source, Term, Transfer};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(&mut store, 1.0);
     let mut mix = [[0.0; 2]; 16];
@@ -798,7 +798,7 @@ fn a_blended_macro_moves_one_cell_of_a_sounding_voices_matrix() {
 
 #[test]
 fn a_controller_pitch_route_moves_sounding_voices() {
-    use kontra_engine::ir::{Mod, ModKind, Source};
+    use contra_engine::ir::{Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     plan.groups[0].mods = vec![Mod {
@@ -827,7 +827,7 @@ fn a_controller_pitch_route_moves_sounding_voices() {
 
 #[test]
 fn an_envelope_pitch_route_rises_holds_and_releases() {
-    use kontra_engine::ir::{Breakpoint, Breakpoints, Mod, ModKind, Source};
+    use contra_engine::ir::{Breakpoint, Breakpoints, Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     let point = |level| Breakpoint {
@@ -874,7 +874,7 @@ fn an_envelope_pitch_route_rises_holds_and_releases() {
 
 #[test]
 fn a_controller_opens_a_voice_filter() {
-    use kontra_engine::ir::{Effect, EffectKind, Filter, Mod, ModKind, Pass, Source};
+    use contra_engine::ir::{Effect, EffectKind, Filter, Mod, ModKind, Pass, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![Zone::new(sine(&mut store), 60, RATE)], 8);
     // A 4-pole low pass at 100 Hz that a controller opens by 6 octaves.
@@ -929,10 +929,10 @@ fn a_controller_opens_a_voice_filter() {
 /// A group with one EQ insert, `eq`, and the given routes.
 fn eq_group(
     region: Region,
-    eq: [kontra_engine::ir::Bell; 4],
-    mods: Vec<kontra_engine::ir::Mod>,
+    eq: [contra_engine::ir::Bell; 4],
+    mods: Vec<contra_engine::ir::Mod>,
 ) -> Plan {
-    use kontra_engine::ir::{Effect, EffectKind};
+    use contra_engine::ir::{Effect, EffectKind};
     let mut plan = Plan::new(vec![Zone::new(region, 60, RATE)], 8);
     plan.groups[0].mods = mods;
     plan.groups[0].inserts = vec![Some(Effect {
@@ -946,7 +946,7 @@ fn eq_group(
 
 #[test]
 fn a_velocity_moved_eq_band_makes_a_hard_note_louder_at_its_frequency() {
-    use kontra_engine::ir::{Bell, Mod, ModKind, Source};
+    use contra_engine::ir::{Bell, Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let region = sine(&mut store);
     // The 1 kHz band moves +24 dB across velocity: 12 dB at 0.5, 24 dB at 1.
@@ -994,7 +994,7 @@ fn a_velocity_moved_eq_band_makes_a_hard_note_louder_at_its_frequency() {
 
 #[test]
 fn an_lfo_moved_resonance_changes_the_response_over_time() {
-    use kontra_engine::ir::{
+    use contra_engine::ir::{
         Clock, Effect, EffectKind, Filter, Lfo, Mod, ModKind, Pass, Rate, Source, Wave,
     };
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
@@ -1048,7 +1048,7 @@ fn an_lfo_moved_resonance_changes_the_response_over_time() {
 
 #[test]
 fn a_ladders_resonance_route_scales_its_resonance() {
-    use kontra_engine::ir::{
+    use contra_engine::ir::{
         Clock, Effect, EffectKind, Filter, Ladder, Lfo, Mod, ModKind, Pass, Rate, Source, Wave,
     };
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
@@ -1103,7 +1103,7 @@ fn a_ladders_resonance_route_scales_its_resonance() {
 
 #[test]
 fn a_group_formant_shapes_its_voices() {
-    use kontra_engine::ir::{Effect, EffectKind, Formant};
+    use contra_engine::ir::{Effect, EffectKind, Formant};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![Zone::new(sine(&mut store), 60, RATE)], 8);
     plan.groups[0].inserts = vec![Some(Effect {
@@ -1111,7 +1111,7 @@ fn a_group_formant_shapes_its_voices() {
             talk: 0.5,
             sharp: 0.5,
             size: 0.5,
-            set: kontra_engine::ir::VowelSet::First,
+            set: contra_engine::ir::VowelSet::First,
         }),
         bypass: false,
         output: 1.0,
@@ -1128,7 +1128,7 @@ fn a_group_formant_shapes_its_voices() {
 
 #[test]
 fn a_velocity_attack_route_shortens_soft_attacks() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].envelope.attack = 4800; // 100 ms, linear
@@ -1158,7 +1158,7 @@ fn a_velocity_attack_route_shortens_soft_attacks() {
 
 #[test]
 fn timed_modulation_does_not_depend_on_the_block_size() {
-    use kontra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
+    use contra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].lfos = vec![Lfo {
@@ -1202,7 +1202,7 @@ fn timed_modulation_does_not_depend_on_the_block_size() {
 
 #[test]
 fn an_instrument_convolution_adds_its_wet_path() {
-    use kontra_engine::{Response, ir};
+    use contra_engine::{Response, ir};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     // A delayed half-level tap: on a constant input the wet path is 0.25.
@@ -1224,7 +1224,7 @@ fn an_instrument_convolution_adds_its_wet_path() {
 
 #[test]
 fn an_instrument_reverb_rings_on_after_the_note() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let reverb = ir::Effect {
         kind: ir::EffectKind::Reverb(ir::Reverb {
             seconds: 2.0,
@@ -1282,7 +1282,7 @@ fn an_instrument_reverb_rings_on_after_the_note() {
 
 #[test]
 fn a_compressor_slot_mixes_its_dry_level_from_the_input() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let render = |output: f32| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
@@ -1315,7 +1315,7 @@ fn a_compressor_slot_mixes_its_dry_level_from_the_input() {
 
 #[test]
 fn a_group_waveshaper_clips_each_voice_not_their_sum() {
-    use kontra_engine::ir::{DriveCurve, Effect, EffectKind, Shaper};
+    use contra_engine::ir::{DriveCurve, Effect, EffectKind, Shaper};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let zones = vec![
         Zone::new(sine(&mut store), 60, RATE),
@@ -1344,7 +1344,7 @@ fn a_group_waveshaper_clips_each_voice_not_their_sum() {
 
 #[test]
 fn a_group_lofis_noise_fades_with_the_voice() {
-    use kontra_engine::ir::{Crush, Effect, EffectKind};
+    use contra_engine::ir::{Crush, Effect, EffectKind};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![Zone::new(sine(&mut store), 60, RATE)], 8);
     plan.groups[0].envelope.release = 2400;
@@ -1377,7 +1377,7 @@ fn a_group_lofis_noise_fades_with_the_voice() {
 
 #[test]
 fn a_route_moves_a_group_waveshapers_amount_per_voice() {
-    use kontra_engine::ir::{
+    use contra_engine::ir::{
         DriveCurve, Effect, EffectKind, EffectParam, Mod, ModKind, Shaper, Source,
     };
     let peak = |bypass: bool| {
@@ -1420,7 +1420,7 @@ fn a_route_moves_a_group_waveshapers_amount_per_voice() {
 
 #[test]
 fn a_route_moves_an_eq_bands_centre_per_voice() {
-    use kontra_engine::ir::{Bell, Effect, EffectKind, EffectParam, Mod, ModKind, Shape, Source};
+    use contra_engine::ir::{Bell, Effect, EffectKind, EffectParam, Mod, ModKind, Shape, Source};
     let peak = |octaves: f32| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![Zone::new(sine(&mut store), 60, RATE)], 8);
@@ -1464,7 +1464,7 @@ fn a_route_moves_an_eq_bands_centre_per_voice() {
 
 #[test]
 fn an_lfo_on_a_group_waveshaper_retunes_it_every_32_frames() {
-    use kontra_engine::ir::{
+    use contra_engine::ir::{
         Clock, DriveCurve, Effect, EffectKind, EffectParam, Lfo, Mod, ModKind, Rate, Shaper,
         Source, Wave,
     };
@@ -1514,7 +1514,7 @@ fn an_lfo_on_a_group_waveshaper_retunes_it_every_32_frames() {
 
 #[test]
 fn a_synced_delay_echoes_one_beat_later_at_the_host_tempo() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.inserts = vec![Some(ir::Effect {
@@ -1557,7 +1557,7 @@ fn a_synced_delay_echoes_one_beat_later_at_the_host_tempo() {
 
 #[test]
 fn a_group_phaser_without_a_dry_level_plays_on_the_group_sum() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     // The phaser runs on the group's sum: its wet path carries the voice.
@@ -1586,7 +1586,7 @@ fn a_group_phaser_without_a_dry_level_plays_on_the_group_sum() {
 
 #[test]
 fn a_pitch_bend_release_route_reads_the_wheel_from_zero_to_one() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].envelope.release = 48_000; // 1 s
@@ -1619,7 +1619,7 @@ fn a_pitch_bend_release_route_reads_the_wheel_from_zero_to_one() {
 
 #[test]
 fn a_pitch_bend_volume_route_reads_the_wheel_from_zero_to_one() {
-    use kontra_engine::ir::{Curve, Mod, ModKind, Source};
+    use contra_engine::ir::{Curve, Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     plan.groups[0].mods = vec![Mod {
@@ -1652,7 +1652,7 @@ fn a_pitch_bend_volume_route_reads_the_wheel_from_zero_to_one() {
 
 #[test]
 fn a_lagging_controller_route_glides_as_a_one_pole() {
-    use kontra_engine::ir::{Curve, Mod, ModKind, Source};
+    use contra_engine::ir::{Curve, Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     // Kontakt's lag 120 ms: τ = 120 / ln 100.
@@ -1690,7 +1690,7 @@ fn a_lagging_controller_route_glides_as_a_one_pole() {
 
 #[test]
 fn a_lagging_pitch_route_glides_its_semitones() {
-    use kontra_engine::ir::{Mod, ModKind, Source};
+    use contra_engine::ir::{Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     // Kontakt's pitch-bend route, lag 250 ms: τ = 250 / ln 100.
@@ -1740,7 +1740,7 @@ fn a_lagging_pitch_route_glides_its_semitones() {
 
 #[test]
 fn a_constant_start_phase_route_shifts_a_voices_lfo() {
-    use kontra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
+    use contra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
     let first = |phase_route: Option<f32>| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
@@ -1785,7 +1785,7 @@ fn a_constant_start_phase_route_shifts_a_voices_lfo() {
 
 #[test]
 fn an_intensity_route_scales_its_lfos_routes() {
-    use kontra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
+    use contra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
     let first = |by: Source| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
@@ -1827,7 +1827,7 @@ fn an_intensity_route_scales_its_lfos_routes() {
 
 #[test]
 fn a_velocity_rate_route_speeds_a_voices_lfo() {
-    use kontra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
+    use contra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
     let at_half_a_second = |octaves: f32| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
@@ -1878,7 +1878,7 @@ fn a_velocity_rate_route_speeds_a_voices_lfo() {
 
 #[test]
 fn a_live_controller_moves_an_lfos_rate_mid_note() {
-    use kontra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
+    use contra_engine::ir::{Clock, Curve, Lfo, Mod, ModKind, Rate, Source, Wave};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
     plan.groups[0].lfos = vec![Lfo {
@@ -1932,7 +1932,7 @@ fn a_live_controller_moves_an_lfos_rate_mid_note() {
 fn a_controller_moves_a_bus_eq_band_while_it_plays() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = Zone::new(sine(&mut store), 60, RATE);
-    z.region.loops = vec![kontra_voice::Loop {
+    z.region.loops = vec![contra_voice::Loop {
         start: 0,
         end: 48_000,
         crossfade: 0,
@@ -1995,7 +1995,7 @@ fn a_controller_moves_a_bus_eq_band_while_it_plays() {
 #[cfg(feature = "trace")]
 #[test]
 fn bounded_trace_captures_voice_start_steal_and_end_without_changing_audio() {
-    use kontra_engine::{TraceEvent, VoiceEvent};
+    use contra_engine::{TraceEvent, VoiceEvent};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let plan = Arc::new(Plan::new(vec![zone(&mut store, 0.5)], 1));
     let mut plain = Engine::new(Arc::clone(&plan), store.client(), RATE);
@@ -2031,7 +2031,7 @@ fn bounded_trace_captures_voice_start_steal_and_end_without_changing_audio() {
 #[cfg(feature = "trace")]
 #[test]
 fn note_on_route_trace_keeps_the_controller_value_at_start() {
-    use kontra_engine::TraceEvent;
+    use contra_engine::TraceEvent;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(&mut store, 0.5);
     z.start_mod = 1000;
@@ -2067,7 +2067,7 @@ fn note_on_route_trace_keeps_the_controller_value_at_start() {
 #[cfg(feature = "trace")]
 #[test]
 fn release_route_trace_uses_the_key_held_time() {
-    use kontra_engine::TraceEvent;
+    use contra_engine::TraceEvent;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(&mut store, 0.5);
     z.trigger = Trigger::Release;
@@ -2122,7 +2122,7 @@ fn voice_snapshot_reports_the_playing_envelope_and_pitch() {
 #[cfg(feature = "trace")]
 #[test]
 fn controller_route_trace_is_the_value_used_and_preserves_audio() {
-    use kontra_engine::RouteUnit;
+    use contra_engine::RouteUnit;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].mods = vec![
@@ -2202,7 +2202,7 @@ fn controller_route_trace_is_the_value_used_and_preserves_audio() {
 #[cfg(feature = "trace")]
 #[test]
 fn timed_lfo_route_retains_all_ccs_received_before_the_span() {
-    use kontra_engine::RouteUnit;
+    use contra_engine::RouteUnit;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].lfos.push(ir::Lfo {
@@ -2257,7 +2257,7 @@ fn timed_lfo_route_retains_all_ccs_received_before_the_span() {
 #[cfg(feature = "trace")]
 #[test]
 fn onset_route_trace_records_sample_and_envelope_values() {
-    use kontra_engine::RouteUnit;
+    use contra_engine::RouteUnit;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(&mut store, 0.5);
     z.start_mod = 1000;
@@ -2313,10 +2313,10 @@ fn onset_route_trace_records_sample_and_envelope_values() {
 #[cfg(feature = "trace")]
 #[test]
 fn script_controller_callback_links_indirect_route_evaluations() {
-    use kontra_engine::{
+    use contra_engine::{
         Action, Callbacks, Controls, EnginePars, Op, Program, RouteUnit, ScriptPlan,
     };
-    use kontra_vm::Returns;
+    use contra_vm::Returns;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
     plan.groups[0].mods = vec![ir::Mod {

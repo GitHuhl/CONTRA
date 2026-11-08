@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 use ni_file::kontakt::KontaktChunks;
 use ni_file::kontakt::objects::{EffectParameters, EffectValue, FNTableImpl, FileNameListPreK51};
 
@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::resources::Resources;
 use crate::samples::Resolver;
-use kontra_format::Notes;
+use contra_format::Notes;
 
 /// The instrument's sample and other-files tables, read once: a large
 /// library's table holds about 100k names.
@@ -251,7 +251,7 @@ pub(crate) fn script_knobs() -> [(&'static str, ir::KnobTarget, ir::Law); 5] {
     use ir::ImpulseKnob::{Cut, PredelayMs};
     use ir::KnobTarget::Impulse;
     let predelay: Vec<f32> = (0..=32)
-        .map(|i| kontra_law::kontakt::CONVOLUTION_PREDELAY.eval(i as f32 / 32.0))
+        .map(|i| contra_law::kontakt::CONVOLUTION_PREDELAY.eval(i as f32 / 32.0))
         .collect();
     let hz = || ir::Law::Exp {
         lo: 20.0,

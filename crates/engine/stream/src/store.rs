@@ -165,7 +165,7 @@ impl Store {
         let io = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("kontra-stream-io".into())
+                .name("contra-stream-io".into())
                 .spawn(move || serve(&shared, &registrations, slot_bytes))?
         };
         Ok(Self {

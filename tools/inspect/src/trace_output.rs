@@ -1,5 +1,5 @@
 //! Conversion of fixed-size engine events to the inspector's JSON schema.
-use kontra_engine::{Plan, RouteUnit, RouteValue, TraceEvent};
+use contra_engine::{Plan, RouteUnit, RouteValue, TraceEvent};
 use serde_json::{Value, json};
 
 pub fn event(e: &TraceEvent, plan: &Plan, samples: &[Option<String>], rate: u32) -> Value {
@@ -74,10 +74,10 @@ pub fn event(e: &TraceEvent, plan: &Plan, samples: &[Option<String>], rate: u32)
             });
             json!({"type":"voice", "frame":frame, "slot":slot, "zone":zone, "sample":samples.get(*zone),
                 "event":format!("{event:?}"), "position":position,
-                "position_reference": if matches!(event, kontra_engine::VoiceEvent::Start) {"sample_start"} else {"relative_cursor"},
-                "gain_reference": if matches!(event, kontra_engine::VoiceEvent::Start) {"target_before_envelope"} else {"current_before_sample"}, "source_frames_per_output_frame":step,
+                "position_reference": if matches!(event, contra_engine::VoiceEvent::Start) {"sample_start"} else {"relative_cursor"},
+                "gain_reference": if matches!(event, contra_engine::VoiceEvent::Start) {"target_before_envelope"} else {"current_before_sample"}, "source_frames_per_output_frame":step,
                 "pitch_midi_relative_to_root":pitch, "gain":gain,
-                "time_precision": if matches!(event, kontra_engine::VoiceEvent::End) {"render_span_end"} else {"sample"}})
+                "time_precision": if matches!(event, contra_engine::VoiceEvent::End) {"render_span_end"} else {"sample"}})
         }
     }
 }

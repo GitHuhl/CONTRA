@@ -1,9 +1,9 @@
-//! What real Kontakt libraries ask of KONTRA, and what it answers: every KSP
+//! What real Kontakt libraries ask of CONTRA, and what it answers: every KSP
 //! action and catalog name their scripts use, whether the compiler takes the
 //! script, whether the engine answers the action (a zero-argument probe and
 //! one init + note run per distinct script), and every feature the Kontakt
 //! translator could not carry into the IR. Writes a ranked markdown report.
-//! `cargo run --release -p kontra-host --example coverage -- <out.md> <library dir>...`
+//! `cargo run --release -p contra-host --example coverage -- <out.md> <library dir>...`
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kontra_engine::{Action, Engine, Event, HostNote, HostPattern, SampleTime, Timed, ir};
-use kontra_host::script::{runs, understood};
-use kontra_ksp::Builtin;
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::{Action, Engine, Event, HostNote, HostPattern, SampleTime, Timed, ir};
+use contra_host::script::{runs, understood};
+use contra_ksp::Builtin;
+use contra_stream::{Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 
@@ -109,7 +109,7 @@ fn library(path: &Path) -> String {
 
 fn survey(path: &Path, store: &mut Store, report: &Mutex<Report>) {
     let lib = library(path);
-    let ir = match kontra_format_kontakt::load(path) {
+    let ir = match contra_format_kontakt::load(path) {
         Ok(ir) => ir,
         Err(e) => {
             if let Ok(mut r) = report.lock() {
@@ -158,7 +158,7 @@ fn survey(path: &Path, store: &mut Store, report: &Mutex<Report>) {
             continue;
         }
         let name = format!("{lib}: {} slot {slot} ({})", stem(path), script.name);
-        let compiled = match kontra_ksp::compile(&script.source, &[]) {
+        let compiled = match contra_ksp::compile(&script.source, &[]) {
             Ok(c) => c,
             Err(e) => {
                 if let Ok(mut r) = report.lock() {
@@ -173,7 +173,7 @@ fn survey(path: &Path, store: &mut Store, report: &Mutex<Report>) {
             .code
             .iter()
             .filter_map(|op| match op {
-                kontra_engine::Op::Host { action, .. } => Some(action.id()),
+                contra_engine::Op::Host { action, .. } => Some(action.id()),
                 _ => None,
             })
             .collect();
@@ -229,17 +229,17 @@ fn stem(path: &Path) -> String {
 }
 
 type Counts = Vec<(Action, u32)>;
-type Run = (Counts, Counts, Option<kontra_engine::Faults>);
+type Run = (Counts, Counts, Option<contra_engine::Faults>);
 
 /// Whether `f` holds a fault Kontakt would not share: a division by zero
 /// answers 0 and an index out of range reads 0 there too.
-fn ours(f: &kontra_engine::Faults) -> bool {
+fn ours(f: &contra_engine::Faults) -> bool {
     f.stack_overflow + f.texts_cut + f.loop_limits + f.no_coroutine + f.bad_code > 0
 }
 
 /// `f` with its first out-of-range array named from `script`'s variables,
 /// and the ops that pushed its first zero divisor.
-fn describe(f: &kontra_engine::Faults, script: &kontra_ksp::Script) -> String {
+fn describe(f: &contra_engine::Faults, script: &contra_ksp::Script) -> String {
     let mut s = format!(
         "div0 {}, out of range {}, stack {}, texts cut {}, loop limits {}, no coroutine {}, bad code {}",
         f.divide_by_zero,
@@ -253,10 +253,10 @@ fn describe(f: &kontra_engine::Faults, script: &kontra_ksp::Script) -> String {
     let name = |cell: u32, text: bool| {
         script.variables.iter().find_map(|v| {
             let (base, len, t) = match v.cells {
-                kontra_ksp::Cells::Int { base, len } | kontra_ksp::Cells::Real { base, len } => {
+                contra_ksp::Cells::Int { base, len } | contra_ksp::Cells::Real { base, len } => {
                     (base, len, false)
                 }
-                kontra_ksp::Cells::Text { base, len } => (base, len, true),
+                contra_ksp::Cells::Text { base, len } => (base, len, true),
                 _ => return None,
             };
             (t == text && (base..base + len.max(1)).contains(&cell))
@@ -272,10 +272,10 @@ fn describe(f: &kontra_engine::Faults, script: &kontra_ksp::Script) -> String {
         let ops: Vec<String> = (pc.saturating_sub(8)..pc)
             .filter_map(|p| script.program.code.get(p as usize))
             .map(|op| match op {
-                kontra_engine::Op::Load(n) => {
+                contra_engine::Op::Load(n) => {
                     name(*n, false).map_or_else(|| format!("{op:?}"), |(n, _)| n)
                 }
-                kontra_engine::Op::LoadAt { base, .. } => {
+                contra_engine::Op::LoadAt { base, .. } => {
                     name(*base, false).map_or_else(|| format!("{op:?}"), |(n, _)| format!("{n}[]"))
                 }
                 _ => format!("{op:?}"),
@@ -296,7 +296,7 @@ fn run(ir: &ir::Instrument, slot: usize, store: &mut Store) -> Option<Run> {
     for g in &mut ir.groups {
         g.zones.clear();
     }
-    let loaded = kontra_host::instrument::build(ir, RATE, store);
+    let loaded = contra_host::instrument::build(ir, RATE, store);
     loaded.plan.scripts.first()?;
     let mut engine = Engine::new(Arc::new(loaded.plan), store.client(), RATE);
     let host = HostNote {
@@ -337,7 +337,7 @@ fn run(ir: &ir::Instrument, slot: usize, store: &mut Store) -> Option<Run> {
     let faults = engine
         .script_faults()
         .into_iter()
-        .find(|f| *f != kontra_engine::Faults::default());
+        .find(|f| *f != contra_engine::Faults::default());
     Some((engine.action_calls(), engine.unhandled_actions(), faults))
 }
 
@@ -357,7 +357,7 @@ fn names(action: Action) -> String {
 
 fn render(r: &Report) -> std::io::Result<String> {
     let mut store = Store::new(StoreConfig::DEFAULT)?;
-    let plan = kontra_host::instrument::build(ir::Instrument::DEFAULT, RATE, &mut store).plan;
+    let plan = contra_host::instrument::build(ir::Instrument::DEFAULT, RATE, &mut store).plan;
     let mut probe = Engine::new(Arc::new(plan), store.client(), RATE);
     let mut rows: Vec<_> = r
         .actions
@@ -504,7 +504,7 @@ fn render(r: &Report) -> std::io::Result<String> {
         let _ = writeln!(s, "\n## Runtime faults (init + one note)\n");
         let _ = writeln!(
             s,
-            "A division by zero or an index out of range is the library's own: Kontakt 8.13.1 answers 0 (a store is dropped) and runs on, as KONTRA does (oracle probes 2026-10-28/29), so only the other faults count against the census.\n"
+            "A division by zero or an index out of range is the library's own: Kontakt 8.13.1 answers 0 (a store is dropped) and runs on, as CONTRA does (oracle probes 2026-10-28/29), so only the other faults count against the census.\n"
         );
         for (name, f) in &r.faults {
             let _ = writeln!(s, "- {name}: {f}");
@@ -541,7 +541,7 @@ fn judge(key: &str, status_of: &BTreeMap<u16, &str>) -> (bool, &'static str, Str
         }
         "s" => (understood(name), "name", "unused by engine".into(), 1),
         "c" => {
-            let good = kontra_ksp::CallbackKind::ALL
+            let good = contra_ksp::CallbackKind::ALL
                 .iter()
                 .find(|k| format!("{k:?}") == name)
                 .is_some_and(|&k| runs(k));

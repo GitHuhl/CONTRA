@@ -19,4 +19,4 @@ jobs:
       - run: |
           mkdir -p gpu-receipts
           nix develop --command bash -c \
-            'VK_DRIVER_FILES=$KONTRA_SOFTWARE_VULKAN KONTRA_GPU_RECEIPT_DIR=$PWD/gpu-receipts cargo test --workspace'
+            'VK_DRIVER_FILES=$CONTRA_SOFTWARE_VULKAN CONTRA_GPU_RECEIPT_DIR=$PWD/gpu-receipts cargo test --workspace'

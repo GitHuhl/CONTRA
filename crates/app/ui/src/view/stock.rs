@@ -4,7 +4,7 @@
 //! boxes beside it (shades measured on Kontakt 8's Pacific page), and a
 //! fader, a text field and the bars of a table (v1 `0cb7a8a0:src/ui/perf_view.rs`).
 
-use kontra_ui_model::{self as model, Interface, Kind, Source, TextStyle, Widget};
+use contra_ui_model::{self as model, Interface, Kind, Source, TextStyle, Widget};
 use mui::prelude::*;
 use std::sync::Arc;
 

@@ -2,7 +2,7 @@
 -- LFO routes and the depth its init push leaves on them, from slot 1's init (the dump harness
 -- runs no audio, so no timer ticks). Each value + 1000 goes out in four base-100 digits.
 -- Kontakt 8.13.1, 2026-10-28: find_mod 1, 4, 33; find_target VOL 0, CUT 2; intensity 755893,
--- 0, 755893. KONTRA answers the same (an appended init with the same reads). The route that
+-- 0, 755893. CONTRA answers the same (an appended init with the same reads). The route that
 -- ANALOG rewrites after init is its own first-timer-tick ui__refresh re-pushing the same 914900
 -- depth, not a find_mod miss or a misaddressed route.
 local kt = Kontakt

@@ -28,7 +28,7 @@ pub use trace::{Application, LawId, collect, record};
 /// generated test is named `every_law_parses`.
 ///
 /// ```text
-/// kontra_law::laws!(
+/// contra_law::laws!(
 ///     SOLID_BUS_COMP => "laws/vendor/solid_bus_comp.toml",
 ///     FILTER_CUTOFF => "laws/vendor/filter_cutoff.toml",
 /// );

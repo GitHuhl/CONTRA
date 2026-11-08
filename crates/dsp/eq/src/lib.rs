@@ -10,7 +10,7 @@ pub struct Bell {
     pub gain_db: f32,
 }
 
-pub use kontra_dsp_core::{Biquad, Side, shelf};
+pub use contra_dsp_core::{Biquad, Side, shelf};
 
 /// The bell at `rate`; its centre is held below 0.49 of the rate.
 #[must_use]

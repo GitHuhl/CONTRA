@@ -1,8 +1,8 @@
 //! Live behaviour state: articulation switch, controller values, round-robin
 //! counters. Deterministic: the same input gives the same voices, every run.
 
-use kontra_ir::Join;
-use kontra_plan::{Atom, Control, Plan, RoundRobin, RrCounter, Zone};
+use contra_ir::Join;
+use contra_plan::{Atom, Control, Plan, RoundRobin, RrCounter, Zone};
 
 /// What a zone's start does to its round-robin counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub struct Behaviour {
     /// last switched to.
     pub shapes: Vec<Option<u16>>,
     /// Slots and the [`ir::SlotShapes::types`] entry each was last loaded with.
-    pub loaded: Vec<(kontra_ir::RackAt, u8, u16)>,
+    pub loaded: Vec<(contra_ir::RackAt, u8, u16)>,
 }
 
 impl Behaviour {

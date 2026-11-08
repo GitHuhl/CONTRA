@@ -1,7 +1,7 @@
 // List the functions that reference an address (e.g. a vtable: its constructors).
 //   RE_SCRIPT=RefsTo.java tools/re/query.sh 0x144e97640
 // Args: <address>. Output: `ref from <address> in <function>` per reference.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;

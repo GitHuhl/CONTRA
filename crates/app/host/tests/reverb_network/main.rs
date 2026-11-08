@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Event, HostNote, Plan, Region, SampleTime, Timed, Zone, ir};
-use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+use contra_engine::{Engine, Event, HostNote, Plan, Region, SampleTime, Timed, Zone, ir};
+use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
 
 mod vectors;
 
@@ -70,7 +70,7 @@ fn render_at(
     let (wet, dry) = (c[8] * std::f32::consts::FRAC_PI_2).sin_cos();
     let v = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[9]];
     plan.inserts = vec![Some(ir::Effect {
-        kind: ir::EffectKind::Reverb(kontra_format_kontakt::reverb(i32::from(hall), v)),
+        kind: ir::EffectKind::Reverb(contra_format_kontakt::reverb(i32::from(hall), v)),
         bypass: false,
         output: wet,
         dry,

@@ -4,7 +4,7 @@
 //! wgpu surface, and a `Ui` frame per native event. [`Bridge`] binds widget
 //! ids to moose parameters, so a drag is the host's begin/perform/end and
 //! host automation is the value the next tree reads. [`window`] is the half
-//! that knows no plugin framework: KONTRA's custom `kontra-native-host`,
+//! that knows no plugin framework: CONTRA's custom `contra-native-host`,
 //! re-exported through the stable `mui_baseview` dependency alias.
 //!
 //! The moose port of MUI's `mui-truce`; the MUI crates themselves (`mui`,

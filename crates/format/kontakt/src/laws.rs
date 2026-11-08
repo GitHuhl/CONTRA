@@ -1,9 +1,9 @@
 //! Kontakt's measured laws, mapped onto the sampler's neutral shapes. Each
 //! names the evidence it rests on; the IR and engine never see the vendor.
 
-use kontra_ir as ir;
-use kontra_law::common::{ATTACK_CURVE, CUBE};
-use kontra_law::kontakt::{
+use contra_ir as ir;
+use contra_law::common::{ATTACK_CURVE, CUBE};
+use contra_law::kontakt::{
     EQ_PEAK_DB, FILTER_NOTE_HZ, FLEX_SHAPE, LADDER_GAIN, LEGACY_CUTOFF_HZ, LEGACY_RESONANCE_LOSS,
     LEGACY_RESONANCE_Q, UNIT_FIFTH,
 };
@@ -54,9 +54,9 @@ pub(crate) fn volume(source: ir::Source) -> ir::Curve {
                 | ir::Source::Script(_)
                 | ir::Source::PitchBend
         ) {
-            kontra_law::kontakt::CONTROLLER_VOLUME_POWER
+            contra_law::kontakt::CONTROLLER_VOLUME_POWER
         } else {
-            kontra_law::kontakt::VOICE_VOLUME_POWER
+            contra_law::kontakt::VOICE_VOLUME_POWER
         },
     }
 }
@@ -575,7 +575,7 @@ pub(crate) fn solid_eq(
     hf_shape: ir::Shape,
 ) -> [ir::Bell; 4] {
     use solid::*;
-    let t = |table: [f32; 11], x: f32| kontra_law::Law::Table(table.into()).eval(x);
+    let t = |table: [f32; 11], x: f32| contra_law::Law::Table(table.into()).eval(x);
     let peak = |hz, gain_db, q| ir::Bell {
         shape: ir::Shape::Peak,
         hz,

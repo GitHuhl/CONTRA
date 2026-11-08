@@ -1,7 +1,7 @@
 //! A modulation route's signed depth, as scripts read and write it: an EQ
 //! gain or effect route's depth over its span, a plain route's own depth.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// A route's signed depth; an EQ gain or effect route's is its depth over
 /// its span.
@@ -104,7 +104,7 @@ pub fn moved(mods: &[ir::Mod], n: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{set_signed, signed};
-    use kontra_ir as ir;
+    use contra_ir as ir;
 
     #[test]
     fn an_eq_gain_depth_is_its_gain_over_its_span() {

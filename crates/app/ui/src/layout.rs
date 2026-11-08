@@ -2,7 +2,7 @@
 //! placement, grid page heights and stock control sizes, and a picture's
 //! own size on the axes it does not stretch (ported from v2's `ir_view`).
 
-use kontra_ui_model::{AssetKind, Interface, Kind, Orientation, Placement, Role};
+use contra_ui_model::{AssetKind, Interface, Kind, Orientation, Placement, Role};
 
 /// Kontakt's layout grid (`move_control`): column and row pitch, and the
 /// first cell's corner; `set_ui_height` rows are [`GRID_ROW_HEIGHT`] tall.
@@ -90,7 +90,7 @@ pub fn resolve(tree: &mut Interface, changed: impl IntoIterator<Item = usize>) {
 
 #[cfg(test)]
 mod tests {
-    use kontra_ui_model::{Page, PageRef, Rect, Widget};
+    use contra_ui_model::{Page, PageRef, Rect, Widget};
 
     use super::*;
 
@@ -108,8 +108,8 @@ mod tests {
             PageRef(0),
             Rect::default(),
             Kind::Knob {
-                range: kontra_ui_model::Range::default(),
-                display: kontra_ui_model::Display::default(),
+                range: contra_ui_model::Range::default(),
+                display: contra_ui_model::Display::default(),
             },
         );
         knob.auto_size = true;

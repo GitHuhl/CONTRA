@@ -10,7 +10,7 @@
 //! 0x1412afb10, step 0x1412b0b60, setup 0x1412ae600): two substeps on the
 //! input's midpoint then its end, at most 20 iterations to 1e-6.
 
-use kontra_dsp_core::flush;
+use contra_dsp_core::flush;
 
 /// The feedback resistor divider `10 kΩ/(10 kΩ + 8.2 kΩ)` on `q`.
 const DIVIDER: f64 = 10_000.0 / 18_200.0;

@@ -7,7 +7,7 @@ use mui::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kontra_ui_model::{AssetRef, ImageMeta};
+use contra_ui_model::{AssetRef, ImageMeta};
 
 use super::{Action, App, Shelf};
 use crate::Pictures;

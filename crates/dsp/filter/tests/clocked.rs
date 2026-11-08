@@ -1,4 +1,4 @@
-use kontra_dsp_filter::{Clocked, ClockedShape};
+use contra_dsp_filter::{Clocked, ClockedShape};
 
 /// Kontakt 8's Phaser filter (type 13) and Vowel A/B (14, 15), their native
 /// clock (0x140ae9f90), setters and kernels run under kemu

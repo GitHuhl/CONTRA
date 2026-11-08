@@ -9,7 +9,7 @@
 --     duration -1, which may be why the second trigger was silent.
 -- render.py starts recording on the {"ready":true} line.
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat2\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat2\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

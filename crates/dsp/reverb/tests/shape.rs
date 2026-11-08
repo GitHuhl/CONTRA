@@ -1,4 +1,4 @@
-use kontra_dsp_reverb::shape::{self, Cuts, cut, envelope, split};
+use contra_dsp_reverb::shape::{self, Cuts, cut, envelope, split};
 
 const RATE: u32 = 48_000;
 

@@ -1,4 +1,4 @@
-use kontra_law::kontakt::modulation_shaper;
+use contra_law::kontakt::modulation_shaper;
 
 /// Compare a curved shaper with native endpoint and midpoint vectors.
 #[test]

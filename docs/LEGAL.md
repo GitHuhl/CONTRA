@@ -7,7 +7,7 @@ distribution is lawful.
 
 ## Project purpose and license
 
-KONTRA aims to let musicians use instruments they are entitled to use in
+CONTRA aims to let musicians use instruments they are entitled to use in
 an independent sampler, including on Linux. Native Instruments currently
 lists Windows and macOS for Kontakt; Linux is not listed as a supported
 platform. [Kontakt system requirements](https://www.native-instruments.com/products/kontakt).
@@ -27,7 +27,7 @@ rights. [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 | Local access data | `src/access.rs::library_key` reads `.nicnt` metadata and constructs a symmetric keystream. Import, audio and resource readers use it. | This is decryption capability, not a purchase, account or activation check. Local access data is not evidence of a user's license. |
 | Third-party parser | `vendor/ni-file` is a required dependency with no explicit redistribution license found at the pinned upstream commit. | Project-authored Apache-2.0 licensing does not clear redistribution of the parser or binaries containing it. |
 | Content supplied | No commercial Kontakt instrument library is supplied; the tree does contain vendored NCW/WAV codec fixtures and an OFL font. | Avoid blanket claims that the repository contains no third-party samples or assets. Fixture recording provenance still needs verification. |
-| Local copies and exports | `src/cache.rs` stores instrument scripts and decoded impulse responses. Creator/state exports can contain library-derived data. | A cache, conversion or saved state does not acquire a new content license. Do not share those files merely because KONTRA produced them. |
+| Local copies and exports | `src/cache.rs` stores instrument scripts and decoded impulse responses. Creator/state exports can contain library-derived data. | A cache, conversion or saved state does not acquire a new content license. Do not share those files merely because CONTRA produced them. |
 | Format references | THIRD_PARTY.md records algorithm/constant overlaps with GPL-3.0 references. | Protectable copied expression and applicable license obligations need a provenance review; matching format facts alone do not decide this. |
 | Release notices | Nightlies stage LICENSE, NOTICE, THIRD_PARTY.md, this review, OFL, generated dependency texts, unchanged MOOSE/MUI licenses and MPL source archives, including the modified vendored PCM parser. | Notices address distribution obligations; they do not establish missing permission or lawful decryption. |
 
@@ -41,7 +41,7 @@ discovery is not entitlement verification. The access path is shared by
 preset import, sample playback and resource loading. Resource loading
 can reproduce library-authored graphics as well as parse format metadata.
 Creator output copies supplied WAV/AIFF files into newly created library
-folders. That is distinct from distributing KONTRA's own sampler code.
+folders. That is distinct from distributing CONTRA's own sampler code.
 
 The maintainer reports no separate written parser permission or development
 provenance records. The available Ma5onic fork history was checked for
@@ -129,7 +129,7 @@ every possible claim. It concerned broadcasts and viewers, not this
 sampler's reproduction of recordings, graphics or scripts.
 [Full judgment, Cardozo translation](https://versa.cardozo.yu.edu/opinions/telran-communications-ltd-v-charlton-ltd).
 
-This is not a ruling on KONTRA. The June 2026 text does not add a standalone
+This is not a ruling on CONTRA. The June 2026 text does not add a standalone
 DMCA-style circumvention provision. That is a limited observation about
 this statute, not clearance under every Israeli law or foreign jurisdiction.
 Later online-infringement provisions and separate claims still require
@@ -150,7 +150,7 @@ The distinction between compatibility and copying is also addressed in
 **SAS Institute v. World Programming**, C-406/10: the CJEU distinguished
 functionality, programming language and data-file formats from protected
 program expression, while retaining possible protection for copied
-manual expression. That supports examining KONTRA's format work on its
+manual expression. That supports examining CONTRA's format work on its
 facts; it does not supply rights in library recordings or third-party code.
 [CJEU judgment](https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:62010CJ0406).
 The US Fourth Circuit later upheld reverse-engineering-related contract
@@ -177,7 +177,7 @@ encrypted data file or the public distribution of its access tooling.
 
 ## Claims and evidence to keep separate
 
-| Question | Evidence relevant to KONTRA | What remains unresolved |
+| Question | Evidence relevant to CONTRA | What remains unresolved |
 |---|---|---|
 | Copyright in NI software | Independent sampler source, format observations, no NI executable supplied. | Whether any protectable code/manual expression was copied; origins of reference-derived paths. |
 | Copyright in parser authors' code | Exact Ma5onic pin and local patch history are retained. | An affirmative redistribution grant covering relevant authors/contributions. |
@@ -185,7 +185,7 @@ encrypted data file or the public distribution of its access tooling.
 | Contracts | NI's published EULA and any product agreement actually accepted. | Parties bound, purchase-time wording, governing law, mandatory exceptions and development conduct. |
 | Trade secrets | Public references, observed format facts and any independently recorded work. | Whether information qualifies as secret and was acquired/used lawfully; no complete provenance records supplied. |
 | Circumvention/tool distribution | Default access implementation reads local metadata and decrypts content without checking entitlement. | Statutory exceptions, whether a measure qualifies, authorization, and foreign distribution. |
-| Branding and assets | Independent KONTRA name and explicit non-affiliation. | Rights for specific published library screenshots/artwork, and fixture recordings. |
+| Branding and assets | Independent CONTRA name and explicit non-affiliation. | Rights for specific published library screenshots/artwork, and fixture recordings. |
 
 These are issues to resolve, not findings that any particular claim
 would succeed. Neither NI's allegation nor the maintainer's stated
@@ -216,7 +216,7 @@ timing. No automatic counter-notice or litigation threat is authorized.
 
 ## Liability and educational purpose
 
-KONTRA's development includes education, file-format research and lawful
+CONTRA's development includes education, file-format research and lawful
 interoperability. These are statements of purpose, not findings that all
 acts are permitted. Applicable exceptions depend on their legal
 conditions and the actual conduct; an educational label alone does not

@@ -2,7 +2,7 @@
 //! control comes from a [`Law`] the translator supplies, so the engine only
 //! ever sees physical units.
 
-pub use kontra_law::{CombNetwork, HadamardNetwork, Law, NETWORK_LINES, ReverbNetwork};
+pub use contra_law::{CombNetwork, HadamardNetwork, Law, NETWORK_LINES, ReverbNetwork};
 
 /// A reverb's structure as the translator's law gives it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,7 +15,7 @@ pub enum Network {
     Hadamard(HadamardNetwork),
 }
 
-pub use kontra_params::{ReverbControls, ReverbPar};
+pub use contra_params::{ReverbControls, ReverbPar};
 
 impl crate::Reverb {
     /// Reads the physical value of a control.

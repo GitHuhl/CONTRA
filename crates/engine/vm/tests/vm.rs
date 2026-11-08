@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use kontra_vm::{
+use contra_vm::{
     Action, Cmp, HostApi, HostCall, HostValue, Instance, Op, Program, Returns, Step, Text,
 };
 

@@ -2,14 +2,14 @@
 //! LFOs. Evaluated in closed form once per span; a voice carries only the
 //! cycles live rate routes added to its LFOs ([`Age::warp`]).
 
-use kontra_ir as ir;
-use kontra_time::SampleTime;
+use contra_ir as ir;
+use contra_time::SampleTime;
 
 use crate::ledger::Note;
 use crate::voice_gain::{self, GROUP_PAN_TAU_MS};
 use crate::{Engine, MAX_SPAN};
 
-pub(crate) use kontra_plan::modulation::{
+pub(crate) use contra_plan::modulation::{
     Age, CHAOS_START, Chaos, WARPS, chaos_step, envelope, lfo,
 };
 

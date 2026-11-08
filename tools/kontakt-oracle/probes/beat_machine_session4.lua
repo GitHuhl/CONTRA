@@ -4,7 +4,7 @@
 -- MIDI file (beat_machine_session3_midi.py, 60 BPM) are unchanged. The script is attached after
 -- the save, so the saved NKI has no script. Run with render.py as for session 3.
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-beat5\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-beat5\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local dirlog = assert(io.open(DIR .. "probe.log", "w"))
 local function log(t) out:write(t .. "\n") out:flush() dirlog:write(t .. "\n") dirlog:flush() end

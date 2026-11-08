@@ -1,7 +1,7 @@
 //! What an engine parameter sets in a level or an effect slot, in KSP's
 //! 0..=1_000_000 encoding: Kontakt's laws (sampler-core `EngineParameterLaw`).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::par_laws::{CUBE, cube_root};
 use crate::{EnginePar, Level};

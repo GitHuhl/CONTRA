@@ -9,8 +9,8 @@ use ni_file::kontakt::objects::{BParFX, BParamArrayBParFX8, Group, InsertBus, Pr
 use ni_file::kontakt::{Chunk, StructuredObject};
 
 use crate::impulse::Impulses;
-use kontra_format::Notes;
-use kontra_ir as ir;
+use contra_format::Notes;
+use contra_ir as ir;
 
 const RACK: u16 = 0x3a;
 const BUS: u16 = 0x45;
@@ -123,8 +123,8 @@ fn rack(
                 if let Some((_, 0x18, kind)) = &effect {
                     laws.subtypes.push((*rack_at, slot, *kind));
                     let switches = crate::laws::switches(*kind);
-                    kontra_law::record(|| kontra_law::Application {
-                        id: kontra_law::LawId("kontakt.filter_switches.v1"),
+                    contra_law::record(|| contra_law::Application {
+                        id: contra_law::LawId("kontakt.filter_switches.v1"),
                         location: format!("{rack_at:?}/slot/{slot}/switches"),
                         input: format!("{kind:?}"),
                         output: format!("{switches:?}"),
@@ -260,8 +260,8 @@ fn slot_effect(
             .map(|(((mode, (t, r)), (a, rel)), link)| {
                 *knobs = crate::script_knobs::compressor_knobs(mode, [t, r, a, rel], link);
                 let value = crate::laws::compressor(mode, t, r, a, rel, link);
-                kontra_law::record(|| kontra_law::Application {
-                    id: kontra_law::LawId("kontakt.compressor.v1"),
+                contra_law::record(|| contra_law::Application {
+                    id: contra_law::LawId("kontakt.compressor.v1"),
                     location: format!("{at}/compressor"),
                     input: format!("{:?}", (mode, t, r, a, rel, link)),
                     output: format!("{value:?}"),
@@ -270,8 +270,8 @@ fn slot_effect(
             }),
         0x1c => f32_at(0).zip(f32_at(4)).map(|(gain, release)| {
             let value = crate::laws::limiter(gain, release);
-            kontra_law::record(|| kontra_law::Application {
-                id: kontra_law::LawId("kontakt.limiter.v1"),
+            contra_law::record(|| contra_law::Application {
+                id: contra_law::LawId("kontakt.limiter.v1"),
                 location: format!("{at}/limiter"),
                 input: format!("{:?}", (gain, release)),
                 output: format!("{value:?}"),
@@ -284,8 +284,8 @@ fn slot_effect(
                 .zip(f32_at(8))
                 .map(|((drive, release), ceiling)| {
                     let value = crate::laws::transparent_limiter(drive, release, ceiling);
-                    kontra_law::record(|| kontra_law::Application {
-                        id: kontra_law::LawId("kontakt.transparent_limiter.v1"),
+                    contra_law::record(|| contra_law::Application {
+                        id: contra_law::LawId("kontakt.transparent_limiter.v1"),
                         location: format!("{at}/limiter"),
                         input: format!("{:?}", (drive, release, ceiling)),
                         output: format!("{value:?}"),
@@ -311,8 +311,8 @@ fn slot_effect(
                 .map(|(saved, link)| {
                     *knobs = crate::script_knobs::bus_knobs(saved, link);
                     let (c, auto) = crate::laws::bus_compressor(saved, link);
-                    kontra_law::record(|| kontra_law::Application {
-                        id: kontra_law::LawId("kontakt.bus_compressor.v1"),
+                    contra_law::record(|| contra_law::Application {
+                        id: contra_law::LawId("kontakt.bus_compressor.v1"),
                         location: format!("{at}/compressor"),
                         input: format!("{:?}", (saved, link)),
                         output: format!("{:?}", (&c, auto)),
@@ -428,8 +428,8 @@ fn eq(
         let values = [f(0)?, f(4)?, f(8)?];
         let [hz, octaves, db] = values;
         let result = crate::laws::eq_band(hz, octaves, db);
-        kontra_law::record(|| kontra_law::Application {
-            id: kontra_law::LawId("kontakt.eq_band.v1"),
+        contra_law::record(|| contra_law::Application {
+            id: contra_law::LawId("kontakt.eq_band.v1"),
             location: format!("{at}/eq/{index}"),
             input: format!("{values:?}"),
             output: format!("{result:?}"),
@@ -476,8 +476,8 @@ fn solid_eq(
     let [lg, lh, mg, mh, mq, hg, hh, hq, fg, fh] = saved;
     let [lf, hf] = shapes;
     let bands = crate::laws::solid_eq([lg, lh], lf, [mg, mh, mq], [hg, hh, hq], [fg, fh], hf);
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.solid_eq.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.solid_eq.v1"),
         location: format!("{at}/solid_eq"),
         input: format!("saved={saved:?}, shapes={shapes:?}"),
         output: format!("{bands:?}"),
@@ -543,8 +543,8 @@ fn filter(
     };
     let (cutoff, resonance) = (f(offset)?, f(offset + 4)?);
     let result = crate::laws::filter(kind, cutoff, resonance, gain);
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.filter.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.filter.v1"),
         location: format!("{at}/filter"),
         input: format!("kind={kind}, cutoff={cutoff:?}, resonance={resonance:?}, gain={gain:?}"),
         output: format!("{result:?}"),

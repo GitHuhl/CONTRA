@@ -1,4 +1,4 @@
-# Vendored from moose bffa467 with KONTRA's output port name patch; see vendor/MOOSE-PATCHES.md.
+# Vendored from moose bffa467 with CONTRA's output port name patch; see vendor/MOOSE-PATCHES.md.
 [package]
 name = "moose-clap"
 version = "7.0.0"

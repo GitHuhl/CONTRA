@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Event, HostNote, HostPattern, SampleTime, Timed};
-use kontra_stream::{Store, StoreConfig};
+use contra_engine::{Engine, Event, HostNote, HostPattern, SampleTime, Timed};
+use contra_stream::{Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 const AREIA: &str = "/data/main/Libraries/Kontakt/Areia 1.2.0 [Audio Imperia]/Instruments/01 Core Technique Patches/01 Areia - 16 Violins - Core Techniques.nki";
@@ -46,7 +46,7 @@ fn areia_violins_sound_on_the_fresh_engine() {
     }
     let t = std::time::Instant::now();
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let loaded = kontra_host::instrument::load(path, RATE, &mut store).unwrap();
+    let loaded = contra_host::instrument::load(path, RATE, &mut store).unwrap();
     let load = t.elapsed();
     eprintln!(
         "{}: {} zones, {} scripts, loaded in {load:?}",

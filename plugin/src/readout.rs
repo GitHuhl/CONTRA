@@ -5,8 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use kontra_host::rack::Rack;
-use kontra_protocol::Stats;
+use contra_host::rack::Rack;
+use contra_protocol::Stats;
 
 const EVERY: Duration = Duration::from_millis(500);
 const MB: f64 = 1_048_576.0;
@@ -86,7 +86,7 @@ fn resident() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_host::rack::{Store, StoreConfig};
+    use contra_host::rack::{Store, StoreConfig};
 
     #[test]
     fn the_readout_is_the_audio_threads_mean_load_over_its_span() {

@@ -2,16 +2,16 @@
 //! delays, dynamics, drives, a cascade) and the summed EQ and filter stages,
 //! with their settings in DSP terms. Not real-time unless a function says so.
 
-use kontra_dsp::delay::{MAX_MS, ModDelay, Phaser, PhaserSettings};
-use kontra_dsp::drive::{self, Circuit, Clipper, Shaper};
-use kontra_dsp::dynamics::{
+use contra_dsp::delay::{MAX_MS, ModDelay, Phaser, PhaserSettings};
+use contra_dsp::drive::{self, Circuit, Clipper, Shaper};
+use contra_dsp::dynamics::{
     Compressor, CompressorSettings, Detector, Limiter, LimiterSettings, Transient,
     TransientSettings,
 };
-use kontra_dsp::filter::{Cascade, CascadeSettings, CascadeStage, Clocked, ClockedShape, Svf};
-use kontra_dsp::reverb::{Combs, Convolver, Fdn, Hadamard, Network, Settings};
-use kontra_ir as ir;
-use kontra_voice::Gain;
+use contra_dsp::filter::{Cascade, CascadeSettings, CascadeStage, Clocked, ClockedShape, Svf};
+use contra_dsp::reverb::{Combs, Convolver, Fdn, Hadamard, Network, Settings};
+use contra_ir as ir;
+use contra_voice::Gain;
 
 use crate::{MAX_SPAN, Response, matrix as effects, summed as filters};
 
@@ -241,8 +241,8 @@ fn hz(rate: ir::Rate, tempo: f32) -> f32 {
     }
 }
 
-fn delay(d: ir::Delay, tempo: f32) -> kontra_dsp::delay::Settings {
-    kontra_dsp::delay::Settings {
+fn delay(d: ir::Delay, tempo: f32) -> contra_dsp::delay::Settings {
+    contra_dsp::delay::Settings {
         ms: match d.time {
             ir::DelayTime::Ms(ms) => ms,
             ir::DelayTime::Beats(beats) => beats * 60_000.0 / tempo.max(1.0),
@@ -259,7 +259,7 @@ fn delay(d: ir::Delay, tempo: f32) -> kontra_dsp::delay::Settings {
         high_shelf: d
             .high_shelf
             .filter(|b| b.gain_db != 0.0)
-            .map(|b| kontra_dsp::delay::Shelf {
+            .map(|b| contra_dsp::delay::Shelf {
                 hz: b.hz,
                 gain_db: b.gain_db,
                 slope: b.q,

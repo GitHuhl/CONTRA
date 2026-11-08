@@ -5,7 +5,7 @@
 //! Kontakt counts its swings and one-pole coefficients in frames; they are
 //! given here at 48 kHz.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// A saved `unit` above this selects the tempo-synced value (reader flag,
 /// 0x144737708).
@@ -114,7 +114,7 @@ pub(crate) fn delay(time: f32, feedback: f32, pan: f32, damping: f32, unit: f32)
 fn chorus(depth: f32, speed: f32, phase: f32, unit: f32) -> ir::Delay {
     ir::Delay {
         time: ir::DelayTime::Ms(20.0),
-        depth_ms: kontra_law::Law::Linear {
+        depth_ms: contra_law::Law::Linear {
             lo: 0.0,
             hi: 1.5625,
         }

@@ -1,7 +1,7 @@
 //! Array files through the public `fill`.
 
-use kontra_plan::files::{ArrayKind, fill};
-use kontra_vm::Text;
+use contra_plan::files::{ArrayKind, fill};
+use contra_vm::Text;
 
 /// A file holding more values than its array is refused whole: nothing is
 /// written, not even the values that would fit.

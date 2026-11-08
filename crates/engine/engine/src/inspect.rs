@@ -1,6 +1,6 @@
 //! What a script did since load, for diagnostics and the parity tools.
 
-use kontra_vm::{Action, HostApi, HostCall, Text};
+use contra_vm::{Action, HostApi, HostCall, Text};
 
 use crate::Engine;
 
@@ -26,7 +26,7 @@ impl Engine {
     }
 
     /// Every group's routes as scripts have left them.
-    pub fn mods(&self) -> impl Iterator<Item = &kontra_ir::Mod> + '_ {
+    pub fn mods(&self) -> impl Iterator<Item = &contra_ir::Mod> + '_ {
         self.groups.iter().flat_map(|g| &g.mods)
     }
 
@@ -49,7 +49,7 @@ impl Engine {
 
     /// Each sounding voice's zone, position in source frames and gain, for
     /// inspectors (never the audio thread).
-    pub fn voices(&self) -> impl Iterator<Item = (usize, f64, kontra_voice::Gain)> + '_ {
+    pub fn voices(&self) -> impl Iterator<Item = (usize, f64, contra_voice::Gain)> + '_ {
         self.voices
             .iter()
             .filter(|s| s.voice.is_active())
@@ -64,13 +64,13 @@ impl Engine {
 
     /// Script actions this engine left unanswered, most called first.
     #[must_use]
-    pub fn unhandled_actions(&self) -> Vec<(kontra_vm::Action, u32)> {
+    pub fn unhandled_actions(&self) -> Vec<(contra_vm::Action, u32)> {
         ranked(&self.unhandled)
     }
 
     /// Every script action called since load, most called first.
     #[must_use]
-    pub fn action_calls(&self) -> Vec<(kontra_vm::Action, u32)> {
+    pub fn action_calls(&self) -> Vec<(contra_vm::Action, u32)> {
         ranked(&self.called)
     }
 
@@ -95,17 +95,17 @@ impl Engine {
 
     /// Runtime faults of each script slot, counted since load.
     #[must_use]
-    pub fn script_faults(&self) -> Vec<kontra_vm::Faults> {
+    pub fn script_faults(&self) -> Vec<contra_vm::Faults> {
         self.vms
             .iter()
             .flatten()
-            .map(kontra_vm::Vm::faults)
+            .map(contra_vm::Vm::faults)
             .collect()
     }
 }
 
-fn ranked(counts: &[u32]) -> Vec<(kontra_vm::Action, u32)> {
-    let mut out: Vec<_> = kontra_vm::Action::all()
+fn ranked(counts: &[u32]) -> Vec<(contra_vm::Action, u32)> {
+    let mut out: Vec<_> = contra_vm::Action::all()
         .iter()
         .zip(counts)
         .filter(|(_, n)| **n > 0)
@@ -121,7 +121,7 @@ pub struct VoiceObservation {
     pub zone: usize,
     pub position: f64,
     pub released: bool,
-    pub gain: kontra_voice::Gain,
+    pub gain: contra_voice::Gain,
     /// Source frames this voice read as silence because data was unavailable.
     pub missing_frames: u64,
     /// Current pitch in source frames per output frame.
@@ -260,11 +260,11 @@ impl Engine {
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,
-                    slot.voice.released_at().map(kontra_time::SampleTime),
+                    slot.voice.released_at().map(contra_time::SampleTime),
                 )
             };
             for m in group.mods.iter().filter(|m| !m.bypass) {
-                if let kontra_ir::ModKind::EqGain {
+                if let contra_ir::ModKind::EqGain {
                     source,
                     insert,
                     band,
@@ -299,7 +299,7 @@ pub struct RouteObservation {
     pub voice_slot: usize,
     pub zone: usize,
     pub name: String,
-    pub kind: kontra_ir::ModKind,
+    pub kind: contra_ir::ModKind,
     /// Current raw source; `None` if the source cannot be observed.
     pub source: Option<f32>,
     /// Current source after timed-source intensity scaling.
@@ -332,11 +332,11 @@ impl Engine {
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,
-                    slot.voice.released_at().map(kontra_time::SampleTime),
+                    slot.voice.released_at().map(contra_time::SampleTime),
                 )
             };
             for m in group.mods.iter().filter(|m| !m.bypass) {
-                let input = kontra_plan::route_source(m.kind);
+                let input = contra_plan::route_source(m.kind);
                 out.push(RouteObservation {
                     voice_slot,
                     zone: slot.zone,
@@ -355,7 +355,7 @@ impl Engine {
 #[derive(Clone, Copy, Debug)]
 pub struct BusRouteObservation {
     pub bus: usize,
-    pub kind: kontra_ir::ModKind,
+    pub kind: contra_ir::ModKind,
     pub amount: f32,
 }
 
@@ -377,7 +377,7 @@ pub struct VoiceEffectObservation {
     pub voice_slot: usize,
     pub zone: usize,
     pub insert: u8,
-    pub target: kontra_ir::EffectKind,
+    pub target: contra_ir::EffectKind,
 }
 
 impl Engine {
@@ -403,7 +403,7 @@ impl Engine {
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,
-                    slot.voice.released_at().map(kontra_time::SampleTime),
+                    slot.voice.released_at().map(contra_time::SampleTime),
                 )
             };
             for unit in &slot.rack {
@@ -411,13 +411,13 @@ impl Engine {
                     continue;
                 };
                 match &mut target {
-                    kontra_ir::EffectKind::Eq(bells) => {
+                    contra_ir::EffectKind::Eq(bells) => {
                         if let Some(v) = self.voice_bells(zone, unit.insert, note, age) {
                             *bells = v;
                         }
                     }
-                    kontra_ir::EffectKind::Filter(f) => {
-                        if let Some(kontra_ir::EffectKind::Filter(base)) = self
+                    contra_ir::EffectKind::Filter(f) => {
+                        if let Some(contra_ir::EffectKind::Filter(base)) = self
                             .groups
                             .get(zone.group as usize)
                             .and_then(|g| g.inserts.get(usize::from(unit.insert)))
@@ -452,7 +452,7 @@ pub struct SharedEffectObservation {
     pub scope: &'static str,
     pub owner: usize,
     pub slot: usize,
-    pub effect: Option<kontra_ir::Effect>,
+    pub effect: Option<contra_ir::Effect>,
 }
 
 impl Engine {

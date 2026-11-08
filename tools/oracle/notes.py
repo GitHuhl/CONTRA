@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Per-note comparison of a Kontakt capture against its KONTRA render, for one instrument.
+"""Per-note comparison of a Kontakt capture against its CONTRA render, for one instrument.
 
-    tools/oracle/notes.py KONTAKT.wav KONTRA.wav --midi FILE [--json OUT.json]
+    tools/oracle/notes.py KONTAKT.wav CONTRA.wav --midi FILE [--json OUT.json]
 
-Both files are slots from the slot start (capture.py output and kontra_render.py output). For each
+Both files are slots from the slot start (capture.py output and contra_render.py output). For each
 note in the MIDI file the attack is found in each render (first 10 ms frame >= 10 dB above the level
-just before the note, within 600 ms; KONTRA renders at zero latency, so its attack is the note time).
-The Kontakt attack minus the KONTRA attack is that note's lag. Each note is then scored alone:
+just before the note, within 600 ms; CONTRA renders at zero latency, so its attack is the note time).
+The Kontakt attack minus the CONTRA attack is that note's lag. Each note is then scored alone:
 waveform r at its own lag (+-20 ms), level difference over 0.3 s after the attack, and whether an
 attack was found at all. Per-note numbers separate the causes of a mismatch: a sample or
 round-robin difference shows as low r on some notes and high r on others, a velocity-layer difference
@@ -118,14 +118,14 @@ def best_corr(k, r):
     return fine, corr_at_lag(k, r, fine)
 
 
-def score(kontakt, kontra, notes):
-    k_all, r_all = compare.load(kontakt)[:, int(compare.PRE * RATE):], compare.load(kontra)
+def score(kontakt, contra, notes):
+    k_all, r_all = compare.load(kontakt)[:, int(compare.PRE * RATE):], compare.load(contra)
     kdb, rdb = frame_db(k_all), frame_db(r_all)
     rows = []
     for i, (on, off, key, vel) in enumerate(notes):
         ka, ra = attack(kdb, on), attack(rdb, on)
         row = {"i": i, "t_s": round(on, 3), "key": key, "vel": vel, "attack_kontakt": ka is not None,
-               "attack_kontra": ra is not None}
+               "attack_contra": ra is not None}
         if ka is None or ra is None:
             rows.append(row)
             continue
@@ -140,7 +140,7 @@ def score(kontakt, kontra, notes):
         m = min(k.shape[1], r.shape[1])
         pad = int(MAX_LAG_S * RATE)
         lag, rho = best_corr(k[:, pad:m - pad], r[:, pad:m - pad])
-        # lag = Kontakt minus KONTRA: the attack difference plus the residual correlation lag
+        # lag = Kontakt minus CONTRA: the attack difference plus the residual correlation lag
         row.update({
             "lag_ms": round((ka - ra) * 10.0 + lag * 1000.0 / RATE, 1),
             "wave_r": round(rho, 3),
@@ -150,11 +150,11 @@ def score(kontakt, kontra, notes):
     return rows
 
 
-def matrix(kontakt, kontra, notes):
-    """r of every KONTRA note (rows) against every Kontakt note (columns), each cut at its own attack.
+def matrix(kontakt, contra, notes):
+    """r of every CONTRA note (rows) against every Kontakt note (columns), each cut at its own attack.
     Round robin: a diagonal shift means the same samples in another order; a scattered matrix means
-    different samples; a row with no high value means KONTRA's sample is not in Kontakt's sequence."""
-    k_all, r_all = compare.load(kontakt)[:, int(compare.PRE * RATE):], compare.load(kontra)
+    different samples; a row with no high value means CONTRA's sample is not in Kontakt's sequence."""
+    k_all, r_all = compare.load(kontakt)[:, int(compare.PRE * RATE):], compare.load(contra)
     kdb, rdb = frame_db(k_all), frame_db(r_all)
     pad = int(MAX_LAG_S * RATE)
 
@@ -180,16 +180,16 @@ def matrix(kontakt, kontra, notes):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("kontakt")
-    ap.add_argument("kontra")
+    ap.add_argument("contra")
     ap.add_argument("--midi", required=True)
-    ap.add_argument("--matrix", action="store_true", help="also print KONTRA-note x Kontakt-note correlations")
+    ap.add_argument("--matrix", action="store_true", help="also print CONTRA-note x Kontakt-note correlations")
     ap.add_argument("--json")
     args = ap.parse_args()
     notes = parse_midi(args.midi)
-    rows = score(args.kontakt, args.kontra, notes)
+    rows = score(args.kontakt, args.contra, notes)
     if args.matrix:
-        grid = matrix(args.kontakt, args.kontra, notes)
-        print("matrix: rows = KONTRA note i, columns = Kontakt note j (r at each own attack)")
+        grid = matrix(args.kontakt, args.contra, notes)
+        print("matrix: rows = CONTRA note i, columns = Kontakt note j (r at each own attack)")
         print("     " + "".join(f"{j:>7}" for j in range(len(grid[0]) if grid else 0)))
         for i, line in enumerate(grid):
             print(f"{i:>4} " + "".join(f"{'  -  ' if v is None else f'{v:>7.3f}'}" for v in line))
@@ -201,7 +201,7 @@ def main():
             print(f"{row['i']:>3} {row['t_s']:>6.2f} {row['key']:>4} {row['vel']:>4} {row['wave_r']:>6.3f} "
                   f"{row['lag_ms']:>+7.1f} {row['level_diff_db']:>+7.1f}")
         else:
-            miss = "kontakt" if not row["attack_kontakt"] else "kontra"
+            miss = "kontakt" if not row["attack_kontakt"] else "contra"
             print(f"{row['i']:>3} {row['t_s']:>6.2f} {row['key']:>4} {row['vel']:>4}   no attack in {miss}")
     if scored:
         rs = np.array([r["wave_r"] for r in scored])

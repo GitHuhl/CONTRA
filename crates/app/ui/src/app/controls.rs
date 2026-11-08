@@ -1,7 +1,7 @@
-//! A library's controls one after another in KONTRA's own look: a knob,
+//! A library's controls one after another in CONTRA's own look: a knob,
 //! a latch or a menu each, its name under it, whatever its pictures.
 
-use kontra_ui_model::{Interface, Kind, PageRef};
+use contra_ui_model::{Interface, Kind, PageRef};
 use mui::prelude::*;
 
 use crate::input::{Edit, takes_input, value};
@@ -29,7 +29,7 @@ pub(super) fn view(
         if !tree.visible(n) {
             continue;
         }
-        let id = format!("kontra-c-{face}-{}", n.0);
+        let id = format!("contra-c-{face}-{}", n.0);
         let name = name::label(tree, n);
         let now = value(w);
         let (picked, el) = match &w.kind {
@@ -75,7 +75,7 @@ pub(super) fn view(
             edits.push(Edit {
                 widget: n,
                 to: crate::input::Set::Value(v),
-                keys: kontra_ui_model::UiModifiers::default(),
+                keys: contra_ui_model::UiModifiers::default(),
             });
         }
         cards.push(

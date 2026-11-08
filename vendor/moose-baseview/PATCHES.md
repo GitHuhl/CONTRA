@@ -1,9 +1,9 @@
-# KONTRA local native-window preservation
+# CONTRA local native-window preservation
 
 Base: MUI `822b1922ad1872aaee15b371a31410b0f3580b88` vendored
 `moose-baseview`, with its unchanged local `../xim-rs` IME dependencies.
 
-Preserves KONTRA `c96ad3a` root-reparent visibility behavior while consuming
+Preserves CONTRA `c96ad3a` root-reparent visibility behavior while consuming
 the newer MUI display/accessibility integration:
 
 - `remove_after_window` retains the reparented window, removes its old parent.
@@ -14,7 +14,7 @@ mirrored into the custom host integration tests so CI uses the application lock.
 Run against an isolated server:
 
 ```sh
-xvfb-run -a cargo test --locked -p kontra-native-host \
+xvfb-run -a cargo test --locked -p contra-native-host \
   --test x11_visibility -- --ignored --test-threads=1
 ```
 
@@ -44,7 +44,7 @@ X11 server destruction invalidates the owned drawable, stops frame/resize
 callbacks, and terminates the editor thread while delivering `WillClose` once.
 An empty ancestry is never visible, including after the host deletes its parent;
 floating windows also clear their visibility on destruction. The drawable's
-destructor does not destroy an already deleted server resource. KONTRA's root
+destructor does not destroy an already deleted server resource. CONTRA's root
 reparenting behavior remains intact.
 
 ## Windows first expose (0.3.344 follow-up)
@@ -52,7 +52,7 @@ reparenting behavior remains intact.
 The Windows message dispatcher previously omitted `WM_PAINT` and
 `WM_SHOWWINDOW`. It now consumes the update region with `BeginPaint`/`EndPaint`
 and sends `RedrawRequested`; showing a window also sends that event. The
-KONTRA native host invalidates its GPU cache for that event and for explicit
+CONTRA native host invalidates its GPU cache for that event and for explicit
 full-redraw/resize requests. This gives a freshly shown/restored embedded editor
 a complete frame even when its model has not changed.
 
@@ -70,7 +70,7 @@ The additive `ThreadedWindow::create` path accepts no host callbacks and returns
 an auto-`Send` X11 worker controller. Native `WindowContext`, handler, and drawable
 ownership remain on the existing worker. The original `Window` and its optional
 owner-thread `HostCallbacks` remain `!Send`; both paths share request/join logic.
-KONTRA's Linux MUI editor uses the no-host controller without an unsafe `Send`
+CONTRA's Linux MUI editor uses the no-host controller without an unsafe `Send`
 assertion. Windows/macOS still use their legacy editor handle and are separate
 ownership work.
 
@@ -89,7 +89,7 @@ click or drag. Real `NotifyNormal` and `NotifyWhileGrabbed` focus changes still
 clear held state and cancel gestures. Pointer-grab activation's pseudo crossing
 is ignored; normal and ungrab crossings still reconcile the pointer.
 
-`kontra-native-host`'s ignored
+`contra-native-host`'s ignored
 `native_temporary_grabs_preserve_gestures_but_real_focus_loss_cancels` test uses
 actual keyboard/pointer grabs on an isolated X server and the production MUI
 input adapter, without a GPU. It fails at the held-gesture assertion on the

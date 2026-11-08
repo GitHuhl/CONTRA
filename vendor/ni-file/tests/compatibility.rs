@@ -650,10 +650,10 @@ fn nkx_directory_accepts_repeated_aliases_and_preserves_case_distinct_members() 
 }
 
 #[test]
-#[ignore = "directory-only local corpus probe; requires KONTRA_NKX_PATHS"]
+#[ignore = "directory-only local corpus probe; requires CONTRA_NKX_PATHS"]
 fn local_nkx_directory_corpus_probe() {
     let paths = std::fs::read_to_string(
-        std::env::var_os("KONTRA_NKX_PATHS").expect("set KONTRA_NKX_PATHS"),
+        std::env::var_os("CONTRA_NKX_PATHS").expect("set CONTRA_NKX_PATHS"),
     )
     .unwrap();
     for (index, path) in paths.lines().enumerate() {

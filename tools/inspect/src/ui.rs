@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kontra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, Timed};
-use kontra_stream::{Store, StoreConfig};
-use kontra_ui_model::{Interface, Kind, Value, Widget};
+use contra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, Timed};
+use contra_stream::{Store, StoreConfig};
+use contra_ui_model::{Interface, Kind, Value, Widget};
 use serde_json::{Value as Json, json};
 
 use super::RATE;
@@ -32,13 +32,13 @@ fn targets(widget: &Widget) -> Option<Vec<f64>> {
 }
 
 fn tree(
-    loaded: &kontra_host::instrument::Loaded,
+    loaded: &contra_host::instrument::Loaded,
     engine: &Engine,
     slot: usize,
 ) -> Result<Option<Interface>> {
     let slot_id = u8::try_from(slot).context("too many script slots")?;
     if let Some(Some(face)) = loaded.faces.get(slot) {
-        return kontra_host::ui::interface(face, slot_id, engine, &|_| None)
+        return contra_host::ui::interface(face, slot_id, engine, &|_| None)
             .map(Some)
             .map_err(|e| anyhow::anyhow!("building UI model for slot {slot}: {e}"));
     }
@@ -96,7 +96,7 @@ fn sound(engine: &Engine) -> Vec<String> {
 fn render(
     engine: &mut Engine,
     plan: &Plan,
-    stream: &kontra_stream::StreamClient,
+    stream: &contra_stream::StreamClient,
     events: &[Timed<Event>],
 ) -> (f64, bool) {
     let mut samples = [[0.0f32; 2]; BLOCK];
@@ -118,7 +118,7 @@ fn render(
 }
 
 pub fn run(path: &Path) -> Result<(Json, String)> {
-    let instrument = kontra_host::instrument::read(path)
+    let instrument = contra_host::instrument::read(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     let samples: Vec<_> = instrument.samples.iter().map(|s| s.name.clone()).collect();
     let members: Vec<Vec<usize>> = instrument
@@ -127,7 +127,7 @@ pub fn run(path: &Path) -> Result<(Json, String)> {
         .map(|g| g.zones.iter().map(|z| z.sample).collect())
         .collect();
     let mut store = Store::new(StoreConfig::DEFAULT).context("creating sample store")?;
-    let loaded = kontra_host::instrument::build(instrument, RATE, &mut store);
+    let loaded = contra_host::instrument::build(instrument, RATE, &mut store);
     let plan = Arc::new(loaded.plan.clone());
     let zone_samples: Vec<_> = plan
         .zones
@@ -383,7 +383,7 @@ pub fn run(path: &Path) -> Result<(Json, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_ui_model::{Display, MenuItem, PageRef, Range, Rect};
+    use contra_ui_model::{Display, MenuItem, PageRef, Range, Rect};
 
     #[test]
     fn targets_use_the_model_range_and_visible_menu_values() {

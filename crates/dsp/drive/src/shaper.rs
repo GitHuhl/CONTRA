@@ -10,7 +10,7 @@
 //! harmonics, and at −42 dB at 2x (`Soft(1.0)`: −34 and −60 dB), for one
 //! halfband pair of 8 allpasses each way.
 
-use kontra_dsp_core::{Biquad, Halfband, flush};
+use contra_dsp_core::{Biquad, Halfband, flush};
 
 /// A transfer curve and its amount.
 #[derive(Clone, Copy, Debug, PartialEq)]

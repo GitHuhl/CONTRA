@@ -1,9 +1,9 @@
 -- Measured probe: the state ANALOG STRINGS' own scripts leave, saved by Kontakt.
 -- Loads the instrument, lets its scripts run for 6 s, saves; read the bypass and
--- intensity of every route with `KONTRA_GROUPS=<a>..<b> ... --example inspect`.
+-- intensity of every route with `CONTRA_GROUPS=<a>..<b> ... --example inspect`.
 -- Result (Kontakt 8.13.1, 2026-10-29), group 88: LFO_P1_Retrigger @1 and
 -- LFO_P2_Retrigger @4 active, LFO_P1 @3 and LFO_P2 @5 bypassed, all at intensity
--- 0.5714: the same state KONTRA's run of the script reaches.
+-- 0.5714: the same state CONTRA's run of the script reaches.
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))
 local function log(t) out:write(t .. "\n") out:flush() end

@@ -2,7 +2,7 @@
 // constructor of a class from its object size (e.g. `operator new(0x1478)`).
 //   RE_SCRIPT=FindImm.java tools/re/query.sh 0x1478
 // Args: <immediate>. Output: `imm at <address> in <function>` per instruction.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;

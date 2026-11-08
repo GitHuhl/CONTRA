@@ -1,7 +1,7 @@
 // Find 8-byte little-endian occurrences of an address in memory (vtable slots holding a function).
 //   RE_SCRIPT=FindPtr.java tools/re/query.sh 0x140aa1130
 // Args: <value>. Output: `ptr at <address>` per hit, with the previous and next 3 qwords for context.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.mem.Memory;

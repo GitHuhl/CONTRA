@@ -2,8 +2,8 @@
 //! linear and stateless, so a rack of them is one 2×2 matrix (Kontakt runs
 //! group inserts per voice; a linear instrument insert commutes with the sum).
 
-use kontra_ir as ir;
-use kontra_voice::Gain;
+use contra_ir as ir;
+use contra_voice::Gain;
 
 pub const IDENTITY: Gain = [[1.0, 0.0], [0.0, 1.0]];
 

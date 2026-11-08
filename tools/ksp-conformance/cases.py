@@ -3,7 +3,7 @@
 A case is (id, category, setup, results). `setup` is KSP statements run in `on init`
 before the results are computed; `results` are KSP integer expressions over the setup
 variables. gen.py wraps every result in a bit encoder (see ENCODER below) so Kontakt and
-the KONTRA interpreter both report the 32 bits of each result through
+the CONTRA interpreter both report the 32 bits of each result through
 set_engine_par(ENGINE_PAR_VOLUME, 1000, group, -1, -1). Group 0 of a clear bit stays at
 its default level; a set bit reads back at about -167 dB (see docs/re/KSP_CONFORMANCE.md).
 

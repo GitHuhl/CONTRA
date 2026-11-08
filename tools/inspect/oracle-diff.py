@@ -36,14 +36,14 @@ def module(name, path):
     return obj
 
 
-compare = module('kontra_compare', ORACLE / 'compare.py')
+compare = module('contra_compare', ORACLE / 'compare.py')
 helper = module('inspect_compare', ORACLE / 'inspect_compare.py')
 
 
 def execute(binary, library_root, run_dir, item):
     name, relative = item
-    env = dict(os.environ, KONTRA_ORACLE_DIR=str(ORACLE),
-               KONTRA_INSPECT_ORACLE_DIR=str(run_dir / 'captures'))
+    env = dict(os.environ, CONTRA_ORACLE_DIR=str(ORACLE),
+               CONTRA_INSPECT_ORACLE_DIR=str(run_dir / 'captures'))
     for mode in ('continuous', 'fresh'):
         dest = run_dir / mode
         dest.mkdir(parents=True, exist_ok=True)
@@ -182,9 +182,9 @@ def main():
         revision = revision_file.read_text().strip() if revision_file.exists() else 'existing reports: revision not inferred'
     else:
         env = dict(os.environ, BUILD_SLOTS=os.environ.get('BUILD_SLOTS', '6'))
-        subprocess.run(['build-slot', 'cargo', 'build', '--release', '-p', 'kontra-inspect'], cwd=REPO, env=env, check=True)
+        subprocess.run(['build-slot', 'cargo', 'build', '--release', '-p', 'contra-inspect'], cwd=REPO, env=env, check=True)
         target = subprocess.check_output(['build-slot', 'sh', '-c', 'printf %s "$CARGO_TARGET_DIR"'], cwd=REPO, env=env, text=True)
-        binary = Path(target) / 'release/kontra-inspect'
+        binary = Path(target) / 'release/contra-inspect'
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         run_dir = args.output.parent / ('oracle-diff-' + stamp)
         run_dir.mkdir(parents=True, exist_ok=False)

@@ -1,15 +1,15 @@
-//! The engine's side of its racks (kontra-racks): response loads and the
+//! The engine's side of its racks (contra-racks): response loads and the
 //! mix through the buses, sends and main rack.
 
 use std::sync::Arc;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::Engine;
 use crate::effects;
-pub(crate) use kontra_effects::processors::{Dsp, Responses, convolver, processor};
-use kontra_effects::stem;
-pub(crate) use kontra_racks::rack::{Live, Rack};
+pub(crate) use contra_effects::processors::{Dsp, Responses, convolver, processor};
+use contra_effects::stem;
+pub(crate) use contra_racks::rack::{Live, Rack};
 
 impl Engine {
     /// `load_ir_sample`: the library response `name` (its extension and

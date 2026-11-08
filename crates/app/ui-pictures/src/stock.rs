@@ -2,9 +2,9 @@
 //!
 //! The PNGs are identified by dimensions, byte length and CRC-32 from
 //! Kontakt 8.13.1. Unknown versions safely use the built-in vector fallback;
-//! no vendor artwork is distributed with KONTRA.
+//! no vendor artwork is distributed with CONTRA.
 
-use kontra_ui_model::{ImageMeta, Orientation};
+use contra_ui_model::{ImageMeta, Orientation};
 use mui::prelude::Image;
 use sha2::{Digest, Sha256};
 use std::io::Read;

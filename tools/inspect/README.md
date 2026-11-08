@@ -1,6 +1,6 @@
-# kontra-inspect
+# contra-inspect
 
-`kontra-inspect load <instrument> --json <report.json>` reads and prepares a
+`contra-inspect load <instrument> --json <report.json>` reads and prepares a
 Kontakt instrument or a UVI program (`bank.ufs/path/program.uvip`, or the bank
 for its first program) using the v3 host. It prints a concise summary and writes
 a versioned JSON inventory when `--json` is supplied. Exit 2 means a usage,
@@ -37,9 +37,9 @@ curve data from the IR/plan; the debug slot-law text and route curves are also
 shown. These are available law definitions, not a claim that every translator
 application or law ID was recorded.
 
-`kontra-inspect` reports v3 playback observations.
+`contra-inspect` reports v3 playback observations.
 
-`kontra-inspect play <instrument> --scenario user --json <report.json>` runs
+`contra-inspect play <instrument> --scenario user --json <report.json>` runs
 legato, chords and repeats with slow and fast CC1/CC11 sweeps, then 20 seconds
 past the last note-off. A file scenario is `{"events":[{"frame":0,
 "type":"note_on","key":60},{"frame":28800,"type":"note_off","key":60}]}`;
@@ -89,7 +89,7 @@ the snapshot, not the instantaneous value of an interpolating effect.
 `shared_effects` shows the current shared rack configurations with the last
 bus route amounts applied. Effect configurations use descriptive debug text.
 
-`kontra-inspect ui INSTRUMENT --json report.json` builds each script's current
+`contra-inspect ui INSTRUMENT --json report.json` builds each script's current
 host UI model and moves every knob, slider, value edit, switch, button and
 visible menu choice through that model. Hidden and disabled controls are also
 attempted and identified in the report. Models are refreshed after each control,
@@ -106,7 +106,7 @@ comparison retriggers C4 and measures successive 80 ms stereo RMS windows;
 natural time evolution and other callbacks can change the output, so a change
 is evidence for follow-up rather than proof that the moved control caused it.
 
-`kontra-inspect play INSTRUMENT --scenario user --oracle --json report.json`
+`contra-inspect play INSTRUMENT --scenario user --oracle --json report.json`
 writes the same input events as MIDI at one tick per 48 kHz frame, renders v3,
 and captures a Kontakt `.nki` through `oracle-slot` using its isolated Wine
 prefix. It never uses the live Wine prefix. The comparison reuses
@@ -128,8 +128,8 @@ an error/uncomparable status and exits nonzero after writing JSON.
 
 Artifacts (MIDI, v3 and native WAVs, logs) are written under
 `/data/dev/workspace/PluginArtifacts/inspect-oracle`; override the root with
-`KONTRA_INSPECT_ORACLE_DIR`. To locate the existing oracle scripts outside a
-checkout, set `KONTRA_ORACLE_DIR`.
+`CONTRA_INSPECT_ORACLE_DIR`. To locate the existing oracle scripts outside a
+checkout, set `CONTRA_ORACLE_DIR`.
 
 `route_events` records the actual contribution evaluated by the engine at a
 note onset, a controller-triggered voice update, or the first timed span after

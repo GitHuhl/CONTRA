@@ -2,7 +2,7 @@
 //   RE_SCRIPT=FindVtables.java tools/re/query.sh 0x144f00000 0x144fff000 0x30=0x140ac17a0 0x38=0x140ab9a30
 // Args: <from> <to> then `<byte offset>=<target>` pairs. Output: `vtable <address>
 // slot23 <target>` per match.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.mem.Memory;

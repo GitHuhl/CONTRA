@@ -64,7 +64,7 @@ def main() -> int:
     probe.write_text(PROBE)
     child = subprocess.Popen([sys.executable, str(HERE / "dump.py"), str(probe.with_suffix(".jsonl")), *inputs],
                              env=dict(os.environ, ORACLE_LUA=str(probe), ORACLE_TIMEOUT=str(seconds)))
-    raw = slot.work(Path.home() / ".cache/kontra-native-oracle") / "run" / str(child.pid) / "oracle.jsonl"
+    raw = slot.work(Path.home() / ".cache/contra-native-oracle") / "run" / str(child.pid) / "oracle.jsonl"
     samples = []  # (phase line count, rss kB, last line)
     reads = []
     while child.poll() is None:

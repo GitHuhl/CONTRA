@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Event, HostNote, Plan, Region, Zone};
-use kontra_host::rack::{Hold, Mix, Part, Rack, RackAudio};
-use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+use contra_engine::{Engine, Event, HostNote, Plan, Region, Zone};
+use contra_host::rack::{Hold, Mix, Part, Rack, RackAudio};
+use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 256;
@@ -60,7 +60,7 @@ fn part(name: &str) -> Part {
     Part {
         path: None,
         source: None,
-        recall: kontra_engine::Recall::Restart,
+        recall: contra_engine::Recall::Restart,
         name: name.into(),
         diagnostics: vec![],
         faces: vec![],
@@ -356,7 +356,7 @@ fn a_legato_waits_its_own_hold_and_a_legato_script_keeps_the_order() {
 /// A DC part whose script loads a high-pass into insert 0 in `on init`
 /// and empties the slot again from `on note`, as Shreddage loads an EQ.
 fn effect_loading(store: &mut Store) -> Box<Engine> {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut plan = plan_of(store, 0.5);
     plan.inserts = vec![None];
     let high = ir::Filter {
@@ -383,7 +383,7 @@ fn effect_loading(store: &mut Store) -> Box<Engine> {
         dry: 0.0,
     };
     plan.slot_shapes.types = vec![ty(0, None), ty(7, Some(effect))];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $a
             $a := set_engine_par($ENGINE_PAR_EFFECT_TYPE, 7, -1, 0, 1)
@@ -394,7 +394,7 @@ fn effect_loading(store: &mut Store) -> Box<Engine> {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     Box::new(Engine::new(Arc::new(plan), store.client(), RATE))
 }
 
@@ -420,12 +420,12 @@ fn an_effect_type_a_script_loads_is_built_off_audio_swapped_in_and_saved() {
         "the emptied slot did not swap in: {open}"
     );
     let p = rack.parts()[0].as_ref().unwrap();
-    assert_eq!(p.slot_types, [(kontra_engine::ir::RackAt::Inserts, 0, 0)]);
+    assert_eq!(p.slot_types, [(contra_engine::ir::RackAt::Inserts, 0, 0)]);
     // The old unit comes back to be freed here; the save carries the type.
     rack.tick();
     let saved = rack.save();
     let json = saved.write();
-    assert_eq!(kontra_host::state::Saved::read(&json), saved);
+    assert_eq!(contra_host::state::Saved::read(&json), saved);
     assert_eq!(saved.parts[0].slot_types.len(), 1, "{json}");
 }
 
@@ -433,7 +433,7 @@ fn an_effect_type_a_script_loads_is_built_off_audio_swapped_in_and_saved() {
 /// loads the plan's response "half" from `wav`, written as `name`; returns
 /// the rack after that note's block, the convolver still on the unit.
 fn loading_response(wav: &[u8], name: &str) -> (Rack, RackAudio) {
-    use kontra_engine::{Response, ir};
+    use contra_engine::{Response, ir};
     let file = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::write(&file, wav).unwrap();
     let (mut rack, mut audio) = rack();
@@ -469,14 +469,14 @@ fn loading_response(wav: &[u8], name: &str) -> (Rack, RackAudio) {
         keystream: None,
     };
     plan.responses = vec![("half".into(), sample)];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             load_ir_sample(\"Half.ncw\", 0, $NI_INSERT_BUS)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let plan = Arc::new(plan);
     let e = Box::new(Engine::new(
         Arc::clone(&plan),
@@ -496,7 +496,7 @@ fn loading_response(wav: &[u8], name: &str) -> (Rack, RackAudio) {
 
 #[test]
 fn a_response_a_script_loads_later_is_decoded_off_audio_swapped_in_and_saved() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     // One frame at half scale, 16-bit stereo.
     let half = 16_384i16.to_le_bytes();
     let mut wav = b"RIFF".to_vec();
@@ -523,7 +523,7 @@ fn a_response_a_script_loads_later_is_decoded_off_audio_swapped_in_and_saved() {
     rack.tick();
     let saved = rack.save();
     let json = saved.write();
-    assert_eq!(kontra_host::state::Saved::read(&json), saved);
+    assert_eq!(contra_host::state::Saved::read(&json), saved);
     assert_eq!(saved.parts[0].slot_responses[0].name, "half", "{json}");
     // The file goes bad: a second load fails, the slot and the save keep "half".
     let file = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rack-half.wav");
@@ -553,7 +553,7 @@ fn a_response_that_fails_to_decode_keeps_the_slot_and_is_not_saved() {
 fn the_hosts_transport_reaches_every_parts_scripts() {
     let (mut rack, mut audio) = rack();
     let mut plan = plan_of(rack.store_mut(), 0.5);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             if ($NI_TRANSPORT_RUNNING = 0 or $NI_SONG_POSITION < 960 * 4)
                 ignore_event($EVENT_ID)
@@ -562,7 +562,7 @@ fn the_hosts_transport_reaches_every_parts_scripts() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Box::new(Engine::new(Arc::new(plan), rack.store_mut().client(), RATE));
     rack.install(0, e, part("a"));
     audio.set_transport(false, 8.0, (4, 4));
@@ -584,7 +584,7 @@ fn the_hosts_transport_reaches_every_parts_scripts() {
 fn a_held_part_hears_the_song_position_where_its_notes_land() {
     let (mut rack, mut audio) = rack();
     let mut plan = plan_of(rack.store_mut(), 0.5);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             if ($NI_SONG_POSITION < 960 * 4)
                 ignore_event($EVENT_ID)
@@ -593,7 +593,7 @@ fn a_held_part_hears_the_song_position_where_its_notes_land() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Box::new(Engine::new(Arc::new(plan), rack.store_mut().client(), RATE));
     rack.install(0, e, part("a"));
     // Half a second at 120 bpm: one quarter.
@@ -624,7 +624,7 @@ fn a_held_part_hears_the_song_position_where_its_notes_land() {
 fn a_held_part_hears_the_host_stop_its_hold_later() {
     let (mut rack, mut audio) = rack();
     let mut plan = plan_of(rack.store_mut(), 0.5);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             if ($NI_TRANSPORT_RUNNING = 0)
                 ignore_event($EVENT_ID)
@@ -633,7 +633,7 @@ fn a_held_part_hears_the_host_stop_its_hold_later() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Box::new(Engine::new(Arc::new(plan), rack.store_mut().client(), RATE));
     rack.install(0, e, part("a"));
     rack.set_hold(0, Hold::flat(RATE / 2));
@@ -657,7 +657,7 @@ fn a_held_part_hears_the_host_stop_its_hold_later() {
 
 #[test]
 fn a_sound_tab_decay_edit_is_heard_from_the_next_note() {
-    use kontra_host::sound::{Param, Sounds};
+    use contra_host::sound::{Param, Sounds};
     let (mut rack, mut audio) = rack();
     let e = engine(rack.store_mut(), 0.5);
     let sounds = Sounds::new(RATE, e.group_sounds());
@@ -690,8 +690,8 @@ fn a_sound_tab_decay_edit_is_heard_from_the_next_note() {
 /// An instrument read from "a.nki" whose one script keeps `$knob` and
 /// counts, in `$marker`, init (5) and each persistence-changed (+1); its
 /// snapshot type is `kind`, its saved values `saved`.
-fn snapshot_of(kind: u8, saved: &[&str]) -> kontra_engine::ir::Instrument {
-    use kontra_engine::ir;
+fn snapshot_of(kind: u8, saved: &[&str]) -> contra_engine::ir::Instrument {
+    use contra_engine::ir;
     let source = format!(
         "on init
             set_snapshot_type({kind})
@@ -742,7 +742,7 @@ fn a_snapshot_recalls_into_the_loaded_instrument_as_its_type_asks() {
         audio.process(BLOCK, &[]);
         let p = rack.parts()[0].as_ref().unwrap();
         let (generation, plan) = (p.script.generation(), p.plan.clone().unwrap());
-        let preset = kontra_host::instrument::Preset {
+        let preset = contra_host::instrument::Preset {
             name: "b".into(),
             base: "a.nki".into(),
             saved: vec![vec!["$knob 42".into()]],
@@ -792,7 +792,7 @@ impl Drop for Scratch {
 /// script resource are read.
 #[test]
 fn an_array_saved_by_path_loads_back_and_a_file_of_another_array_does_not() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let scratch = Scratch::new("array-files");
     let dir = scratch.0.clone();
     std::fs::create_dir_all(dir.join("dir.nka")).unwrap();
@@ -803,7 +803,7 @@ fn an_array_saved_by_path_loads_back_and_a_file_of_another_array_does_not() {
         .write(true)
         .open(dir.join("huge.nka"));
     (huge.unwrap())
-        .set_len(kontra_format_kontakt::RESOURCE_LIMIT + 1)
+        .set_len(contra_format_kontakt::RESOURCE_LIMIT + 1)
         .unwrap();
     let saves = dir.join("saves");
     let mine = saves.join(dir.strip_prefix("/").unwrap_or(&dir));
@@ -903,7 +903,7 @@ fn an_install_fades_out_the_engine_it_replaces() {
 /// save reports 0 and no file appears anywhere.
 #[test]
 fn a_rack_without_a_save_folder_writes_nothing() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let scratch = Scratch::new("no-saves");
     let at = scratch.0.join("a.nka");
     let source = format!(

@@ -1,8 +1,8 @@
 //! Load time and memory of one instrument: what the store pins (the preload
 //! law's heads) against the whole process, for RAM work against Kontakt.
-//! `cargo run --release -p kontra-host --example memory -- <file>...`
+//! `cargo run --release -p contra-host --example memory -- <file>...`
 
-use kontra_stream::{Store, StoreConfig};
+use contra_stream::{Store, StoreConfig};
 
 fn rss_mb() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -52,14 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let io = io_mb();
         let (start, cpu) = (std::time::Instant::now(), cpu_s());
         let mut store = Store::new(StoreConfig::DEFAULT)?;
-        let ir = kontra_host::instrument::read(path.as_ref())?;
+        let ir = contra_host::instrument::read(path.as_ref())?;
         let (read, read_cpu) = (start.elapsed(), cpu_s() - cpu);
         let read_io = io_mb();
         let (samples, zones) = (
             ir.samples.len(),
             ir.groups.iter().map(|g| g.zones.len()).sum::<usize>(),
         );
-        if std::env::var_os("KONTRA_ZONES").is_some() {
+        if std::env::var_os("CONTRA_ZONES").is_some() {
             let zones = ir.groups.iter().flat_map(|g| &g.zones);
             let (mut modded, mut start_mod, mut frames) = (0, 0u64, 0u64);
             for z in zones {
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "  {modded} zones with S.Mod, sum S.Mod {start_mod} frames, sum sample frames x channels {frames}"
             );
         }
-        let loaded = kontra_host::instrument::build(ir, 48_000, &mut store);
+        let loaded = contra_host::instrument::build(ir, 48_000, &mut store);
         let pinned = store.pinned_bytes() as f64 / 1e6;
         println!(
             "{}: read {:.2} s (cpu {:.2} s), load {:.2} s (cpu {:.2} s); {samples} samples, {zones} zones ({} planned); pinned {pinned:.1} MB; rss +{} MB",

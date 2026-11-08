@@ -38,7 +38,7 @@ impl Warp {
     };
 }
 
-/// The model's shapers (`kontra_ir::Shaper` documents each).
+/// The model's shapers (`contra_ir::Shaper` documents each).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shaper {
     Off,
@@ -61,7 +61,7 @@ pub enum Side {
     Both,
 }
 
-/// The model's warp shapes (`kontra_ir::WarpShape` documents each).
+/// The model's warp shapes (`contra_ir::WarpShape` documents each).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
     Off,

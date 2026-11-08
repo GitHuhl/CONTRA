@@ -2,7 +2,7 @@
 //!
 //! [`app::view`] draws the editor from an [`app::App`] the host fills, out
 //! of the components in [`kit`]. The Original view draws a library's
-//! [`kontra_ui_model::Interface`] as its source drew it: [`view::page`]
+//! [`contra_ui_model::Interface`] as its source drew it: [`view::page`]
 //! lays a page out from the tree, and [`Pictures`] decodes the tree's
 //! pictures off the UI thread, once per file content, so the first frame
 //! draws what is ready and waits on nothing.
@@ -15,7 +15,7 @@ pub mod keyboard;
 pub mod kit;
 pub mod layout;
 pub mod meter;
-pub use kontra_ui_pictures as pictures;
+pub use contra_ui_pictures as pictures;
 pub mod theme;
 pub mod view;
 

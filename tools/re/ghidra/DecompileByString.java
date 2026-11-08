@@ -2,7 +2,7 @@
 // Headless, read-only, on the analysed project (no re-analysis):
 //   tools/re/query.sh 'get_group_volume' 2
 // Args: <exact string> [callee depth, default 1]. Output: Ghidra C on stdout.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;

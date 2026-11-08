@@ -1,11 +1,11 @@
 //! A voice's level and pitch step from its zone, its note and the group's
 //! modulation; re-read when a controller or expression moves.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::ledger::Note;
-use kontra_stream::Mix;
-use kontra_voice::{Ahdsr, Gain, Lag};
+use contra_stream::Mix;
+use contra_voice::{Ahdsr, Gain, Lag};
 
 use crate::effects::{self, product};
 use crate::modulators::{self, Age};
@@ -33,7 +33,7 @@ impl Bend {
 /// (measured natively: τ 37.5 ms, as the instrument's volume and pan).
 pub(crate) const GROUP_PAN_TAU_MS: f32 = 37.5;
 
-pub(crate) use kontra_plan::modulation::{bent, glide};
+pub(crate) use contra_plan::modulation::{bent, glide};
 
 impl Engine {
     /// The voice's gain, and the slower gain of its routes that lag (their
@@ -422,7 +422,7 @@ impl Engine {
             .filter_map(|m| match m.kind {
                 ir::ModKind::SampleStart { source, depth } => {
                     let x = match source {
-                        ir::Source::HeldTime { span_ms } => kontra_plan::held_time(span_ms, held),
+                        ir::Source::HeldTime { span_ms } => contra_plan::held_time(span_ms, held),
                         source => self.source(zone, source, note, Age::START)?,
                     };
                     let value = x * depth;
@@ -468,7 +468,7 @@ impl Engine {
                 _ => continue,
             };
             let x = match source {
-                ir::Source::HeldTime { span_ms } => Some(kontra_plan::held_time(span_ms, held)),
+                ir::Source::HeldTime { span_ms } => Some(contra_plan::held_time(span_ms, held)),
                 // Outside the signed families the law compiler (FUN_140873040)
                 // reads a bipolar source without `frange_bi`: 0..=1.
                 source => self.unit(zone, source, note, Age::START),
@@ -511,7 +511,7 @@ impl Engine {
                         intensity,
                         curve,
                         ..
-                    } => curve.gain(intensity, kontra_plan::held_time(ms, held)),
+                    } => curve.gain(intensity, contra_plan::held_time(ms, held)),
                     _ => 1.0,
                 })
                 .product()

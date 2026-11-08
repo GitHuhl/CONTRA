@@ -1,7 +1,7 @@
 //! The host's transport as scripts see it: tempo, whether it runs, the song
 //! position at 960 ticks per quarter and the time signature.
 
-use kontra_vm::{Action, HostValue};
+use contra_vm::{Action, HostValue};
 
 use crate::Engine;
 

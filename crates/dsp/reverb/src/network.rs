@@ -6,7 +6,7 @@ use crate::Settings;
 use crate::fade::flush;
 use crate::fdn::{MAX_PREDELAY_MS, MAX_SIZE};
 use crate::resample::{BLOCK, Pair};
-use kontra_law::{NETWORK_LINES as LINES, ReverbNetwork};
+use contra_law::{NETWORK_LINES as LINES, ReverbNetwork};
 use std::f64::consts::PI;
 
 /// A power-of-two ring; reads past its length wrap.

@@ -665,6 +665,436 @@ dependencies = [
 ]
 
 [[package]]
+name = "contra-align"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "contra-behaviour"
+version = "0.0.0"
+dependencies = [
+ "contra-ir",
+ "contra-plan",
+]
+
+[[package]]
+name = "contra-dsp"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-dsp-delay",
+ "contra-dsp-drive",
+ "contra-dsp-dynamics",
+ "contra-dsp-eq",
+ "contra-dsp-filter",
+ "contra-dsp-modulators",
+ "contra-dsp-reverb",
+ "contra-dsp-spatial",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-core"
+version = "0.0.0"
+dependencies = [
+ "contra-law",
+ "contra-time",
+]
+
+[[package]]
+name = "contra-dsp-delay"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-drive"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-dynamics"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-eq"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-filter"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-modulators"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-dsp-reverb"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+ "realfft",
+]
+
+[[package]]
+name = "contra-dsp-spatial"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp-core",
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-effects"
+version = "0.0.0"
+dependencies = [
+ "contra-dsp",
+ "contra-ir",
+ "contra-stream",
+ "contra-voice",
+]
+
+[[package]]
+name = "contra-engine"
+version = "0.0.0"
+dependencies = [
+ "contra-behaviour",
+ "contra-dsp",
+ "contra-effects",
+ "contra-events",
+ "contra-ir",
+ "contra-ledger",
+ "contra-plan",
+ "contra-racks",
+ "contra-script-ui",
+ "contra-stream",
+ "contra-time",
+ "contra-trace",
+ "contra-vm",
+ "contra-voice",
+]
+
+[[package]]
+name = "contra-events"
+version = "0.0.0"
+
+[[package]]
+name = "contra-format"
+version = "0.0.0"
+dependencies = [
+ "contra-ir",
+]
+
+[[package]]
+name = "contra-format-kontakt"
+version = "0.0.0"
+dependencies = [
+ "aes",
+ "contra-format",
+ "contra-ir",
+ "contra-law",
+ "contra-params",
+ "ni-file",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "contra-host"
+version = "0.0.0"
+dependencies = [
+ "contra-align",
+ "contra-engine",
+ "contra-format",
+ "contra-format-kontakt",
+ "contra-ksp",
+ "contra-library",
+ "contra-prepare",
+ "contra-protocol",
+ "contra-stream",
+ "contra-ui-model",
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "contra-inspect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "contra-engine",
+ "contra-host",
+ "contra-law",
+ "contra-stream",
+ "contra-ui-model",
+ "hound",
+ "rustfft",
+ "serde_json",
+]
+
+[[package]]
+name = "contra-ir"
+version = "0.0.0"
+dependencies = [
+ "contra-law",
+ "contra-params",
+]
+
+[[package]]
+name = "contra-ksp"
+version = "0.0.0"
+dependencies = [
+ "contra-vm",
+]
+
+[[package]]
+name = "contra-law"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
+name = "contra-ledger"
+version = "0.0.0"
+dependencies = [
+ "contra-behaviour",
+ "contra-events",
+ "contra-ir",
+ "contra-plan",
+ "contra-time",
+ "contra-vm",
+ "contra-voice",
+]
+
+[[package]]
+name = "contra-library"
+version = "0.0.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "contra-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "contra-native-host"
+version = "0.4.0"
+dependencies = [
+ "arboard",
+ "keyboard-types",
+ "moose-baseview",
+ "mui",
+ "mui-baseview",
+ "raw-window-handle",
+ "static_assertions",
+ "wgpu 30.0.1",
+ "x11-dl",
+ "x11rb",
+]
+
+[[package]]
+name = "contra-params"
+version = "0.0.0"
+dependencies = [
+ "contra-law",
+ "contra-macros",
+]
+
+[[package]]
+name = "contra-plan"
+version = "0.0.0"
+dependencies = [
+ "contra-effects",
+ "contra-ir",
+ "contra-script-ui",
+ "contra-vm",
+ "contra-voice",
+]
+
+[[package]]
+name = "contra-plugin"
+version = "3.0.0-dev"
+dependencies = [
+ "clap-sys",
+ "contra-align",
+ "contra-host",
+ "contra-library",
+ "contra-protocol",
+ "contra-ui",
+ "contra-ui-model",
+ "dirs",
+ "moose",
+ "moose-clap",
+ "moose-test",
+ "moose-vst3",
+ "mui-native-dialog",
+]
+
+[[package]]
+name = "contra-prepare"
+version = "0.0.0"
+dependencies = [
+ "contra-engine",
+ "contra-ir",
+ "contra-stream",
+ "contra-voice",
+ "realfft",
+]
+
+[[package]]
+name = "contra-protocol"
+version = "0.0.0"
+dependencies = [
+ "crossbeam-queue",
+]
+
+[[package]]
+name = "contra-racks"
+version = "0.0.0"
+dependencies = [
+ "contra-behaviour",
+ "contra-dsp",
+ "contra-effects",
+ "contra-ir",
+ "contra-ledger",
+ "contra-plan",
+ "contra-time",
+]
+
+[[package]]
+name = "contra-script-ui"
+version = "0.0.0"
+dependencies = [
+ "contra-law",
+ "contra-vm",
+]
+
+[[package]]
+name = "contra-stream"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "contra-ir",
+ "crossbeam-queue",
+ "ncw",
+ "rustix",
+ "symphonia",
+]
+
+[[package]]
+name = "contra-time"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "contra-trace"
+version = "0.0.0"
+dependencies = [
+ "contra-ir",
+ "contra-vm",
+ "contra-voice",
+]
+
+[[package]]
+name = "contra-ui"
+version = "0.0.0"
+dependencies = [
+ "contra-protocol",
+ "contra-ui-model",
+ "contra-ui-pictures",
+ "mui",
+ "png",
+]
+
+[[package]]
+name = "contra-ui-model"
+version = "0.0.0"
+dependencies = [
+ "contra-macros",
+]
+
+[[package]]
+name = "contra-ui-pictures"
+version = "0.0.0"
+dependencies = [
+ "contra-library",
+ "contra-ui-model",
+ "dirs",
+ "mui",
+ "png",
+ "sha2",
+ "tempfile",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "contra-vm"
+version = "0.0.0"
+
+[[package]]
+name = "contra-voice"
+version = "0.0.0"
+dependencies = [
+ "contra-stream",
+]
+
+[[package]]
+name = "contra-window"
+version = "0.0.0"
+dependencies = [
+ "contra-host",
+ "contra-plugin",
+ "moose",
+ "moose-standalone",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1727,436 +2157,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
-name = "kontra-align"
-version = "0.0.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "kontra-behaviour"
-version = "0.0.0"
-dependencies = [
- "kontra-ir",
- "kontra-plan",
-]
-
-[[package]]
-name = "kontra-dsp"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-dsp-delay",
- "kontra-dsp-drive",
- "kontra-dsp-dynamics",
- "kontra-dsp-eq",
- "kontra-dsp-filter",
- "kontra-dsp-modulators",
- "kontra-dsp-reverb",
- "kontra-dsp-spatial",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-core"
-version = "0.0.0"
-dependencies = [
- "kontra-law",
- "kontra-time",
-]
-
-[[package]]
-name = "kontra-dsp-delay"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-drive"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-dynamics"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-eq"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-filter"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-modulators"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-dsp-reverb"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
- "realfft",
-]
-
-[[package]]
-name = "kontra-dsp-spatial"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp-core",
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-effects"
-version = "0.0.0"
-dependencies = [
- "kontra-dsp",
- "kontra-ir",
- "kontra-stream",
- "kontra-voice",
-]
-
-[[package]]
-name = "kontra-engine"
-version = "0.0.0"
-dependencies = [
- "kontra-behaviour",
- "kontra-dsp",
- "kontra-effects",
- "kontra-events",
- "kontra-ir",
- "kontra-ledger",
- "kontra-plan",
- "kontra-racks",
- "kontra-script-ui",
- "kontra-stream",
- "kontra-time",
- "kontra-trace",
- "kontra-vm",
- "kontra-voice",
-]
-
-[[package]]
-name = "kontra-events"
-version = "0.0.0"
-
-[[package]]
-name = "kontra-format"
-version = "0.0.0"
-dependencies = [
- "kontra-ir",
-]
-
-[[package]]
-name = "kontra-format-kontakt"
-version = "0.0.0"
-dependencies = [
- "aes",
- "kontra-format",
- "kontra-ir",
- "kontra-law",
- "kontra-params",
- "ni-file",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "kontra-host"
-version = "0.0.0"
-dependencies = [
- "dirs",
- "kontra-align",
- "kontra-engine",
- "kontra-format",
- "kontra-format-kontakt",
- "kontra-ksp",
- "kontra-library",
- "kontra-prepare",
- "kontra-protocol",
- "kontra-stream",
- "kontra-ui-model",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kontra-inspect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hound",
- "kontra-engine",
- "kontra-host",
- "kontra-law",
- "kontra-stream",
- "kontra-ui-model",
- "rustfft",
- "serde_json",
-]
-
-[[package]]
-name = "kontra-ir"
-version = "0.0.0"
-dependencies = [
- "kontra-law",
- "kontra-params",
-]
-
-[[package]]
-name = "kontra-ksp"
-version = "0.0.0"
-dependencies = [
- "kontra-vm",
-]
-
-[[package]]
-name = "kontra-law"
-version = "0.0.0"
-dependencies = [
- "serde",
- "thiserror 2.0.21",
- "toml",
-]
-
-[[package]]
-name = "kontra-ledger"
-version = "0.0.0"
-dependencies = [
- "kontra-behaviour",
- "kontra-events",
- "kontra-ir",
- "kontra-plan",
- "kontra-time",
- "kontra-vm",
- "kontra-voice",
-]
-
-[[package]]
-name = "kontra-library"
-version = "0.0.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kontra-macros"
-version = "0.0.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "kontra-native-host"
-version = "0.4.0"
-dependencies = [
- "arboard",
- "keyboard-types",
- "moose-baseview",
- "mui",
- "mui-baseview",
- "raw-window-handle",
- "static_assertions",
- "wgpu 30.0.1",
- "x11-dl",
- "x11rb",
-]
-
-[[package]]
-name = "kontra-params"
-version = "0.0.0"
-dependencies = [
- "kontra-law",
- "kontra-macros",
-]
-
-[[package]]
-name = "kontra-plan"
-version = "0.0.0"
-dependencies = [
- "kontra-effects",
- "kontra-ir",
- "kontra-script-ui",
- "kontra-vm",
- "kontra-voice",
-]
-
-[[package]]
-name = "kontra-plugin"
-version = "3.0.0-dev"
-dependencies = [
- "clap-sys",
- "dirs",
- "kontra-align",
- "kontra-host",
- "kontra-library",
- "kontra-protocol",
- "kontra-ui",
- "kontra-ui-model",
- "moose",
- "moose-clap",
- "moose-test",
- "moose-vst3",
- "mui-native-dialog",
-]
-
-[[package]]
-name = "kontra-prepare"
-version = "0.0.0"
-dependencies = [
- "kontra-engine",
- "kontra-ir",
- "kontra-stream",
- "kontra-voice",
- "realfft",
-]
-
-[[package]]
-name = "kontra-protocol"
-version = "0.0.0"
-dependencies = [
- "crossbeam-queue",
-]
-
-[[package]]
-name = "kontra-racks"
-version = "0.0.0"
-dependencies = [
- "kontra-behaviour",
- "kontra-dsp",
- "kontra-effects",
- "kontra-ir",
- "kontra-ledger",
- "kontra-plan",
- "kontra-time",
-]
-
-[[package]]
-name = "kontra-script-ui"
-version = "0.0.0"
-dependencies = [
- "kontra-law",
- "kontra-vm",
-]
-
-[[package]]
-name = "kontra-stream"
-version = "0.0.0"
-dependencies = [
- "bytemuck",
- "crossbeam-queue",
- "kontra-ir",
- "ncw",
- "rustix",
- "symphonia",
-]
-
-[[package]]
-name = "kontra-time"
-version = "0.0.0"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "kontra-trace"
-version = "0.0.0"
-dependencies = [
- "kontra-ir",
- "kontra-vm",
- "kontra-voice",
-]
-
-[[package]]
-name = "kontra-ui"
-version = "0.0.0"
-dependencies = [
- "kontra-protocol",
- "kontra-ui-model",
- "kontra-ui-pictures",
- "mui",
- "png",
-]
-
-[[package]]
-name = "kontra-ui-model"
-version = "0.0.0"
-dependencies = [
- "kontra-macros",
-]
-
-[[package]]
-name = "kontra-ui-pictures"
-version = "0.0.0"
-dependencies = [
- "dirs",
- "kontra-library",
- "kontra-ui-model",
- "mui",
- "png",
- "sha2",
- "tempfile",
- "zune-jpeg",
-]
-
-[[package]]
-name = "kontra-vm"
-version = "0.0.0"
-
-[[package]]
-name = "kontra-voice"
-version = "0.0.0"
-dependencies = [
- "kontra-stream",
-]
-
-[[package]]
-name = "kontra-window"
-version = "0.0.0"
-dependencies = [
- "kontra-host",
- "kontra-plugin",
- "moose",
- "moose-standalone",
-]
-
-[[package]]
 name = "kurbo"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2460,8 +2460,8 @@ dependencies = [
 name = "moose-mui"
 version = "7.0.0"
 dependencies = [
+ "contra-native-host",
  "keyboard-types",
- "kontra-native-host",
  "moose",
  "moose-core",
  "moose-params",
@@ -4152,11 +4152,11 @@ dependencies = [
 name = "ui-shots"
 version = "0.0.0"
 dependencies = [
- "kontra-engine",
- "kontra-host",
- "kontra-stream",
- "kontra-ui",
- "kontra-ui-model",
+ "contra-engine",
+ "contra-host",
+ "contra-stream",
+ "contra-ui",
+ "contra-ui-model",
  "mui",
  "png",
 ]

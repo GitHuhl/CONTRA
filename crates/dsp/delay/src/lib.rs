@@ -4,7 +4,7 @@
 
 use std::f64::consts::TAU;
 
-use kontra_dsp_core::{Biquad, Side, high_pass, shelf};
+use contra_dsp_core::{Biquad, Side, high_pass, shelf};
 
 /// The longest line [`ModDelay::new`] allocates, ms.
 pub const MAX_MS: f32 = 6000.0;

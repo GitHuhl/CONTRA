@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two renders (Kontakt reference vs KONTRA). Usage: compare.py REF.wav MINE.wav [--hop 0.05]
+"""Compare two renders (Kontakt reference vs CONTRA). Usage: compare.py REF.wav MINE.wav [--hop 0.05]
 
 Aligns on the first onset (-60 dBFS over the loudest 20 ms RMS... see ONSET_DB),
 then prints per-hop RMS dB, peak dB, spectral centroid and dominant pitch for

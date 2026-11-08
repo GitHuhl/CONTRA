@@ -1,7 +1,7 @@
 // Find RIP-relative `lea reg,[rip+disp]` (and mov/movss loads) whose target is a given address by raw byte scan.
 //   RE_SCRIPT=ScanLea.java tools/re/query.sh 0x144e74d90
 // Args: target addresses. Output: `lea at <addr> -> <target>` plus the containing function if one exists.
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;

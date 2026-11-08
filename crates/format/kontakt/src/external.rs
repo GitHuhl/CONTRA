@@ -1,8 +1,8 @@
 //! External modulators (velocity, controllers, pitch bend, key, scripts)
 //! as routes on a group.
 
-use kontra_format::Notes;
-use kontra_ir as ir;
+use contra_format::Notes;
+use contra_ir as ir;
 use ni_file::kontakt::objects::{ExternalModArray32, Group, ModSource, ShaperCurve};
 
 use crate::laws;
@@ -65,8 +65,8 @@ pub(crate) fn external(
                 let source = match (raw, t.shaper.as_ref().filter(|s| s.enabled)) {
                     (Some(s), Some(shaper)) => {
                         let result = shaped(&mut out.shapers, s, &shaper.curve);
-                        kontra_law::record(|| kontra_law::Application {
-                            id: kontra_law::LawId("kontakt.mod_shaper.v1"),
+                        contra_law::record(|| contra_law::Application {
+                            id: contra_law::LawId("kontakt.mod_shaper.v1"),
                             location: format!(
                                 "groups/{group_index}/routes/{n}/targets/{target}/shaper"
                             ),
@@ -127,8 +127,8 @@ pub(crate) fn external(
                             .is_some() =>
                     {
                         let result = laws::eq_gain(source, insert, param, t.signed_intensity());
-                        kontra_law::record(|| kontra_law::Application {
-                            id: kontra_law::LawId("kontakt.eq_gain_route.v1"),
+                        contra_law::record(|| contra_law::Application {
+                            id: contra_law::LawId("kontakt.eq_gain_route.v1"),
                             location: format!("groups/{group_index}/routes/{n}/targets/{target}"),
                             input: format!(
                                 "source={source:?}, insert={insert}, param={param}, intensity={:?}",
@@ -147,8 +147,8 @@ pub(crate) fn external(
                     {
                         let intensity = t.signed_intensity();
                         let floor_ms = laws::time_floor_ms(&p.unknown_source_data);
-                        kontra_law::record(|| kontra_law::Application {
-                            id: kontra_law::LawId("kontakt.time_floor_ms.v1"),
+                        contra_law::record(|| contra_law::Application {
+                            id: contra_law::LawId("kontakt.time_floor_ms.v1"),
                             location: format!(
                                 "groups/{group_index}/routes/{n}/targets/{target}/floor_ms"
                             ),
@@ -194,8 +194,8 @@ pub(crate) fn external(
                         timed_slots.iter().find_map(|&(n, of)| match of {
                             ir::Source::Lfo(lfo) if n == usize::from(at) => {
                                 let result = laws::lfo_rate(source, lfo, t.signed_intensity());
-                                kontra_law::record(|| kontra_law::Application {
-                                    id: kontra_law::LawId("kontakt.lfo_rate_route.v1"),
+                                contra_law::record(|| contra_law::Application {
+                                    id: contra_law::LawId("kontakt.lfo_rate_route.v1"),
                                     location: format!(
                                         "groups/{group_index}/routes/{n}/targets/{target}"
                                     ),
@@ -239,8 +239,8 @@ pub(crate) fn external(
                             tau_ms,
                             ..
                         } => {
-                            kontra_law::record(|| kontra_law::Application {
-                                id: kontra_law::LawId("kontakt.volume_source_curve.v1"),
+                            contra_law::record(|| contra_law::Application {
+                                id: contra_law::LawId("kontakt.volume_source_curve.v1"),
                                 location: format!(
                                     "groups/{group_index}/routes/{n}/targets/{target}/curve"
                                 ),
@@ -285,7 +285,7 @@ fn shaped(
     let law = match curve {
         ShaperCurve::Breakpoints(points) if !points.is_empty() => {
             let points: Vec<_> = points.iter().map(|p| (p.x, p.y, p.curve)).collect();
-            Some(kontra_law::kontakt::modulation_shaper(&points))
+            Some(contra_law::kontakt::modulation_shaper(&points))
         }
         _ => None,
     };
@@ -303,8 +303,8 @@ fn shaped(
 }
 
 fn record_lag(group: usize, route: usize, target: usize, lag: i16, tau: f32) {
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId("kontakt.route_tau_ms.v1"),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.route_tau_ms.v1"),
         location: format!("groups/{group}/routes/{route}/targets/{target}/tau_ms"),
         input: format!("lag_ms={lag}"),
         output: format!("{tau:?}"),

@@ -1,15 +1,15 @@
 //! Measures how late an instrument sounds, as auto-align does at load: a
 //! first note and a legato at three velocities, as loaded and per keyswitch.
-//! With `KONTRA_GRID=1` it then plays a first note and a legato through
+//! With `CONTRA_GRID=1` it then plays a first note and a legato through
 //! the rack, held as auto-align holds them, and prints how far each attack
 //! lands from the beat plus the reported latency.
-//! `cargo run --release -p kontra-host --features align --example align -- <file> [key]`
+//! `cargo run --release -p contra-host --features align --example align -- <file> [key]`
 
 use std::sync::Arc;
 
-use kontra_align::{Delay, ONSET_DB, Timing, onset_ms, transition_ms};
-use kontra_host::rack::{Event, HostNote, HostPattern, Rack};
-use kontra_stream::{Store, StoreConfig};
+use contra_align::{Delay, ONSET_DB, Timing, onset_ms, transition_ms};
+use contra_host::rack::{Event, HostNote, HostPattern, Rack};
+use contra_stream::{Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 256;
@@ -19,8 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.next().ok_or("usage: align <file> [key]")?;
     let key = args.next().and_then(|k| k.parse().ok()).unwrap_or(60);
     let mut store = Store::new(StoreConfig::DEFAULT)?;
-    let loaded = kontra_host::instrument::build(
-        kontra_host::instrument::read(path.as_ref())?,
+    let loaded = contra_host::instrument::build(
+        contra_host::instrument::read(path.as_ref())?,
         RATE,
         &mut store,
     );
@@ -33,10 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let rows = switches.len();
     let mut player =
-        kontra_host::align::Measured::new(Arc::new(loaded.plan), store.client(), RATE, switches);
+        contra_host::align::Measured::new(Arc::new(loaded.plan), store.client(), RATE, switches);
     let start = std::time::Instant::now();
-    let timing = kontra_align::measure(&mut player, rows, key);
-    let show = |d: &kontra_align::Delay| {
+    let timing = contra_align::measure(&mut player, rows, key);
+    let show = |d: &contra_align::Delay| {
         let steps: Vec<String> = (d.steps.iter())
             .map(|s| format!("≤{} first {:?} legato {:?}", s.top, s.first, s.legato))
             .collect();
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  switch {row}: {}", show(d));
     }
     println!("  latest {:.1} ms", timing.latest());
-    if std::env::var_os("KONTRA_GRID").is_some() {
+    if std::env::var_os("CONTRA_GRID").is_some() {
         grid(&path, key, &timing.loaded)?;
     }
     Ok(())
@@ -90,7 +90,7 @@ fn grid(path: &str, key: u8, delay: &Delay) -> Result<(), Box<dyn std::error::Er
     for velocity in [20u8, 48, 80, 100, 120, 127] {
         let (mut rack, mut audio) = Rack::new(RATE, Store::new(StoreConfig::DEFAULT)?, BLOCK);
         rack.load(0, path.as_ref())?;
-        rack.set_hold(0, kontra_host::align::hold(&timing, reported, rate));
+        rack.set_hold(0, contra_host::align::hold(&timing, reported, rate));
         let v = f64::from(velocity) / 127.0;
         let on = |key| Event::NoteOn {
             note: note(key),
@@ -122,7 +122,7 @@ fn grid(path: &str, key: u8, delay: &Delay) -> Result<(), Box<dyn std::error::Er
             out.extend(audio.output(0, BLOCK).iter().map(|[l, r]| l + r));
         }
         let first = onset_ms(out.get(t0..t1).unwrap_or_default(), rate, ONSET_DB);
-        let lead = at(kontra_align::LEAD_MS);
+        let lead = at(contra_align::LEAD_MS);
         let legato = transition_ms(
             out.get(t1 - lead..t1 + at(1000.0)).unwrap_or_default(),
             rate,

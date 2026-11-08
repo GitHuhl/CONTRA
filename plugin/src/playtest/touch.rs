@@ -2,11 +2,11 @@
 //! model (as the editor moves it, not by pixels) under a held note; then
 //! what the load left out, and one JSON row per program.
 
-use kontra_ui_model::{Kind, Value};
+use contra_ui_model::{Kind, Value};
 use moose::prelude::*;
 
 use super::{BLOCK, In, Played, Report, at, block, cc, off, on};
-use crate::{Dsp, KontraParams, Tick};
+use crate::{Dsp, ContraParams, Tick};
 
 /// The most controls one program moves; past it the row says how many were left.
 const MOST: usize = 300;
@@ -28,7 +28,7 @@ pub(super) struct Touched {
 }
 
 /// (widget, name, value to move it to) for every control that shows.
-fn targets(params: &KontraParams) -> (usize, Vec<(usize, String, f64)>) {
+fn targets(params: &ContraParams) -> (usize, Vec<(usize, String, f64)>) {
     let rack = crate::lock(&params.shared.rack);
     let Some(view) = (rack.as_ref())
         .and_then(|r| r.parts().first()?.as_ref())
@@ -88,7 +88,7 @@ fn rms_db(audio: &[f32]) -> f32 {
 
 /// Moves every control under a held C4, retriggered every 16 controls.
 pub(super) fn touch(
-    params: &KontraParams,
+    params: &ContraParams,
     dsp: &mut Dsp,
     last: &mut Played,
     fail: &mut dyn FnMut(String),
@@ -158,7 +158,7 @@ pub(super) fn touch(
 
 /// What the load could not play, by impact: (broken, audible, latent, the
 /// most frequent broken and audible features).
-pub(super) fn diagnostics(params: &KontraParams) -> (usize, usize, usize, Vec<String>) {
+pub(super) fn diagnostics(params: &ContraParams) -> (usize, usize, usize, Vec<String>) {
     let rack = crate::lock(&params.shared.rack);
     let Some(part) = rack.as_ref().and_then(|r| r.parts().first()?.as_ref()) else {
         return (0, 0, 0, Vec::new());

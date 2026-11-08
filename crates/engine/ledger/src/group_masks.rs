@@ -65,7 +65,7 @@ impl GroupMasks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_vm::event;
+    use contra_vm::event;
 
     #[test]
     fn group_masks() {

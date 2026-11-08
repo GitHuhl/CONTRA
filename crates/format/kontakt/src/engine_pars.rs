@@ -6,12 +6,12 @@
 //! path, 0x1408a4207; `get_engine_par_disp` 0x140785d40 calls the getter
 //! 0x140898570 in text mode). The engine applies that as `Engine::absent`.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::readouts::readouts;
 use crate::script_knobs::script_knobs;
 
-/// Every `$ENGINE_PAR_*` name KONTRA carries.
+/// Every `$ENGINE_PAR_*` name CONTRA carries.
 pub fn engine_pars() -> Vec<ir::ScriptPar> {
     let mut texts = readouts();
     let mut readout = |name: &str| {

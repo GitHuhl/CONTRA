@@ -1,4 +1,4 @@
-use kontra_law::{Law, laws};
+use contra_law::{Law, laws};
 
 laws!(LINEAR => "laws/linear.toml");
 
@@ -9,7 +9,7 @@ fn embedded_law_round_trips_through_its_source() {
     assert_eq!(spec.tolerance_db, 0.1);
     assert_eq!(spec.id, Some(LINEAR.id));
     assert!(
-        kontra_law::parse(LINEAR.text)
+        contra_law::parse(LINEAR.text)
             .expect("anonymous parses")
             .id
             .is_none()

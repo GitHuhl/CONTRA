@@ -1,6 +1,6 @@
 -- Probe: which stored value does Kontakt write for a group/zone/instrument volume in dB?
 -- Creates one scratch instrument, sets known dB values, saves it next to ORACLE_OUT.
--- KONTRA's reader then reads the raw stored floats (tools/kontakt-oracle/volume_law.py).
+-- CONTRA's reader then reads the raw stored floats (tools/kontakt-oracle/volume_law.py).
 local kt = Kontakt
 local out = assert(io.open(ORACLE_OUT, "w"))
 kt.reset_multi()

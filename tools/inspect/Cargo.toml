@@ -1,5 +1,5 @@
 [package]
-name = "kontra-inspect"
+name = "contra-inspect"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
@@ -10,10 +10,10 @@ description = "Inspect v3 instrument loads and playback"
 [dependencies]
 anyhow = "1"
 hound = "3"
-kontra-engine = { path = "../../crates/engine/engine", features = ["trace"] }
-kontra-ui-model = { path = "../../crates/model/ui-model" }
-kontra-law = { path = "../../crates/base/law" }
-kontra-host = { path = "../../crates/app/host" }
-kontra-stream = { path = "../../crates/engine/stream" }
+contra-engine = { path = "../../crates/engine/engine", features = ["trace"] }
+contra-ui-model = { path = "../../crates/model/ui-model" }
+contra-law = { path = "../../crates/base/law" }
+contra-host = { path = "../../crates/app/host" }
+contra-stream = { path = "../../crates/engine/stream" }
 serde_json = "1"
 rustfft = "6"

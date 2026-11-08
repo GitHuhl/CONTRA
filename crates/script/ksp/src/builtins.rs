@@ -1,6 +1,6 @@
 //! KSP's builtins: name, signature, and the [`Action`] each one asks of the host.
 
-use kontra_vm::Action;
+use contra_vm::Action;
 
 /// How an argument is passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

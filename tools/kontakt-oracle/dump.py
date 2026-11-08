@@ -26,7 +26,7 @@ import slot  # noqa: E402  (oracle-slot: prefix, display and work dir of this se
 
 EXE = os.environ.get("KONTAKT_EXE") or slot.exe_default()
 SETTINGS = Path(EXE).parents[2] / "UserData/Settings.cfg"
-WORK = slot.work(Path.home() / ".cache/kontra-native-oracle") / "run" / str(os.getpid())
+WORK = slot.work(Path.home() / ".cache/contra-native-oracle") / "run" / str(os.getpid())
 DISPLAY = slot.display(":78")  # not :77, which the audio reference harness owns
 
 

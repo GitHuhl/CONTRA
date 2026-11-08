@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use kontra_align::{Delay, Step, Timing};
-use kontra_host::align::{Measured, hold};
-use kontra_host::rack::{Delays, Hold, Plan, Rack};
-use kontra_protocol::MAX_PARTS;
+use contra_align::{Delay, Step, Timing};
+use contra_host::align::{Measured, hold};
+use contra_host::rack::{Delays, Hold, Plan, Rack};
+use contra_protocol::MAX_PARTS;
 
 /// The notes the measurement tries, in order: C4, then the octaves around
 /// it, so a bass or a tuba silent on C4 measures where it plays.
@@ -43,7 +43,7 @@ pub fn update(on: bool, rack: &mut Rack) -> u32 {
             ..Timing::default()
         });
     }
-    let reported = kontra_align::reported_ms(timings.iter().flatten().map(Timing::latest));
+    let reported = contra_align::reported_ms(timings.iter().flatten().map(Timing::latest));
     for (n, timing) in timings.iter().enumerate() {
         if let Some(timing) = timing {
             let hold = if on {
@@ -70,7 +70,7 @@ fn measure(plan: Arc<Plan>, rack: &mut Rack) -> Delays {
     let mut player = Measured::new(plan, rack.store_mut().client(), rack.rate(), Vec::new());
     let sounds = |d: &Delay| d.steps.iter().any(|s| s.first.or(s.legato).is_some());
     let d = (PROBE_KEYS.iter())
-        .map(|&key| kontra_align::measure(&mut player, 0, key).loaded)
+        .map(|&key| contra_align::measure(&mut player, 0, key).loaded)
         .find(sounds)
         .unwrap_or_default();
     d.steps.iter().map(|s| (s.top, s.first, s.legato)).collect()

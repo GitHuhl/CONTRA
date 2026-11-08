@@ -1,6 +1,6 @@
 //! One sampler voice: cursor, interpolation, envelope, gain (02-ENGINE.md §5).
 //!
-//! A voice never waits for storage. It reads through `kontra-stream`; frames
+//! A voice never waits for storage. It reads through `contra-stream`; frames
 //! not in memory are silence and counted, and the cursor keeps moving, so a
 //! note is never late and never drifts (rule 4).
 
@@ -9,7 +9,7 @@ mod fade;
 mod wavetable;
 mod zone;
 
-use kontra_stream::{Mix, StreamClient};
+use contra_stream::{Mix, StreamClient};
 
 pub use envelope::Ahdsr;
 pub use wavetable::{

@@ -11,8 +11,8 @@
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
-use kontra_engine::Text;
-use kontra_engine::files::{self, ArrayKind, FileReply, FileRequest};
+use contra_engine::Text;
+use contra_engine::files::{self, ArrayKind, FileReply, FileRequest};
 
 use super::{Command, Rack};
 
@@ -32,7 +32,7 @@ impl files::Files for DiskFiles {
 /// The user's own save folder for scripts' arrays, for the plugin's rack.
 #[must_use]
 pub fn user_saves() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("kontra/arrays"))
+    Some(dirs::data_dir()?.join("contra/arrays"))
 }
 
 /// Only `.nka` files: a script names nothing else to read or write.
@@ -61,10 +61,10 @@ fn read(saves: Option<&Path>, path: &str) -> Option<Vec<u8>> {
 }
 
 /// The bytes of a regular file no larger than any resource a script loads
-/// ([`kontra_format_kontakt::RESOURCE_LIMIT`]); nothing for a larger file,
+/// ([`contra_format_kontakt::RESOURCE_LIMIT`]); nothing for a larger file,
 /// a device or a pipe, so a script cannot make the host read without end.
 fn bounded(path: &Path) -> Option<Vec<u8>> {
-    const LIMIT: u64 = kontra_format_kontakt::RESOURCE_LIMIT;
+    const LIMIT: u64 = contra_format_kontakt::RESOURCE_LIMIT;
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }

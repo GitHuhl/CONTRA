@@ -1,5 +1,5 @@
 // Actual shim lifecycle calls; no editor, library or substitute event adapter.
-// g++ -std=c++17 vendor/moose-vst3/tests/lifecycle.cpp -o /tmp/kontra-lifecycle
+// g++ -std=c++17 vendor/moose-vst3/tests/lifecycle.cpp -o /tmp/contra-lifecycle
 #include "../shim/vst3_shim.cpp"
 #include <cstring>
 

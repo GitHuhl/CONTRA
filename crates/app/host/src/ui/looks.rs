@@ -1,6 +1,6 @@
 //! What a [`super::Live`] reads of a running script.
 
-use kontra_engine::{ControlLook, Engine, Page};
+use contra_engine::{ControlLook, Engine, Page};
 
 /// What a [`super::Live`] reads of a running script: the engine itself, or a copy
 /// of those reads made on the audio thread (`crate::view::LookFrame`).
@@ -13,7 +13,7 @@ pub trait Looks {
     /// The bitmap font behind font id `id` (`get_font_id`), by picture name.
     fn font(&self, slot: u8, id: i32) -> Option<&str>;
     /// The keyboard's keys as the scripts left them, by note.
-    fn keys(&self) -> &[kontra_engine::Key];
+    fn keys(&self) -> &[contra_engine::Key];
     /// Whether the keyboard shows only the keys scripts press.
     fn pressed_support(&self) -> bool;
 }
@@ -39,7 +39,7 @@ impl Looks for Engine {
         Engine::font(self, slot, id)
     }
 
-    fn keys(&self) -> &[kontra_engine::Key] {
+    fn keys(&self) -> &[contra_engine::Key] {
         Engine::keys(self)
     }
 

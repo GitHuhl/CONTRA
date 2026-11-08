@@ -1,8 +1,8 @@
 //! EQ bands and filters as stages on summed audio.
 
-use kontra_dsp::eq::{Bell, Biquad, Side};
-use kontra_dsp::filter::{Formant, LadderKind, Pass, Shape, Svf, VowelSet, Vowels};
-use kontra_ir as ir;
+use contra_dsp::eq::{Bell, Biquad, Side};
+use contra_dsp::filter::{Formant, LadderKind, Pass, Shape, Svf, VowelSet, Vowels};
+use contra_ir as ir;
 
 /// The rack's active EQs (their audible bands) and filters, in slot order.
 pub fn sections(rack: &[Option<ir::Effect>]) -> Vec<ir::EffectKind> {
@@ -26,10 +26,10 @@ fn band(b: &ir::Bell, rate: u32) -> Biquad {
                 q: b.q,
                 gain_db: b.gain_db,
             };
-            kontra_dsp::eq::bell(band, rate)
+            contra_dsp::eq::bell(band, rate)
         }
-        ir::Shape::LowShelf => kontra_dsp::eq::shelf(b.hz, b.gain_db, b.q, Side::Low, rate),
-        ir::Shape::HighShelf => kontra_dsp::eq::shelf(b.hz, b.gain_db, b.q, Side::High, rate),
+        ir::Shape::LowShelf => contra_dsp::eq::shelf(b.hz, b.gain_db, b.q, Side::Low, rate),
+        ir::Shape::HighShelf => contra_dsp::eq::shelf(b.hz, b.gain_db, b.q, Side::High, rate),
     }
 }
 
@@ -100,7 +100,7 @@ pub fn stages(sections: &[ir::EffectKind], rate: u32) -> Box<[Stage]> {
                     continue;
                 }
                 out.extend(
-                    kontra_dsp::filter::sections(&shape, rate)
+                    contra_dsp::filter::sections(&shape, rate)
                         .into_iter()
                         .map(Stage::Biquad),
                 );

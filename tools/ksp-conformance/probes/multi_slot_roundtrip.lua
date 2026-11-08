@@ -11,10 +11,10 @@
 -- Bits are written as set_engine_par(ENGINE_PAR_VOLUME, 1000, group) and read back as
 -- group volume below -100 dB, as in persistence_roundtrip.lua.
 --
--- Run: flock /tmp/kontra-oracle.lock env ORACLE_LUA=<this file> \
+-- Run: flock /tmp/contra-oracle.lock env ORACLE_LUA=<this file> \
 --        python3 tools/kontakt-oracle/dump.py OUT.jsonl
 local kt = Kontakt
-local DIR = "Z:\\data\\dev\\workspace\\Research\\KONTRA\\scratch-pers\\"
+local DIR = "Z:\\data\\dev\\workspace\\Research\\CONTRA\\scratch-pers\\"
 local out = assert(io.open(ORACLE_OUT, "w"))
 local function log(t) out:write(t .. "\n") out:flush() end
 

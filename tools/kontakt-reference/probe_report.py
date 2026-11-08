@@ -113,7 +113,7 @@ for i, n in enumerate(notes):
     def ok(e):
         c, k = cols.get(e), kp[i]
         return "-" if not (c and k) else ("yes" if c["asset"] == k["asset"] and bool(c.get("reversed")) == bool(k.get("reversed")) and abs(c.get("offset", 0) - k.get("offset", 0)) <= 2400 else "offset" if c["asset"] == k["asset"] and bool(c.get("reversed")) == bool(k.get("reversed")) else "layer" if layer(c) == layer(k) and c.get("zones") else "NO")
-    rows.append(f"| {n['key']}/{n['vel']}/{r} | {fmt(kp[i])} | {fmt(cols.get('kontra'))} | {fmt(cols.get('v1'))} | {ok('kontra')} / {ok('v1')} |")
+    rows.append(f"| {n['key']}/{n['vel']}/{r} | {fmt(kp[i])} | {fmt(cols.get('contra'))} | {fmt(cols.get('v1'))} | {ok('contra')} / {ok('v1')} |")
 open(out.replace(".json", ".md"), "w").write("\n".join(rows) + "\n")
 for eng, r in res["engines"].items():
     print(f"{ID:18} {eng:6} sample {r['same_sample_pct']:5.1f}%  layer {r['same_velocity_layer_pct']:5.1f}%  RR {r['rr_sequence_equal']}/{r['rr_groups']}  level {r['level_db_mean']} dB (worst {r['level_db_worst']})  silent-vs-kontakt {r['kontakt_audible_engine_silent']}  artic {','.join(r['articulations'])[:40]}")

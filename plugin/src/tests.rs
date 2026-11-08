@@ -3,10 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use kontra_host::state::{Saved, SavedPart};
+use contra_host::state::{Saved, SavedPart};
 use moose::prelude::*;
 
-use crate::{Dsp, Kontra, KontraParams, Tick};
+use crate::{Dsp, Contra, ContraParams, Tick};
 
 pub(super) const RATE: f64 = 48_000.0;
 pub(super) const BLOCK: usize = 512;
@@ -23,27 +23,27 @@ fn plugin_contract() {
 
 /// Preserve the v3 plugin identifiers when changing its display name.
 #[test]
-fn v3_has_its_own_identity() {
+fn has_its_own_identity() {
     let info = <crate::Plugin as moose::core::plugin::PluginRuntime>::info();
-    assert_eq!(info.name, "KONTRA");
-    assert_eq!(info.clap_id, "audio.matari.kontra-v3");
-    assert_eq!(info.vst3_id, "audio.matari.kontra-v3");
-    assert_eq!(&info.fourcc, b"Knt3");
+    assert_eq!(info.name, "CONTRA");
+    assert_eq!(info.clap_id, "io.github.githuhl.contra");
+    assert_eq!(info.vst3_id, "io.github.githuhl.contra");
+    assert_eq!(&info.fourcc, b"Cntr");
 }
 
 /// A plugin as a host has it after loading `saved` and activating.
-pub(super) fn activate(saved: &str) -> (KontraParams, Dsp) {
-    let params = KontraParams::new();
+pub(super) fn activate(saved: &str) -> (ContraParams, Dsp) {
+    let params = ContraParams::new();
     *params.saved.write().unwrap() = saved.to_owned();
     params.restore();
     let mut dsp = Dsp::default();
-    <Kontra as PluginLogic>::reset(&mut dsp, &params, &AudioConfig::new(RATE, BLOCK));
+    <Contra as PluginLogic>::reset(&mut dsp, &params, &AudioConfig::new(RATE, BLOCK));
     Tick.run(&params);
     (params, dsp)
 }
 
 /// One block with `events`; the first output pair, interleaved.
-fn block(params: &KontraParams, dsp: &mut Dsp, events: &[moose::prelude::Event]) -> Vec<f32> {
+fn block(params: &ContraParams, dsp: &mut Dsp, events: &[moose::prelude::Event]) -> Vec<f32> {
     let mut list = EventList::with_capacity(16);
     for &e in events {
         list.push(e);
@@ -57,7 +57,7 @@ fn block(params: &KontraParams, dsp: &mut Dsp, events: &[moose::prelude::Event])
         // A bounce, as the host renders offline: every page read in time.
         let mut cx = ProcessContext::new(&transport, RATE, BLOCK, &mut out_events)
             .with_process_mode(ProcessMode::Offline);
-        <Kontra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+        <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
     }
     channels[0]
         .iter()
@@ -87,7 +87,7 @@ fn note(on: bool, key: u8) -> moose::prelude::Event {
 
 /// A second of one held note after a quarter second of quiet, as a player
 /// gives a program time to settle; its RMS.
-fn play(params: &KontraParams, dsp: &mut Dsp) -> f32 {
+fn play(params: &ContraParams, dsp: &mut Dsp) -> f32 {
     let blocks = |s: f64| (s * RATE) as usize / BLOCK;
     for _ in 0..blocks(0.25) {
         block(params, dsp, &[]);
@@ -114,7 +114,7 @@ fn library(path: &str) -> Option<PathBuf> {
 /// Lets the commands sent so far reach the audio side and a capture of the
 /// scripts' persistent values taken after them come back, as the control
 /// tick does between blocks (a capture already on its way is read first).
-fn settle(params: &KontraParams, dsp: &mut Dsp) {
+fn settle(params: &ContraParams, dsp: &mut Dsp) {
     for _ in 0..2 {
         Tick.run(params);
         block(params, dsp, &[]);
@@ -124,7 +124,7 @@ fn settle(params: &KontraParams, dsp: &mut Dsp) {
 
 /// Turns part 0's first integer control one step, as the user would; the
 /// variable and the value it was turned to.
-fn move_control(params: &KontraParams) -> Option<(String, i64)> {
+fn move_control(params: &ContraParams) -> Option<(String, i64)> {
     let mut guard = crate::lock(&params.shared.rack);
     let rack = guard.as_mut()?;
     let script = &rack.parts().first()?.as_ref()?.script;
@@ -169,11 +169,11 @@ fn recall(path: PathBuf) -> Result<String, String> {
     let before = play(&live, &mut live_dsp);
     let missing = crate::lock(&live.shared.rack)
         .as_ref()
-        .and_then(kontra_host::rack::Rack::stats)
+        .and_then(contra_host::rack::Rack::stats)
         .map_or(0, |s| s.missing_frames);
     // A host's plain reset at the same rate keeps the part: it plays at once,
     // without a control tick to reload it.
-    <Kontra as PluginLogic>::reset(&mut live_dsp, &live, &AudioConfig::new(RATE, BLOCK));
+    <Contra as PluginLogic>::reset(&mut live_dsp, &live, &AudioConfig::new(RATE, BLOCK));
     let after_reset = play(&live, &mut live_dsp);
     settle(&live, &mut live_dsp);
     let moved = move_control(&live);
@@ -259,7 +259,7 @@ fn real_instruments_load_play_save_and_reload() {
 }
 
 /// One block with `events`; output pairs 0 and 1, each summed to mono.
-fn pairs(params: &KontraParams, dsp: &mut Dsp, events: &[moose::prelude::Event]) -> [Vec<f32>; 2] {
+fn pairs(params: &ContraParams, dsp: &mut Dsp, events: &[moose::prelude::Event]) -> [Vec<f32>; 2] {
     let mut list = EventList::with_capacity(16);
     for &e in events {
         list.push(e);
@@ -272,7 +272,7 @@ fn pairs(params: &KontraParams, dsp: &mut Dsp, events: &[moose::prelude::Event])
         let mut out_events = EventList::with_capacity(16);
         let mut cx = ProcessContext::new(&transport, RATE, BLOCK, &mut out_events)
             .with_process_mode(ProcessMode::Offline);
-        <Kontra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+        <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
     }
     let mono = |n: usize| {
         channels[2 * n]
@@ -308,7 +308,7 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
     };
     let saved = Saved::new(vec![part(0, a), part(1, b)]);
     let (params, mut dsp) = activate(&saved.write());
-    let onsets = |params: &KontraParams, dsp: &mut Dsp| {
+    let onsets = |params: &ContraParams, dsp: &mut Dsp| {
         for _ in 0..(RATE as usize / 4 / BLOCK) {
             pairs(params, dsp, &[]);
         }
@@ -325,11 +325,11 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
         for _ in 0..(8 * RATE as usize / BLOCK) {
             pairs(params, dsp, &[]);
         }
-        out.map(|x| kontra_align::onset_ms(&x, RATE, kontra_align::ONSET_DB).unwrap_or(f32::NAN))
+        out.map(|x| contra_align::onset_ms(&x, RATE, contra_align::ONSET_DB).unwrap_or(f32::NAN))
     };
     let [a0, b0] = onsets(&params, &mut dsp);
     assert_eq!(
-        <Kontra as PluginLogic>::latency(&dsp),
+        <Contra as PluginLogic>::latency(&dsp),
         0,
         "latency while off"
     );
@@ -338,7 +338,7 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
     Tick.run(&params);
     let measured = t.elapsed();
     pairs(&params, &mut dsp, &[]);
-    let latency = <Kontra as PluginLogic>::latency(&dsp);
+    let latency = <Contra as PluginLogic>::latency(&dsp);
     let ms = latency as f32 * 1000.0 / RATE as f32;
     let [a1, b1] = onsets(&params, &mut dsp);
     println!(
@@ -360,7 +360,7 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
     let remeasured = t.elapsed();
     pairs(&again, &mut again_dsp, &[]);
     assert_eq!(
-        <Kontra as PluginLogic>::latency(&again_dsp),
+        <Contra as PluginLogic>::latency(&again_dsp),
         latency,
         "reload latency"
     );
@@ -372,7 +372,7 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
     Tick.run(&params);
     pairs(&params, &mut dsp, &[]);
     assert_eq!(
-        <Kontra as PluginLogic>::latency(&dsp),
+        <Contra as PluginLogic>::latency(&dsp),
         0,
         "latency after off"
     );
@@ -429,7 +429,7 @@ fn a_library_control_moved_in_the_editor_reaches_its_script_and_shows() {
         .shared
         .request(crate::Request::Ui(crate::editor::Edit {
             slot: Some(0),
-            action: kontra_ui::app::Action::Control {
+            action: contra_ui::app::Action::Control {
                 part: 0,
                 widget,
                 value: to as f64,
@@ -459,7 +459,7 @@ fn a_library_control_moved_in_the_editor_reaches_its_script_and_shows() {
     };
     assert_eq!(
         value,
-        Some(kontra_ui_model::Value::Integer(to as i32)),
+        Some(contra_ui_model::Value::Integer(to as i32)),
         "the tree shows {var}"
     );
     assert!(revision > 0, "the view never refreshed");
@@ -498,7 +498,7 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
     let ((library, preset), libraries) = (found.0.expect("Una Corda in the catalog"), found.1);
     params
         .shared
-        .request(crate::Request::Browse(kontra_ui::app::Action::Load {
+        .request(crate::Request::Browse(contra_ui::app::Action::Load {
             library,
             preset,
         }));
@@ -518,7 +518,7 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
     assert_eq!(recent, [(library, preset)]);
     assert!(rms > 1e-4, "silent: {rms}");
     // The part's arrows step through its library, and wrap.
-    let path = |params: &KontraParams| {
+    let path = |params: &ContraParams| {
         crate::lock(&params.shared.rack).as_ref().unwrap().parts()[0]
             .as_ref()
             .and_then(|p| p.path.clone())
@@ -536,26 +536,26 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
         (presets, felt)
     };
     let count = presets.len();
-    browse(kontra_ui::app::Action::Step { part: 0, by: 1 });
+    browse(contra_ui::app::Action::Step { part: 0, by: 1 });
     assert_eq!(path(&params), Some(presets[(preset + 1) % count].clone()));
-    browse(kontra_ui::app::Action::Step { part: 0, by: -1 });
+    browse(contra_ui::app::Action::Step { part: 0, by: -1 });
     assert_eq!(path(&params), Some(felt.clone()), "back");
-    browse(kontra_ui::app::Action::Switch { part: 0, preset: 0 });
-    browse(kontra_ui::app::Action::Step { part: 0, by: -1 });
+    browse(contra_ui::app::Action::Switch { part: 0, preset: 0 });
+    browse(contra_ui::app::Action::Step { part: 0, by: -1 });
     assert_eq!(
         path(&params),
         presets.last().cloned(),
         "wraps below the first"
     );
-    browse(kontra_ui::app::Action::Switch { part: 0, preset });
+    browse(contra_ui::app::Action::Switch { part: 0, preset });
     let back = path(&params).unwrap();
     assert!(back.ends_with("Una Corda Felt.nki"), "{back:?}");
     // With the settings on, a second part takes its own channel and output.
-    browse(kontra_ui::app::Action::NewParts {
+    browse(contra_ui::app::Action::NewParts {
         next_channel: true,
         own_output: true,
     });
-    browse(kontra_ui::app::Action::Load { library, preset });
+    browse(contra_ui::app::Action::Load { library, preset });
     let mix = crate::lock(&params.shared.rack).as_ref().unwrap().parts()[1]
         .as_ref()
         .map(|p| (p.mix.channel, p.mix.output));
@@ -566,7 +566,7 @@ const SHREDDAGE: &str = "Shreddage 3.5 E-Upright 1.0.1 [Impact Soundworks] rutra
 
 /// Sets Shreddage's console control `name` to `value`, as its UI would,
 /// and lets the scripts and the effects they load settle.
-fn console(params: &KontraParams, dsp: &mut Dsp, name: &str, value: i64) {
+fn console(params: &ContraParams, dsp: &mut Dsp, name: &str, value: i64) {
     {
         let mut guard = crate::lock(&params.shared.rack);
         let rack = guard.as_mut().unwrap();
@@ -587,7 +587,7 @@ fn console(params: &KontraParams, dsp: &mut Dsp, name: &str, value: i64) {
 /// that band's gain cut fully (a boost clips); the plugin. The first
 /// channel (Neck) is saved at volume 0 (`%_channel_data` 1 1 0 …), so an
 /// EQ there is silent in Kontakt too.
-fn shreddage_eq() -> Option<(KontraParams, Dsp, f32)> {
+fn shreddage_eq() -> Option<(ContraParams, Dsp, f32)> {
     let path = library(SHREDDAGE)?;
     let saved = Saved::new(vec![SavedPart {
         part: 0,
@@ -617,7 +617,7 @@ fn shreddage_eq() -> Option<(KontraParams, Dsp, f32)> {
 /// Part 0's effect types loaded after init, as `[(rack, slot, type)]`.
 /// The effect types part 0's scripts loaded after `on init`, as (rack,
 /// slot, Kontakt type id, subtype).
-fn slot_types(params: &KontraParams) -> String {
+fn slot_types(params: &ContraParams) -> String {
     let guard = crate::lock(&params.shared.rack);
     let part = guard.as_ref().and_then(|r| r.parts()[0].as_ref());
     let loaded = part.map(|p| {
@@ -695,7 +695,7 @@ fn shreddage_eq_band_gain_is_audible_and_survives_reload() {
 /// Six notes of C4 (past Shreddage's round robins): the energy between
 /// about 1 and 2 kHz against all of it, in dB. A round robin moves it a
 /// little; an EQ band there at full boost or cut moves it a lot.
-fn band(params: &KontraParams, dsp: &mut Dsp) -> f32 {
+fn band(params: &ContraParams, dsp: &mut Dsp) -> f32 {
     let blocks = |s: f64| (s * RATE) as usize / BLOCK;
     let k = |hz: f64| 1.0 - (-2.0 * std::f64::consts::PI * hz / RATE).exp();
     let (k1, k2) = (k(1000.0), k(2000.0));
@@ -726,17 +726,17 @@ fn band(params: &KontraParams, dsp: &mut Dsp) -> f32 {
 #[ignore = "about 80 s in debug: run with --ignored before offering a build"]
 fn a_first_run_lists_v2s_libraries_and_their_presets_play_and_recall() {
     const UVI: &str = "/data/main/Libraries/UVI";
-    let v2 = dirs::config_dir().map(|c| c.join("kontra").join("settings.json"));
+    let v2 = dirs::config_dir().map(|c| c.join("contra").join("settings.json"));
     let Some(v2) = v2.filter(|p| p.exists() && Path::new(UVI).exists()) else {
         eprintln!("skipped: no v2 settings or no {UVI}");
         return;
     };
-    let dir = std::env::temp_dir().join(format!("kontra-first-run-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("contra-first-run-{}", std::process::id()));
     // A run that died left its prefs: a first run starts without them.
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("kontra")).unwrap();
-    std::fs::copy(&v2, dir.join("kontra").join("settings.json")).unwrap();
-    let mut browser = kontra_host::browser::Browser::open(Some(&dir), Some(&dir));
+    std::fs::create_dir_all(dir.join("contra")).unwrap();
+    std::fs::copy(&v2, dir.join("contra").join("settings.json")).unwrap();
+    let mut browser = contra_host::browser::Browser::open(Some(&dir), Some(&dir));
     browser.add_root(UVI.into());
     let t = std::time::Instant::now();
     while browser.scanning() && t.elapsed().as_secs() < 300 {
@@ -802,7 +802,7 @@ fn the_same_state_restored_again_loads_nothing_twice() {
     }]);
     let (params, mut dsp) = activate(&saved.write());
     settle(&params, &mut dsp);
-    let load = |params: &KontraParams| {
+    let load = |params: &ContraParams| {
         let rack = crate::lock(&params.shared.rack);
         let part = rack
             .as_ref()
@@ -848,7 +848,7 @@ fn an_idle_tick_draws_no_frame() {
     params.shared.dirty.store(false, Ordering::Release);
     params
         .shared
-        .request(crate::Request::Browse(kontra_ui::app::Action::Star(
+        .request(crate::Request::Browse(contra_ui::app::Action::Star(
             0, true,
         )));
     Tick.run(&params);
@@ -884,7 +884,7 @@ fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f
     let (params, mut dsp) = activate(&Saved::new(vec![part(path)]).write());
     settle(&params, &mut dsp);
     let before = play(&params, &mut dsp);
-    let shown = |params: &KontraParams| {
+    let shown = |params: &ContraParams| {
         let guard = crate::lock(&params.shared.rack);
         let part = guard.as_ref()?.parts()[0].as_ref()?;
         let tree = part.view.as_ref()?.tree();
@@ -896,7 +896,7 @@ fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f
         .shared
         .request(crate::Request::Ui(crate::editor::Edit {
             slot: Some(0),
-            action: kontra_ui::app::Action::Control {
+            action: contra_ui::app::Action::Control {
                 part: 0,
                 widget,
                 value: to,
@@ -915,7 +915,7 @@ fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f
     );
     assert_eq!(
         shown(&params).and_then(|s| s.1),
-        Some(kontra_ui_model::Value::Real(to))
+        Some(contra_ui_model::Value::Real(to))
     );
     params.capture();
     let saved = params.saved.read().unwrap().clone();
@@ -929,7 +929,7 @@ fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f
     settle(&again, &mut again_dsp);
     assert_eq!(
         shown(&again).and_then(|s| s.1),
-        Some(kontra_ui_model::Value::Real(to))
+        Some(contra_ui_model::Value::Real(to))
     );
     // The live note was the program's second: round robins move on per note.
     play(&again, &mut again_dsp);
@@ -969,7 +969,7 @@ fn a_host_save_during_a_long_load_does_not_wait_for_it() {
     let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
     params
         .shared
-        .request(crate::Request::Browse(kontra_ui::app::Action::Panic));
+        .request(crate::Request::Browse(contra_ui::app::Action::Panic));
     Tick.run(&params);
     block(&params, &mut dsp, &[]);
     let before = params.saved.read().unwrap().clone();
@@ -995,7 +995,7 @@ fn a_load_shows_until_the_tick_is_done_with_it() {
     assert!(!params.shared.loading());
     params
         .shared
-        .request(crate::Request::Browse(kontra_ui::app::Action::Replace {
+        .request(crate::Request::Browse(contra_ui::app::Action::Replace {
             part: 0,
             library: 0,
             preset: 0,
@@ -1032,12 +1032,12 @@ fn a_script_timer_runs_with_the_transport_stopped_and_no_block_stalls() {
         slot_responses: Vec::new(),
     }]);
     let (params, mut dsp) = activate(&saved.write());
-    let panel = |params: &KontraParams| {
+    let panel = |params: &ContraParams| {
         let guard = crate::lock(&params.shared.rack);
         let part = guard.as_ref().unwrap().parts()[0].as_ref().unwrap();
         let t = part.view.as_ref().unwrap().tree();
         let n = (t.widgets.iter()).position(|w| &*w.name == "$label_no_audio_connected_text");
-        t.visible(kontra_ui_model::WidgetRef(n.expect("Areia's panel")))
+        t.visible(contra_ui_model::WidgetRef(n.expect("Areia's panel")))
     };
     assert!(panel(&params), "init shows the panel until the timer runs");
     let mut slowest = std::time::Duration::ZERO;
@@ -1054,7 +1054,7 @@ fn a_script_timer_runs_with_the_transport_stopped_and_no_block_stalls() {
 
 /// One live block with no events and the transport stopped, as a host
 /// plays a part nobody is playing.
-fn live_block(params: &KontraParams, dsp: &mut Dsp) {
+fn live_block(params: &ContraParams, dsp: &mut Dsp) {
     let list = EventList::with_capacity(16);
     let mut channels = vec![vec![0.0f32; BLOCK]; 2 * crate::OUTPUTS];
     let mut outs: Vec<&mut [f32]> = channels.iter_mut().map(Vec::as_mut_slice).collect();
@@ -1062,5 +1062,5 @@ fn live_block(params: &KontraParams, dsp: &mut Dsp) {
     let transport = TransportInfo::default();
     let mut out_events = EventList::with_capacity(16);
     let mut cx = ProcessContext::new(&transport, RATE, BLOCK, &mut out_events);
-    <Kontra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+    <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
 }

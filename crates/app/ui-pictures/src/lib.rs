@@ -17,7 +17,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
-use kontra_ui_model::{AssetRef, ImageMeta, Orientation};
+use contra_ui_model::{AssetRef, ImageMeta, Orientation};
 
 mod cache;
 mod discovery;

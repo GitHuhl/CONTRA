@@ -27,7 +27,7 @@ pub use effects::{
     IDENTITY, ImpulseCuts, ImpulseKnob, Limiter, Matrix, Phaser, Reverb, Transient, VowelSet,
 };
 pub use engine_par::{Drives, EnginePar, ScriptPar};
-pub use kontra_law::{FormulaId, common};
+pub use contra_law::{FormulaId, common};
 pub use link::{CcLink, Linked};
 pub use mods::{Attractor, Blend, Curve, Exp2, Factor, ModKind, Term, Transfer, Wave};
 pub use output::{Balance, Output, OutputControllers};

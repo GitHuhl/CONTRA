@@ -1,8 +1,8 @@
 //! A compiled KSP script as the engine's [`ScriptPlan`].
 
-use kontra_engine::{Callbacks, Controls, EnginePar, EnginePars, LookPars, ScriptPlan, Text, ir};
-use kontra_ksp::ControlKind;
-use kontra_ksp::{CallbackKind, Cells, FIRST_UI_ID, SYMBOL_BASE, Script};
+use contra_engine::{Callbacks, Controls, EnginePar, EnginePars, LookPars, ScriptPlan, Text, ir};
+use contra_ksp::ControlKind;
+use contra_ksp::{CallbackKind, Cells, FIRST_UI_ID, SYMBOL_BASE, Script};
 
 /// Whether the engine or the UI tree understands catalog name `name`
 /// (every other one is an opaque symbol nothing acts on), for coverage
@@ -11,7 +11,7 @@ use kontra_ksp::{CallbackKind, Cells, FIRST_UI_ID, SYMBOL_BASE, Script};
 pub fn understood(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     upper == CONTROL_VALUE
-        || engine_par(&kontra_format_kontakt::engine_pars(), name).is_some()
+        || engine_par(&contra_format_kontakt::engine_pars(), name).is_some()
         || crate::ui::mapped(&upper)
         || LOOK.contains(&upper.as_str())
         || ["$CONTROL_PAR_NUM_ITEMS", "$CONTROL_PAR_SELECTED_ITEM_IDX"].contains(&upper.as_str())
@@ -56,7 +56,7 @@ pub fn runs(kind: CallbackKind) -> bool {
 
 /// The script's arrays, by first cell, for the array files it names.
 fn arrays(script: &Script) -> Vec<(u32, bool, Box<str>)> {
-    let array = |v: &kontra_ksp::Variable| match v.cells {
+    let array = |v: &contra_ksp::Variable| match v.cells {
         Cells::Int { base, .. } | Cells::Real { base, .. } => Some((base, false)),
         Cells::Text { base, .. } => Some((base, true)),
         _ => None,
@@ -73,7 +73,7 @@ fn arrays(script: &Script) -> Vec<(u32, bool, Box<str>)> {
 pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> ScriptPlan {
     let entry = |kind| script.callback(kind, None);
     let restore = script.restore(saved);
-    let pars = kontra_format_kontakt::engine_pars();
+    let pars = contra_format_kontakt::engine_pars();
     let found: Vec<_> = script
         .symbols
         .iter()
@@ -112,8 +112,8 @@ pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> Sc
                 .map(|f| f.and_then(|(_, r)| r.cloned()))
                 .collect(),
         },
-        reverb_laws: kontra_format_kontakt::reverb_laws(),
-        reverb_networks: kontra_format_kontakt::reverb_networks().into(),
+        reverb_laws: contra_format_kontakt::reverb_laws(),
+        reverb_networks: contra_format_kontakt::reverb_networks().into(),
         knobs: pars
             .iter()
             .filter_map(|p| match &p.drives {
@@ -169,8 +169,8 @@ pub(crate) fn folder(path: Option<&std::path::Path>) -> Option<Text> {
 /// declared range (a switch's is 0..=1); a link to a control the script
 /// lacks is dropped.
 #[must_use]
-pub fn links(script: &Script, links: &[kontra_engine::ir::CcLink]) -> Vec<kontra_engine::CcLink> {
-    use kontra_engine::ir::Linked;
+pub fn links(script: &Script, links: &[contra_engine::ir::CcLink]) -> Vec<contra_engine::CcLink> {
+    use contra_engine::ir::Linked;
     links
         .iter()
         .filter_map(|l| {
@@ -189,7 +189,7 @@ pub fn links(script: &Script, links: &[kontra_engine::ir::CcLink]) -> Vec<kontra
                 (_, [lo, hi, ..]) => (i64::from(*lo), i64::from(*hi)),
                 _ => return None,
             };
-            Some(kontra_engine::CcLink {
+            Some(contra_engine::CcLink {
                 cc: l.cc,
                 id: FIRST_UI_ID + i32::try_from(c.variable).ok()?,
                 lo,
@@ -332,7 +332,7 @@ pub(crate) fn look_par(script: &Script, name: &str) -> i32 {
 
 fn look(script: &Script) -> LookPars {
     let par = |name| look_par(script, name);
-    let id = |name| kontra_ksp::constant(name).unwrap_or(i32::MIN);
+    let id = |name| contra_ksp::constant(name).unwrap_or(i32::MIN);
     LookPars {
         text: par("$CONTROL_PAR_TEXT"),
         label: par("$CONTROL_PAR_LABEL"),

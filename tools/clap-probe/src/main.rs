@@ -59,7 +59,7 @@ fn main() {
         clap_version: CLAP_VERSION,
         host_data: ptr::null_mut(),
         name: c"clap-probe".as_ptr(),
-        vendor: c"KONTRA".as_ptr(),
+        vendor: c"CONTRA".as_ptr(),
         url: c"".as_ptr(),
         version: c"0".as_ptr(),
         get_extension: Some(get_extension),

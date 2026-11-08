@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// Diagnostics folded by feature: one entry with a count and the first detail.
 #[derive(Default)]

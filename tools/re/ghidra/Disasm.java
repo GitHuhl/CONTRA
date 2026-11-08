@@ -2,7 +2,7 @@
 //   RE_SCRIPT=Disasm.java tools/re/query.sh 0x140962c60 40
 // Args: <address> [count, 0 = the containing function | 0x<end> = linear range]. Output: `<addr> <instruction>` per line.
 //   RE_SCRIPT=Disasm.java tools/re/query.sh 0x14156bc40 0x14156bd60
-// @category KONTRA
+// @category CONTRA
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;

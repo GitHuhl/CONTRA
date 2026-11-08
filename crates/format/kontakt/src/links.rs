@@ -13,7 +13,7 @@
 //! CC 11 to `_2_42` (Expression); in Kontakt CC 1 at 0 turns that knob to 0
 //! and the sound drops 18.9 dB.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 /// Source kind 1: a MIDI controller (every assignment in the corpus).
 const MIDI: i32 = 1;
@@ -159,7 +159,7 @@ mod tests {
             .iter()
             .map(|(s, l)| (*s, l.cc, l.control, l.from, l.to))
             .collect();
-        use kontra_ir::Linked::Slider;
+        use contra_ir::Linked::Slider;
         assert_eq!(
             got,
             [(2, 1, Slider(40), 0.0, 1.0), (2, 11, Slider(42), 0.0, 1.0)]

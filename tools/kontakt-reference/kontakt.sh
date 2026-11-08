@@ -5,7 +5,7 @@
 # Usage: kontakt.sh start INSTRUMENT.nki | setup | route | state | calibrate | stop
 # Reference protocol (docs/architecture-v2/REFERENCE_PROTOCOL.md): `calibrate` (needs scenarios/calibration.nki loaded) must pass once per
 # session; record.sh refuses to run without a valid stamp, a pinned `state` and a protocol-compliant MIDI file.
-# One-time: in Kontakt Options > Audio pick device "kontra_ref" (WASAPI shared,
+# One-time: in Kontakt Options > Audio pick device "contra_ref" (WASAPI shared,
 # 48000 Hz); back up Settings.cfg first. GUI coordinates assume the 1600x1000 desktop.
 set -euo pipefail
 # Daemons (Xvfb, wine) must not keep the oracle lock fds (flock 3-9): an inherited fd keeps the legacy
@@ -13,15 +13,15 @@ set -euo pipefail
 RES="${KONTAKT_RES:-1600x1000}"  # GUI click coordinates in setup assume 1600x1000
 export DISPLAY=:77 WINEDLLOVERRIDES="d3d11,d3d10core,dxgi,d3d9=b"  # wined3d: DXVK crashes on Xvfb
 K="${KONTAKT_EXE:-/home/derpcat/.wine/drive_c/Program Files/Common Files/VST3/Portapotty/Kontakt 8/x64/Kontakt 8.exe}"
-W="${KONTRA_REFERENCE_DIR:-/home/derpcat/.cache/kontra-reference}"
+W="${CONTRA_REFERENCE_DIR:-/home/derpcat/.cache/contra-reference}"
 mkdir -p "$W/log" "$W/wav"
 click() { xdotool mousemove "$1" "$2"; sleep 0.4; xdotool click 1; sleep "${3:-1.2}"; }
 
 case ${1:-} in
 start)
   pgrep -x Xvfb -a | grep -q ':77' || { setsid nohup Xvfb :77 -screen 0 ${RES}x24 >/dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & sleep 1; }
-  pactl list short sinks | grep -q kontra_ref || pactl load-module module-null-sink sink_name=kontra_ref \
-    sink_properties=device.description=kontra_ref format=float32le rate=48000 channels=2 >/dev/null
+  pactl list short sinks | grep -q contra_ref || pactl load-module module-null-sink sink_name=contra_ref \
+    sink_properties=device.description=contra_ref format=float32le rate=48000 channels=2 >/dev/null
   # explorer /desktop: mouse input only works inside a Wine virtual desktop.
   setsid nohup wine explorer /desktop=k8,$RES "$K" "$(winepath -w "$2")" >"$W/log/kontakt.log" 2>&1 </dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
   sleep 15
@@ -41,27 +41,27 @@ setup)  # GUI-script the audio device and MIDI port once the instrument has load
   click 20 57; click 60 86  # File > Options
   click 388 $((553+D))            # Audio tab: the device choice does not persist across launches
   click 1088 $((318+D)) 0.5; xdotool mousemove 1060 $((480+D)); for _ in 1 2 3 4 5 6; do xdotool click 5; done; sleep 0.5
-  click 1010 $((485+D)) 2          # "kontra_ref" output (list position as of 6 scroll clicks)
+  click 1010 $((485+D)) 2          # "contra_ref" output (list position as of 6 scroll clicks)
   click 385 $((520+D))            # MIDI tab
   click 1075 $((414+D)); click 1128 $((476+D))  # Midi Through Port-0 -> Port A
   click 1178 $((781+D))            # Close
   import -window root "$W/log/ready.png"
   ;;
-route)  # routing guard: Kontakt's output ports must be linked ONLY to kontra_ref (never the user's default sink)
+route)  # routing guard: Kontakt's output ports must be linked ONLY to contra_ref (never the user's default sink)
   src=$(pw-link -o | grep -E '^Native Instruments Kontakt:output_(FL|FR)$' || true)
   [ -n "$src" ] || { echo "route: Kontakt has no output ports yet" >&2; exit 1; }
   for _ in 1 2 3; do
     while IFS= read -r port; do ch=${port##*_}
       pw-link -l | awk -v P="$port" '$0==P{f=1;next} /^[^ |]/{f=0} f&&/\|->/{sub(/^ *\|-> /,"");print}' |
-        while IFS= read -r dst; do [ "$dst" = "kontra_ref:playback_$ch" ] || pw-link -d "$port" "$dst"; done
-      pw-link "$port" "kontra_ref:playback_$ch" 2>/dev/null || true
+        while IFS= read -r dst; do [ "$dst" = "contra_ref:playback_$ch" ] || pw-link -d "$port" "$dst"; done
+      pw-link "$port" "contra_ref:playback_$ch" 2>/dev/null || true
     done <<<"$src"
-    bad=$(pw-link -l | awk '/^Native Instruments Kontakt:output_/{f=1;next} /^[^ |]/{f=0} f&&/\|->/' | grep -vc 'kontra_ref:playback_' || true)
-    ok=$(pw-link -l | awk '/^Native Instruments Kontakt:output_/{f=1;next} /^[^ |]/{f=0} f&&/\|->/' | grep -c 'kontra_ref:playback_' || true)
-    [ "$bad" = 0 ] && [ "$ok" -ge 2 ] && { echo "route: ok (Kontakt -> kontra_ref only)"; exit 0; }
+    bad=$(pw-link -l | awk '/^Native Instruments Kontakt:output_/{f=1;next} /^[^ |]/{f=0} f&&/\|->/' | grep -vc 'contra_ref:playback_' || true)
+    ok=$(pw-link -l | awk '/^Native Instruments Kontakt:output_/{f=1;next} /^[^ |]/{f=0} f&&/\|->/' | grep -c 'contra_ref:playback_' || true)
+    [ "$bad" = 0 ] && [ "$ok" -ge 2 ] && { echo "route: ok (Kontakt -> contra_ref only)"; exit 0; }
     sleep 1
   done
-  echo "route: FAILED, Kontakt is not isolated on kontra_ref" >&2; exit 1 ;;
+  echo "route: FAILED, Kontakt is not isolated on contra_ref" >&2; exit 1 ;;
 state)  # pinned-state check: master 0.00 dB / 440 Hz, instrument volume 0 dB, pan C, tune 0 (golden screenshots); prints the values it verified
   here=$(cd "$(dirname "$0")" && pwd); xdotool mousemove 1300 420; sleep 0.5; import -window root "$W/log/state_closed.png"
   click 1224 98 1.5; xdotool mousemove 1300 420; sleep 0.5; import -window root "$W/log/state_master.png"; click 1224 98 1.0
@@ -72,9 +72,9 @@ calibrate)  # gain through the whole chain: bare noise instrument at unity, reco
   ok=; for _ in $(seq 12); do "$0" state >"$W/log/state.txt" 2>&1 && { ok=1; break; }; grep -q 'MISMATCH master' "$W/log/state.txt" && { click 325 98; click 128 579 3; }; sleep 5; done   # the instrument may still be loading under load
   [ -n "$ok" ] || { cat "$W/log/state.txt" >&2; echo "calibrate: state not pinned, abort" >&2; exit 1; }; cat "$W/log/state.txt"
   python3 "$here/scenario.py" "$here/scenarios/calibration.txt" "$W/cal.mid"
-  KONTRA_NO_STAMP_CHECK=1 "$here/record.sh" "$W/cal.mid" "$W/wav/cal.wav" 3 || exit 1
+  CONTRA_NO_STAMP_CHECK=1 "$here/record.sh" "$W/cal.mid" "$W/wav/cal.wav" 3 || exit 1
   if python3 "$here/calibrate.py" "$W/wav/cal.wav" /tmp/noise.wav 0.0 | tee "$W/log/calibration.txt"; then
-    echo "$(pactl list short modules | awk '/kontra_ref/{print $1}') $("$(dirname "$0")/wsid.sh") $(date +%s)" >"$W/calibrated"; rm -f "$W/wav/cal.wav"
+    echo "$(pactl list short modules | awk '/contra_ref/{print $1}') $("$(dirname "$0")/wsid.sh") $(date +%s)" >"$W/calibrated"; rm -f "$W/wav/cal.wav"
   else rm -f "$W/calibrated"; echo "calibrate: FAILED, session aborted (no recordings allowed)" >&2; exit 1; fi ;;
 stop)
   click 20 57 || true; click 42 123 || true   # File > Exit

@@ -1,5 +1,5 @@
 [package]
-name = "kontra-params"
+name = "contra-params"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -9,5 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
-kontra-law = { path = "../../base/law" }
-kontra-macros = { path = "../../base/macros" }
+contra-law = { path = "../../base/law" }
+contra-macros = { path = "../../base/macros" }

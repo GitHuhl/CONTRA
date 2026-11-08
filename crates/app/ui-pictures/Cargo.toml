@@ -1,5 +1,5 @@
 [package]
-name = "kontra-ui-pictures"
+name = "contra-ui-pictures"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -10,8 +10,8 @@ workspace = true
 
 [dependencies]
 dirs = "5"
-kontra-library = {version = "0.0.0", path = "../library"}
-kontra-ui-model = {path = "../../model/ui-model"}
+contra-library = {version = "0.0.0", path = "../library"}
+contra-ui-model = {path = "../../model/ui-model"}
 mui = {path = "../../../vendor/mui"}
 png = "0.18"
 sha2 = "0.10.9"

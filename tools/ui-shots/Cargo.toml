@@ -10,10 +10,10 @@ description = "The Original view drawn headless on real libraries: timings and s
 workspace = true
 
 [dependencies]
-kontra-engine = {path = "../../crates/engine/engine"}
-kontra-host = {path = "../../crates/app/host"}
-kontra-stream = {path = "../../crates/engine/stream"}
-kontra-ui = {path = "../../crates/app/ui"}
-kontra-ui-model = {path = "../../crates/model/ui-model"}
+contra-engine = {path = "../../crates/engine/engine"}
+contra-host = {path = "../../crates/app/host"}
+contra-stream = {path = "../../crates/engine/stream"}
+contra-ui = {path = "../../crates/app/ui"}
+contra-ui-model = {path = "../../crates/model/ui-model"}
 mui = {features = ["cpu"], path = "../../vendor/mui"}
 png = "0.18"

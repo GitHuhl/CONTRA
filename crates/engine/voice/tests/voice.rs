@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use kontra_stream::{
+use contra_stream::{
     BlobKey, Encoding, MemSource, PAGE_FRAMES, SampleFmt, Store, StoreConfig, StreamClient,
 };
-use kontra_voice::{Ahdsr, FadeTarget, KeyUp, Loop, Region, Voice, VoiceStart};
+use contra_voice::{Ahdsr, FadeTarget, KeyUp, Loop, Region, Voice, VoiceStart};
 
 const FMT: SampleFmt = SampleFmt {
     encoding: Encoding::F32,
@@ -42,7 +42,7 @@ fn start(region: Region, step: f64, envelope: Ahdsr) -> VoiceStart {
         region,
         step,
         gain: [[1.0, 0.0], [0.0, 1.0]],
-        lag: kontra_voice::Lag::NONE,
+        lag: contra_voice::Lag::NONE,
         envelope,
         fade: None,
     }
@@ -338,7 +338,7 @@ fn an_until_release_loop_repeats_until_release_then_plays_on() {
 /// frequency for any sample length, and a position halfway cancels them.
 #[test]
 fn a_table_plays_its_cycle_at_the_step_and_morphs_by_position() {
-    use kontra_voice::{CYCLE, LEVELS, PERIOD, Read, Table, Warp};
+    use contra_voice::{CYCLE, LEVELS, PERIOD, Read, Table, Warp};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let client = store.client();
     let frames = 2 * CYCLE;
@@ -446,7 +446,7 @@ fn offline_render_waits_for_the_interpolation_page_at_the_preload_boundary() {
 #[test]
 fn offline_wait_reports_a_failed_page_as_missing() {
     struct FailingSource;
-    impl kontra_stream::Source for FailingSource {
+    impl contra_stream::Source for FailingSource {
         fn read(&self, _first: u64, _out: &mut [u8]) -> std::io::Result<()> {
             Err(std::io::ErrorKind::UnexpectedEof.into())
         }

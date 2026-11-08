@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use kontra_ui_model::{self as model, Interface, Kind, PageRef};
+use contra_ui_model::{self as model, Interface, Kind, PageRef};
 use mui::prelude::*;
 
 use crate::Pictures;
@@ -276,7 +276,7 @@ fn drawn_page(
             style.map(|s| (s.color, s.align as u8, s.size.map(f32::to_bits))),
             wd.opacity.to_bits(),
         );
-        let el = ui.memo(format!("kontra-ui-{face}-{}", n.0), deps, |_| {
+        let el = ui.memo(format!("contra-ui-{face}-{}", n.0), deps, |_| {
             built += 1;
             let (w, h) = (r.width, r.height);
             let mut parts = Vec::new();

@@ -5,9 +5,9 @@
 
 A fixed scenario (keys 60/64/67) silences instruments whose notes sit outside their key ranges
 (Areia legato articulations play 24..48 and their script gates everything else). So each instrument
-is scanned first: one KONTRA render plays every key 24..96 in turn, and the keys that sound become
+is scanned first: one CONTRA render plays every key 24..96 in turn, and the keys that sound become
 the scenario (three notes, quartiles of the playable keys, the usual velocities and timing). The
-scan runs KONTRA only, never Kontakt. An instrument with no sounding key gets no scenario and a
+scan runs CONTRA only, never Kontakt. An instrument with no sounding key gets no scenario and a
 reason; that is a finding, not a silent pass.
 """
 import argparse
@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capture  # noqa: E402
 import compare  # noqa: E402  (RATE, load)
-import kontra_render  # noqa: E402  (binary lookup)
+import contra_render  # noqa: E402  (binary lookup)
 
 SCAN_KEYS = list(range(24, 97))
 SCAN_START = 0.2
@@ -33,7 +33,7 @@ SCAN_VEL = 100
 PLAY_DB = -50.0  # a scanned key sounds when its window peaks above this
 CHOSEN_VELS = (100, 90, 110)
 CHOSEN_TIMES = ((0.2, 1.0), (1.6, 1.0), (3.0, 1.5))  # (start, length), as capture.SCENARIO
-CACHE = Path.home() / ".cache/kontra-oracle-scenarios"
+CACHE = Path.home() / ".cache/contra-oracle-scenarios"
 
 
 def scan_notes():
@@ -41,7 +41,7 @@ def scan_notes():
 
 
 def sounding_keys(wav, notes):
-    """Keys whose note window peaks above PLAY_DB in the KONTRA scan render."""
+    """Keys whose note window peaks above PLAY_DB in the CONTRA scan render."""
     rate = compare.RATE
     x = np.abs(compare.load(wav)).max(axis=0)  # (2, n) -> per-frame peak over channels
     keys = []
@@ -68,7 +68,7 @@ def render_scan(nki, work):
     midi = work / "scan.mid"
     capture.make_midi(midi, 1, notes=scan_notes())
     wav = work / "scan.wav"
-    p = subprocess.run(kontra_render.capped([kontra_render.binary(), "render-kontakt-midi", nki, str(wav), str(midi)]),
+    p = subprocess.run(contra_render.capped([contra_render.binary(), "render-kontakt-midi", nki, str(wav), str(midi)]),
                        capture_output=True, text=True, timeout=900)
     if p.returncode != 0 or not wav.exists():
         return None, p.stderr.strip().splitlines()[-1:] or ["render failed"]
@@ -88,11 +88,11 @@ def derive(nki):
     work.mkdir(parents=True, exist_ok=True)
     wav, err = render_scan(str(path), work)
     if wav is None:
-        result = {"nki": nki, "keys": [], "notes": None, "reason": "KONTRA render failed: " + " ".join(err)}
+        result = {"nki": nki, "keys": [], "notes": None, "reason": "CONTRA render failed: " + " ".join(err)}
     else:
         keys = sounding_keys(wav, scan_notes())
         notes = choose(keys)
-        reason = "" if notes else "no key 24..96 sounds on KONTRA's default state (keyswitch or articulation state gates every note)"
+        reason = "" if notes else "no key 24..96 sounds on CONTRA's default state (keyswitch or articulation state gates every note)"
         result = {"nki": nki, "keys": keys, "notes": notes, "reason": reason}
     cached.write_text(json.dumps(result))
     return result

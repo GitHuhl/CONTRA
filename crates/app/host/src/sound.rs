@@ -1,10 +1,10 @@
 //! A part's sound as the editor shows and edits it: each group's amplitude
 //! envelope and its filter and EQ bands, in seconds, hertz and decibels. An
 //! edit changes the copy here and gives the values the engine takes
-//! ([`kontra_engine::Engine::set_group_sound`]); they apply from the next
+//! ([`contra_engine::Engine::set_group_sound`]); they apply from the next
 //! note.
 
-use kontra_engine::{Ahdsr, ir};
+use contra_engine::{Ahdsr, ir};
 
 /// A value of a group's sound: an envelope stage (seconds; sustain 0..=1),
 /// or band n's frequency, Q or gain (dB).

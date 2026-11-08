@@ -1,10 +1,10 @@
 //! `get_engine_par_disp`: which [`Readout`] a parameter's knob shows.
 
 use crate::Engine;
-use kontra_ir as ir;
-use kontra_plan::par_laws::text;
-use kontra_script_ui::readout::{Readout, write};
-use kontra_vm::Text;
+use contra_ir as ir;
+use contra_plan::par_laws::text;
+use contra_script_ui::readout::{Readout, write};
+use contra_vm::Text;
 
 impl Engine {
     /// `get_engine_par_disp(par, group, slot, generic)`, or with `ext` its `_ext`

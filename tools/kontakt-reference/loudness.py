@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Per-note peak and sustained RMS of two renders. Usage: loudness.py KONTAKT.wav KONTRA.wav NOTE_SPACING_S VEL...
+"""Per-note peak and sustained RMS of two renders. Usage: loudness.py KONTAKT.wav CONTRA.wav NOTE_SPACING_S VEL...
 Notes are spaced NOTE_SPACING_S apart starting at the first onset; RMS is over 0.5..2.0 s after each onset.
-Prints dB values and kontra-kontakt offsets (raw, and +6 dB for Kontakt's default -6 dB instrument volume)."""
+Prints dB values and contra-kontakt offsets (raw, and +6 dB for Kontakt's default -6 dB instrument volume)."""
 import sys, os, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compare as c
@@ -13,6 +13,6 @@ def stats(path):
         out.append((float(c.db(np.abs(seg).max())), float(c.db(np.sqrt((sus ** 2).mean())))))
     return out
 a, b = stats(ref), stats(me)
-print(f"{'vel':>4} {'kontakt pk':>10} {'kontra pk':>10} {'d pk':>6} {'kontakt rms':>11} {'kontra rms':>10} {'d rms':>6} {'d rms +6':>9}")
+print(f"{'vel':>4} {'kontakt pk':>10} {'contra pk':>10} {'d pk':>6} {'kontakt rms':>11} {'contra rms':>10} {'d rms':>6} {'d rms +6':>9}")
 for v, (kp, kr), (mp, mr) in zip(vels, a, b):
     print(f"{v:>4} {kp:10.1f} {mp:10.1f} {mp-kp:6.1f} {kr:11.1f} {mr:10.1f} {mr-kr:6.1f} {mr-kr-6:9.1f}")

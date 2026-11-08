@@ -2,7 +2,7 @@
 //! library, a click on a preset asks to load it, a menu pick lands, and
 //! once motion settles the editor asks for no more frames.
 
-use kontra_ui::app::{
+use contra_ui::app::{
     self, Action, App, Envelope, Face, Library, Param, Part, PartTab, Sound,
 };
 use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
@@ -64,7 +64,7 @@ fn clicks(ui: &mut Ui, app: &mut App, id: &str, n: usize) -> Vec<Action> {
 
 #[test]
 fn clicks_drive_the_editor_and_idle_costs_no_frames() {
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App {
         libraries: vec![Library {
             name: "Areia".into(),
@@ -120,7 +120,7 @@ fn clicks_drive_the_editor_and_idle_costs_no_frames() {
 
 #[test]
 fn a_dragged_envelope_handle_sets_every_group() {
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let sound = Sound {
         envelope: Some(Envelope {
             attack: 0.1,
@@ -189,7 +189,7 @@ fn a_dragged_envelope_handle_sets_every_group() {
 /// their ids, and the Rack stopped drawing: "two nodes share the id").
 #[test]
 fn two_open_faces_lay_out_side_by_side() {
-    use kontra_ui_model::{Interface, Kind, Page, PageRef, Range, Rect, Size as PageSize, Widget};
+    use contra_ui_model::{Interface, Kind, Page, PageRef, Range, Rect, Size as PageSize, Widget};
     let mut tree = Interface::default();
     tree.pages.push(Page {
         size: PageSize {
@@ -204,7 +204,7 @@ fn two_open_faces_lay_out_side_by_side() {
     };
     let knob = Kind::Knob {
         range,
-        display: kontra_ui_model::Display::default(),
+        display: contra_ui_model::Display::default(),
     };
     tree.widgets.push(Widget::new(
         "$k",
@@ -216,15 +216,15 @@ fn two_open_faces_lay_out_side_by_side() {
         name: "Strings".into(),
         face: Some(Face {
             tree: tree.clone(),
-            pictures: kontra_ui::Pictures::new(Box::new(|_| None)),
-            gesture: kontra_ui::input::Gesture::default(),
+            pictures: contra_ui::Pictures::new(Box::new(|_| None)),
+            gesture: contra_ui::input::Gesture::default(),
             meters: Default::default(),
         }),
         open: true,
         tab: PartTab::Interface,
         ..Part::default()
     };
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App {
         parts: vec![part(), part()],
         ..App::default()
@@ -238,14 +238,14 @@ fn two_open_faces_lay_out_side_by_side() {
     );
     assert!(laid.is_ok(), "{:?}", laid.err());
     for n in 0..2 {
-        let id = kontra_ui::input::surface(n, 0);
+        let id = contra_ui::input::surface(n, 0);
         assert!(ui.scene().and_then(|s| s.surface(&id)).is_some(), "{id}");
     }
 }
 
 #[test]
 fn a_small_window_keeps_the_keyboard_in_it() {
-    use kontra_ui_model::{Interface, Page, Size as PageSize};
+    use contra_ui_model::{Interface, Page, Size as PageSize};
     let mut tree = Interface::default();
     tree.pages.push(Page {
         size: PageSize {
@@ -254,14 +254,14 @@ fn a_small_window_keeps_the_keyboard_in_it() {
         },
         ..Page::default()
     });
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App {
         parts: vec![Part {
             name: "Strings".into(),
             face: Some(Face {
                 tree,
-                pictures: kontra_ui::Pictures::new(Box::new(|_| None)),
-                gesture: kontra_ui::input::Gesture::default(),
+                pictures: contra_ui::Pictures::new(Box::new(|_| None)),
+                gesture: contra_ui::input::Gesture::default(),
                 meters: Default::default(),
             }),
             open: true,
@@ -287,7 +287,7 @@ fn a_small_window_keeps_the_keyboard_in_it() {
 
 #[test]
 fn a_face_in_the_rack_takes_the_pointer() {
-    use kontra_ui_model::{Interface, Kind, Page, PageRef, Rect, Size as PageSize, Widget};
+    use contra_ui_model::{Interface, Kind, Page, PageRef, Rect, Size as PageSize, Widget};
     let mut tree = Interface::default();
     tree.pages.push(Page {
         size: PageSize {
@@ -302,14 +302,14 @@ fn a_face_in_the_rack_takes_the_pointer() {
         Rect::new(100, 100, 40, 40),
         Kind::Button { momentary: false },
     ));
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App {
         parts: vec![Part {
             name: "Piano".into(),
             face: Some(Face {
                 tree,
-                pictures: kontra_ui::Pictures::new(Box::new(|_| None)),
-                gesture: kontra_ui::input::Gesture::default(),
+                pictures: contra_ui::Pictures::new(Box::new(|_| None)),
+                gesture: contra_ui::input::Gesture::default(),
                 meters: Default::default(),
             }),
             open: true,
@@ -319,7 +319,7 @@ fn a_face_in_the_rack_takes_the_pointer() {
         ..App::default()
     };
     settle(&mut ui, &mut app);
-    let id = kontra_ui::input::surface(0, 0);
+    let id = contra_ui::input::surface(0, 0);
     let out = click(&mut ui, &mut app, &id);
     assert!(
         out.iter().any(|a| matches!(a, Action::Control { .. })),
@@ -366,7 +366,7 @@ fn drag(ui: &mut Ui, app: &mut App, from: &str, to: &str) -> Vec<Action> {
 
 #[test]
 fn a_preset_dragged_onto_a_part_replaces_it_and_onto_free_space_adds_one() {
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App {
         libraries: vec![Library {
             name: "Areia".into(),
@@ -406,7 +406,7 @@ fn a_preset_dragged_onto_a_part_replaces_it_and_onto_free_space_adds_one() {
 /// libraries more of the browser's height, and the view keeps the share.
 #[test]
 fn the_browser_split_drags_and_keeps_its_share() {
-    let mut ui = kontra_ui::ui();
+    let mut ui = contra_ui::ui();
     let mut app = App::default();
     settle(&mut ui, &mut app);
     let at = (ui.scene())

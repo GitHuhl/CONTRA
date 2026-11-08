@@ -1,13 +1,13 @@
 [package]
-name = "kontra-ir"
+name = "contra-ir"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
 publish = false
 
 [dependencies]
-kontra-law = { path = "../../base/law" }
-kontra-params = { path = "../params" }
+contra-law = { path = "../../base/law" }
+contra-params = { path = "../params" }
 
 [lints]
 workspace = true

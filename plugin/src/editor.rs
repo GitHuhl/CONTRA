@@ -1,4 +1,4 @@
-//! The editor: [`kontra_ui::app::view`] in a moose window. It draws from a
+//! The editor: [`contra_ui::app::view`] in a moose window. It draws from a
 //! [`Snapshot`] of the rack that [`crate::Tick`] refreshes, so a frame never
 //! waits on a load, and it hands what the user does back as [`Edit`]s for
 //! the tick to carry out.
@@ -7,19 +7,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use kontra_host::browser::Browser;
-use kontra_host::rack::{Event, HostNote, HostPattern, Mix, Rack};
-use kontra_host::state::SavedView;
-use kontra_host::ui::Library;
-use kontra_protocol::Stats;
-use kontra_ui::app::{self, Action, App, Face, Part};
-use kontra_ui::{Pictures, layout};
-use kontra_ui_model::Interface;
+use contra_host::browser::Browser;
+use contra_host::rack::{Event, HostNote, HostPattern, Mix, Rack};
+use contra_host::state::SavedView;
+use contra_host::ui::Library;
+use contra_protocol::Stats;
+use contra_ui::app::{self, Action, App, Face, Part};
+use contra_ui::{Pictures, layout};
+use contra_ui_model::Interface;
 use moose::mui::MuiEditor;
 use moose::prelude::*;
 
 use crate::readout::Readout;
-use crate::{KontraParams, P, Request, lock};
+use crate::{ContraParams, P, Request, lock};
 
 /// Report lines kept; older ones scroll away.
 const REPORT: usize = 200;
@@ -32,11 +32,11 @@ struct PartView {
     generation: u64,
     path: Option<PathBuf>,
     /// Its library's interface; copied when the part loads and whenever
-    /// its script changes it ([`kontra_host::view::View::revision`]).
+    /// its script changes it ([`contra_host::view::View::revision`]).
     tree: Option<Arc<Interface>>,
     revision: u64,
     /// Each group's sound, copied when an edit moves it
-    /// ([`kontra_host::sound::Sounds::revision`]).
+    /// ([`contra_host::sound::Sounds::revision`]).
     sounds: (u64, Arc<Vec<app::Sound>>),
     name: String,
     /// Its library's name in the browser, if the browser lists it.
@@ -56,7 +56,7 @@ pub struct Snapshot {
     libraries: (u64, Arc<Vec<app::Library>>),
     recent: Vec<(usize, usize)>,
     folders: Vec<String>,
-    /// [`kontra_library::Prefs::next_channel`] and `own_output`.
+    /// [`contra_library::Prefs::next_channel`] and `own_output`.
     new_parts: (bool, bool),
     level: f32,
     stats: Stats,
@@ -180,7 +180,7 @@ impl Snapshot {
                 app.covers = Some(Pictures::new(Box::new(cover)));
                 app.banners = Some(Pictures::with_look(
                     Box::new(cover),
-                    kontra_ui::artwork::banner,
+                    contra_ui::artwork::banner,
                 ));
             }
             app.libraries = fresh.clone();
@@ -476,7 +476,7 @@ pub fn apply(rack: &mut Rack, edit: Edit) {
     let part = edit
         .slot
         .and_then(|s| Some((s, rack.parts().get(s)?.as_ref()?)));
-    let mix = |(slot, p): (usize, &kontra_host::rack::Part)| (slot, p.mix, p.solo, p.mute);
+    let mix = |(slot, p): (usize, &contra_host::rack::Part)| (slot, p.mix, p.solo, p.mute);
     let Some((slot, mut m, solo, mute)) = part.map(mix) else {
         if edit.action == Action::Panic {
             rack.panic();
@@ -512,9 +512,9 @@ pub fn apply(rack: &mut Rack, edit: Edit) {
 }
 
 /// Each group's sound as the Sound tab draws it.
-fn sounds(s: &kontra_host::sound::Sounds) -> Vec<app::Sound> {
-    use kontra_host::sound::BandKind;
-    let filter = |b: kontra_host::sound::Band| app::Filter {
+fn sounds(s: &contra_host::sound::Sounds) -> Vec<app::Sound> {
+    use contra_host::sound::BandKind;
+    let filter = |b: contra_host::sound::Band| app::Filter {
         pass: match b.kind {
             BandKind::Low => app::Pass::Low,
             BandKind::High => app::Pass::High,
@@ -546,8 +546,8 @@ fn sounds(s: &kontra_host::sound::Sounds) -> Vec<app::Sound> {
         .collect()
 }
 
-fn param_of(p: app::Param) -> kontra_host::sound::Param {
-    use kontra_host::sound::Param as H;
+fn param_of(p: app::Param) -> contra_host::sound::Param {
+    use contra_host::sound::Param as H;
     match p {
         app::Param::Attack => H::Attack,
         app::Param::Hold => H::Hold,
@@ -577,7 +577,7 @@ fn part_of(action: &Action) -> Option<usize> {
     }
 }
 
-pub fn editor(params: Arc<KontraParams>) -> Box<dyn Editor> {
+pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
     let p = Arc::clone(&params);
     let watched = Arc::clone(&params);
     let dropping = Arc::clone(&params);
@@ -592,7 +592,7 @@ pub fn editor(params: Arc<KontraParams>) -> Box<dyn Editor> {
     // Where the last load the editor asked for lands.
     let mut target = app::Loading::New;
     let mut buttons = None;
-    MuiEditor::new(params, kontra_ui::ui(), (1180, 780), move |ui, bridge| {
+    MuiEditor::new(params, contra_ui::ui(), (1180, 780), move |ui, bridge| {
         // On opening, and whenever the host loads a state: its view.
         let now = p.shared.restored.load(Ordering::Acquire);
         if restored != Some(now) {
@@ -609,7 +609,7 @@ pub fn editor(params: Arc<KontraParams>) -> Box<dyn Editor> {
         crate::look::parts(&mut app, &slots, &mut waiting);
         app.master = f64::from(p.volume.value());
         app.loading = p.shared.loading().then_some(target);
-        let response = kontra_ui::app::view(ui, &mut app);
+        let response = contra_ui::app::view(ui, &mut app);
         // A frame reads its input as it builds, so what a press or release
         // changes (a switch applied to the face, a row selected) shows in
         // the frame after it: ask for that one, or it waits for more input.
@@ -712,7 +712,7 @@ pub fn editor(params: Arc<KontraParams>) -> Box<dyn Editor> {
         // Only events draw: a change the tick or the view marked, or a
         // picture that arrived. Nothing polled (pictures pending, a load
         // under way) asks for frames, so nothing stuck can spin them.
-        watched.shared.dirty.swap(false, Ordering::AcqRel) | kontra_ui::pictures::arrived()
+        watched.shared.dirty.swap(false, Ordering::AcqRel) | contra_ui::pictures::arrived()
     })
     .into_editor()
 }

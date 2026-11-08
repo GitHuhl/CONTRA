@@ -3,7 +3,7 @@
 //! channel travels as its UMP packet. Host-native notes ([`exact`]) keep
 //! their note id and per-note expressions (CLAP, VST3, MPE).
 
-use kontra_host::rack::{Event, HostNote, HostPattern, NoteExpression};
+use contra_host::rack::{Event, HostNote, HostPattern, NoteExpression};
 use moose::core::ump::{encode_ump_channel_voice_1, encode_ump_channel_voice_2};
 use moose::core::{ExactAddress, ExactEventBody, ExactEventRef, ExactNoteAddress, ExactNoteKind};
 use moose::prelude::EventBody;

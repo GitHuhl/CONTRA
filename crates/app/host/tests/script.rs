@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use kontra_engine::{
+use contra_engine::{
     Atom, Engine, Event, HostNote, HostPattern, Plan, Region, SampleTime, Timed, Zone,
 };
-use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
 
 const RATE: u32 = 48_000;
 const FMT: SampleFmt = SampleFmt {
@@ -46,12 +46,12 @@ fn zone(store: &mut Store, level: f32, group: u32) -> Zone {
 }
 
 fn engine(store: &Store, zones: Vec<Zone>, source: &str) -> Engine {
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let mut plan = Plan::new(zones, 16);
     for g in &mut plan.groups {
         g.mods.clear();
     }
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     Engine::new(Arc::new(plan), store.client(), RATE)
 }
 
@@ -59,7 +59,7 @@ fn engine(store: &Store, zones: Vec<Zone>, source: &str) -> Engine {
 #[derive(Debug)]
 struct Disk;
 
-impl kontra_engine::files::Files for Disk {
+impl contra_engine::files::Files for Disk {
     fn read(&self, path: &str) -> Option<Vec<u8>> {
         std::fs::read(path).ok()
     }
@@ -67,9 +67,9 @@ impl kontra_engine::files::Files for Disk {
 
 /// [`engine`], its script reading array files from disk.
 fn engine_with_files(store: &Store, zones: Vec<Zone>, source: &str) -> Engine {
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let mut plan = Plan::new(zones, 16);
-    let mut planned = kontra_host::script::plan(&script, &[], &[]);
+    let mut planned = contra_host::script::plan(&script, &[], &[]);
     planned.files = Some(Arc::new(Disk));
     plan.scripts = vec![planned];
     Engine::new(Arc::new(plan), store.client(), RATE)
@@ -312,9 +312,9 @@ fn wait_starts_a_note_on_its_exact_sample_at_any_block_size() {
 fn the_controller_callback_sees_and_can_swallow_a_controller() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut low = zone(&mut store, 0.25, 0);
-    low.start = vec![(kontra_engine::ir::Join::And, Atom::Cc(1, 0..=63))];
+    low.start = vec![(contra_engine::ir::Join::And, Atom::Cc(1, 0..=63))];
     let mut high = zone(&mut store, 0.5, 0);
-    high.start = vec![(kontra_engine::ir::Join::And, Atom::Cc(1, 64..=127))];
+    high.start = vec![(contra_engine::ir::Join::And, Atom::Cc(1, 64..=127))];
     let mut e = engine(
         &store,
         vec![low, high],
@@ -336,7 +336,7 @@ fn the_controller_callback_sees_and_can_swallow_a_controller() {
 
 #[test]
 fn a_script_bypass_takes_a_playing_voices_filter_out() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     // A high pass a route moves runs per voice; it blocks the zone's DC.
@@ -366,14 +366,14 @@ fn a_script_bypass_takes_a_playing_voices_filter_out() {
             depth: 0.0,
         },
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on controller
             set_engine_par($ENGINE_PAR_EFFECT_BYPASS, 1, 0, 0, -1)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert!(level(&mut e, &[on(60)]).abs() < 1e-3, "filtered");
     let cc = Timed {
@@ -388,7 +388,7 @@ fn a_script_bypass_takes_a_playing_voices_filter_out() {
 /// switches it on.
 #[test]
 fn a_script_switches_on_a_waveshaper_bypassed_at_load() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].inserts = vec![Some(ir::Effect {
@@ -402,14 +402,14 @@ fn a_script_switches_on_a_waveshaper_bypassed_at_load() {
         output: 1.0,
         dry: 0.0,
     })];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on controller
             set_engine_par($ENGINE_PAR_EFFECT_BYPASS, 0, 0, 0, -1)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let dry = level(&mut e, &[on(60)]);
     assert!((dry - 0.5).abs() < 1e-3, "bypassed: {dry}");
@@ -457,10 +457,10 @@ fn a_script_reads_its_restored_controls() {
             set_control_par(%ids[0], $CONTROL_PAR_VALUE, 0)
             message(get_control_par(%ids[0], $CONTROL_PAR_VALUE) & \" \" & $on)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &["$on 1".into()], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &["$on 1".into()], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "0 0");
@@ -487,11 +487,11 @@ fn a_saved_menu_restores_the_entry_at_its_index() {
         on note
             message($look & \" \" & $at_init & \" \" & $read)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
     let saved = ["$look 1".into(), "$read 0".into()];
-    plan.scripts = vec![kontra_host::script::plan(&script, &saved, &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &saved, &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "6 -1 -1");
@@ -522,11 +522,11 @@ fn a_saved_text_array_reads_back_mid_init_and_fonts_get_ids() {
         on note
             message(@at_init & \" \" & $f & \" \" & $g & \" \" & $h & \" \" & $n)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
     let saved = ["!names Spiccato\nSustained".into()];
-    plan.scripts = vec![kontra_host::script::plan(&script, &saved, &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &saved, &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "Sustained 26 27 26 7");
@@ -548,10 +548,10 @@ fn a_script_draws_a_table_step_by_step() {
         on note
             message(%t[2] & \" \" & $back & \" \" & %t[3])
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "42 42 0");
@@ -567,10 +567,10 @@ fn output_channels_have_kontakts_names() {
         on note
             message(@names)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "Out 1|Out 2|");
@@ -590,10 +590,10 @@ fn a_new_menu_holds_its_first_entrys_value() {
         on note
             message($at_init & \" \" & $m)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "10 10");
@@ -601,7 +601,7 @@ fn a_new_menu_holds_its_first_entrys_value() {
 
 #[test]
 fn a_script_finds_a_modulation_by_name_and_drives_it() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].mods = vec![ir::Mod {
@@ -616,7 +616,7 @@ fn a_script_finds_a_modulation_by_name_and_drives_it() {
             tau_ms: 0.0,
         },
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_MOD_TARGET_INTENSITY, 1000000, 0, find_mod(0, \"Dyn\"), -1)
             set_controller(110, 64)
@@ -624,7 +624,7 @@ fn a_script_finds_a_modulation_by_name_and_drives_it() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     // Full intensity: the level follows the controller linearly.
     let l = level(&mut e, &[on(60)]);
@@ -633,7 +633,7 @@ fn a_script_finds_a_modulation_by_name_and_drives_it() {
 
 #[test]
 fn a_script_finds_a_modulator_that_carries_no_route() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].routes = vec![ir::Routes {
@@ -641,7 +641,7 @@ fn a_script_finds_a_modulator_that_carries_no_route() {
         name: "Phase_P1".into(),
         names: vec![String::new()],
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             message(find_mod(0, \"Phase_P1\") & \" \" & get_mod_idx(0, \"Phase_P1\") ...
                 & \" \" & find_mod(0, \"none\") & \" \" & get_mod_idx(0, \"none\") ...
@@ -650,7 +650,7 @@ fn a_script_finds_a_modulator_that_carries_no_route() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     // Real Kontakt 8: a miss is 0 for find_mod, $NI_NOT_FOUND (-100) for get_mod_idx.
     assert_eq!(e.last_message(), "33 33 0 -100 -100");
@@ -658,7 +658,7 @@ fn a_script_finds_a_modulator_that_carries_no_route() {
 
 #[test]
 fn route_intensities_follow_kontakts_laws() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let route = |target| ir::Mod {
@@ -674,7 +674,7 @@ fn route_intensities_follow_kontakts_laws() {
         },
     };
     plan.groups[0].mods = vec![route(1), route(0)];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $a
             declare $b
@@ -688,7 +688,7 @@ fn route_intensities_follow_kontakts_laws() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     // Real Kontakt 8 (probes/mod_par_laws.lua): the knob's depth is x², the
     // bipolar writers' (2x − 1)³; generic -1 is route 0.
@@ -700,7 +700,7 @@ fn route_intensities_follow_kontakts_laws() {
 
 #[test]
 fn a_script_sets_the_stages_of_a_routed_ahdsr() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let point = |ms, level| ir::Breakpoint {
@@ -749,7 +749,7 @@ fn a_script_sets_the_stages_of_a_routed_ahdsr() {
             amount: 0.0,
         },
     });
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_ATTACK, 600000, 0, 1, -1)
             set_engine_par($ENGINE_PAR_ATTACK, 0, 0, 0, -1)
@@ -761,7 +761,7 @@ fn a_script_sets_the_stages_of_a_routed_ahdsr() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     // Real Kontakt (probes/flex_stage_writes.lua): a flex reads 0.
     assert_eq!(e.last_message(), "500000 250000 0");
@@ -772,7 +772,7 @@ fn a_script_sets_the_stages_of_a_routed_ahdsr() {
 
 #[test]
 fn script_knobs_set_effect_and_lfo_controls_through_their_laws() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let g = &mut plan.groups[0];
@@ -808,7 +808,7 @@ fn script_knobs_set_effect_and_lfo_controls_through_their_laws() {
         output: 1.0,
         dry: 0.0,
     })];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_LFO_SINE, 865000, 0, 3, -1)
             set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 390018, 0, 3, -1)
@@ -819,7 +819,7 @@ fn script_knobs_set_effect_and_lfo_controls_through_their_laws() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "865000 390018 500000 193000");
 }
@@ -834,7 +834,7 @@ fn num_groups_counts_zoneless_groups_and_a_bus_volume_reads_its_gain() {
     // ANALOG STRINGS' bus 2 in Kontakt: knob 593624, saved gain 0.8367.
     bus.gain = (593_624.0f64 / 629_960.524_947_436_1).powi(3) as f32;
     plan.buses.push(bus);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $before
             $before := get_engine_par($ENGINE_PAR_VOLUME, -1, -1, 1024)
@@ -844,14 +844,14 @@ fn num_groups_counts_zoneless_groups_and_a_bus_volume_reads_its_gain() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "3 593624 525135");
 }
 
 #[test]
 fn a_stepped_lfos_rate_knob_sets_a_whole_count() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let g = &mut plan.groups[0];
@@ -876,7 +876,7 @@ fn a_stepped_lfos_rate_knob_sets_a_whole_count() {
         },
     }];
     // 48 / (0.010415 · 20465^0.5) Hz = 32.2: count 32, read back as 500679.
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 500000, 0, 3, -1)
             message(get_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 0, 3, -1))
@@ -884,14 +884,14 @@ fn a_stepped_lfos_rate_knob_sets_a_whole_count() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "500679");
 }
 
 #[test]
 fn slot_knobs_move_a_filters_fields_through_the_slots_own_laws() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let filter = Some(ir::Effect {
@@ -969,7 +969,7 @@ fn slot_knobs_move_a_filters_fields_through_the_slots_own_laws() {
             },
         ),
     ];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_CUTOFF, 500000, 0, 0, -1)
             set_engine_par($ENGINE_PAR_RESONANCE, 250000, 0, 0, -1)
@@ -980,7 +980,7 @@ fn slot_knobs_move_a_filters_fields_through_the_slots_own_laws() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "500000 250000 750000 250000");
 }
@@ -989,7 +989,7 @@ fn slot_knobs_move_a_filters_fields_through_the_slots_own_laws() {
 /// resonance moves to the new last stage, the first goes critically damped.
 #[test]
 fn effect_subtype_switches_a_filter_to_its_slots_shape() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].inserts = vec![Some(ir::Effect {
@@ -1057,7 +1057,7 @@ fn effect_subtype_switches_a_filter_to_its_slots_shape() {
     )]
     .into();
     plan.slot_shapes.shapes.push(own);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_RESONANCE, 250000, 0, 0, -1)
             declare @s
@@ -1072,7 +1072,7 @@ fn effect_subtype_switches_a_filter_to_its_slots_shape() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "237500 237500 0 250000 250000 750000");
 }
@@ -1081,7 +1081,7 @@ fn effect_subtype_switches_a_filter_to_its_slots_shape() {
 /// cutoff setting and moves the Hz to the new law.
 #[test]
 fn effect_subtype_keeps_the_cutoff_setting_through_the_new_law() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     let filter = ir::Filter {
@@ -1126,7 +1126,7 @@ fn effect_subtype_keeps_the_cutoff_setting_through_the_new_law() {
         filter,
         laws: vec![own].into(),
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_CUTOFF, 500000, 0, 0, -1)
             declare @s
@@ -1137,14 +1137,14 @@ fn effect_subtype_keeps_the_cutoff_setting_through_the_new_law() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "60000 500000 150000");
 }
 
 #[test]
 fn a_script_sends_a_note_its_modulation_value() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].mods = vec![ir::Mod {
@@ -1159,14 +1159,14 @@ fn a_script_sends_a_note_its_modulation_value() {
             tau_ms: 0.0,
         },
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             set_event_par_arr($EVENT_ID, $EVENT_PAR_MOD_VALUE_ID, 250000, 1)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let l = level(&mut e, &[on(60)]);
     assert!((l - 0.5 * 0.25).abs() < 1e-3, "{l}");
@@ -1181,7 +1181,7 @@ fn a_note_played_in_one_slot_passes_the_slots_after_it() {
         g.mods.clear();
     }
     let slot = |source: &str| {
-        kontra_host::script::plan(&kontra_ksp::compile(source, &[]).unwrap(), &[], &[])
+        contra_host::script::plan(&contra_ksp::compile(source, &[]).unwrap(), &[], &[])
     };
     plan.scripts = vec![
         slot(
@@ -1297,7 +1297,7 @@ fn the_transport_starts_the_listener_and_answers_its_queries() {
         end on",
     );
     // 120 bpm: a quarter is 500 ms and 960 ticks; a 3/4 bar is 1.5 s.
-    e.set_transport(kontra_engine::Play::Running, 2.0, (3, 4));
+    e.set_transport(contra_engine::Play::Running, 2.0, (3, 4));
     assert_eq!(e.last_message(), "1 1920 960 250000 3/4 1500000");
     // 4096 frames at 120 bpm move the song on 163.84 ticks.
     level(&mut e, &[]);
@@ -1314,7 +1314,7 @@ fn a_pgs_key_carries_a_value_between_slots() {
         g.mods.clear();
     }
     let slot = |source: &str| {
-        kontra_host::script::plan(&kontra_ksp::compile(source, &[]).unwrap(), &[], &[])
+        contra_host::script::plan(&contra_ksp::compile(source, &[]).unwrap(), &[], &[])
     };
     plan.scripts = vec![
         slot(
@@ -1344,7 +1344,7 @@ fn a_pgs_key_carries_a_value_between_slots() {
 
 #[test]
 fn a_script_sets_a_send_effects_wet_and_dry_levels() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.inserts = vec![Some(ir::Effect {
@@ -1354,7 +1354,7 @@ fn a_script_sets_a_send_effects_wet_and_dry_levels() {
         dry: 0.0,
     })];
     // Wet off, dry at unity (396851): only the dry path passes.
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_SEND_EFFECT_OUTPUT_GAIN, 0, -1, 0, $NI_INSERT_BUS)
             set_engine_par($ENGINE_PAR_SEND_EFFECT_DRY_LEVEL, 396851, -1, 0, $NI_INSERT_BUS)
@@ -1362,7 +1362,7 @@ fn a_script_sets_a_send_effects_wet_and_dry_levels() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let l = level(&mut e, &[on(60)]);
     assert!((l - 0.5).abs() < 1e-3, "{l}");
@@ -1371,7 +1371,7 @@ fn a_script_sets_a_send_effects_wet_and_dry_levels() {
 /// `$NI_BUS_OFFSET + n` puts a group on bus n; −1 puts it back on the main bus.
 #[test]
 fn a_script_moves_a_group_onto_a_bus() {
-    use kontra_engine::Bus;
+    use contra_engine::Bus;
     let play = |set: &str| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
@@ -1386,7 +1386,7 @@ fn a_script_moves_a_group_onto_a_bus() {
             mods: Vec::new(),
             blends: Vec::new(),
         });
-        let script = kontra_ksp::compile(
+        let script = contra_ksp::compile(
             &format!(
                 "on init
                     set_engine_par($ENGINE_PAR_OUTPUT_CHANNEL, $NI_BUS_OFFSET, 0, -1, -1)
@@ -1397,7 +1397,7 @@ fn a_script_moves_a_group_onto_a_bus() {
             &[],
         )
         .unwrap();
-        plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
         let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
         (level(&mut e, &[on(60)]), e.last_message().to_owned())
     };
@@ -1481,7 +1481,7 @@ fn a_menu_value_is_its_selected_index() {
 
 #[test]
 fn a_script_sets_a_send_level_by_the_volume_law() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.inserts = vec![Some(ir::Effect {
@@ -1497,14 +1497,14 @@ fn a_script_sets_a_send_level_by_the_volume_law() {
         dry: 0.0,
     })];
     // Chorus's reverb mix at 80 of 127; its saved level is 0.24994.
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_SENDLEVEL_0, 396821, -1, 0, $NI_INSERT_BUS)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let l = level(&mut e, &[on(60)]);
     // Dry 0.5 plus the send's return 0.5 × 0.25.
@@ -1593,7 +1593,7 @@ fn a_script_hears_its_notes_end_but_not_its_own_note_offs() {
 fn a_note_played_on_release_sounds_its_release_zones() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut tail = zone(&mut store, 0.25, 1);
-    tail.trigger = kontra_engine::Trigger::Release;
+    tail.trigger = contra_engine::Trigger::Release;
     let zones = vec![zone(&mut store, 0.5, 0), tail];
     let mut e = engine(
         &store,
@@ -1622,7 +1622,7 @@ fn a_note_played_on_release_sounds_its_release_zones() {
 fn a_timed_note_played_on_release_sounds_no_second_release() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut tail = zone(&mut store, 0.25, 1);
-    tail.trigger = kontra_engine::Trigger::Release;
+    tail.trigger = contra_engine::Trigger::Release;
     let zones = vec![zone(&mut store, 0.5, 0), tail];
     let mut e = engine(
         &store,
@@ -1650,8 +1650,8 @@ fn a_timed_note_played_on_release_sounds_no_second_release() {
 fn a_release_zone_the_script_plays_ends_with_its_note() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut tail = zone(&mut store, 0.25, 1);
-    tail.trigger = kontra_engine::Trigger::Release;
-    let script = kontra_ksp::compile(
+    tail.trigger = contra_engine::Trigger::Release;
+    let script = contra_ksp::compile(
         "on init
             declare $played := 0
         end on
@@ -1671,11 +1671,11 @@ fn a_release_zone_the_script_plays_ends_with_its_note() {
     )
     .unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0), tail], 16);
-    plan.release_zones = kontra_engine::ReleaseZones::WithNote;
+    plan.release_zones = contra_engine::ReleaseZones::WithNote;
     for g in &mut plan.groups {
         g.mods.clear();
     }
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert!(
         (level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3,
@@ -1693,12 +1693,12 @@ fn a_release_zone_the_script_plays_ends_with_its_note() {
 
 #[test]
 fn a_release_the_script_plays_reads_how_long_the_key_was_held() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut tail = zone(&mut store, 0.25, 1);
-    tail.trigger = kontra_engine::Trigger::Release;
+    tail.trigger = contra_engine::Trigger::Release;
     // The script plays the release itself, as a note of its own.
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             disallow_group($ALL_GROUPS)
             allow_group(0)
@@ -1712,7 +1712,7 @@ fn a_release_the_script_plays_reads_how_long_the_key_was_held() {
     )
     .unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0), tail], 16);
-    plan.release_zones = kontra_engine::ReleaseZones::WithNote;
+    plan.release_zones = contra_engine::ReleaseZones::WithNote;
     for g in &mut plan.groups {
         g.mods.clear();
     }
@@ -1730,7 +1730,7 @@ fn a_release_the_script_plays_reads_how_long_the_key_was_held() {
             tau_ms: 0.0,
         },
     }];
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let mut held = vec![[0.0; 2]; 24_000];
     e.process(&mut held, &[on(60)]);
@@ -1743,7 +1743,7 @@ fn a_release_the_script_plays_reads_how_long_the_key_was_held() {
 /// Level of the reverb tail 0.25 s after a 2 s note, through a reverb in the
 /// instrument insert whose time is 0.5 s unless `script` moves it.
 fn reverb_tail(script: &str) -> f32 {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.inserts = vec![Some(ir::Effect {
@@ -1764,8 +1764,8 @@ fn reverb_tail(script: &str) -> f32 {
         output: 1.0,
         dry: 0.0,
     })];
-    let script = kontra_ksp::compile(script, &[]).unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    let script = contra_ksp::compile(script, &[]).unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let mut out = vec![[0.0f32; 2]; 4096];
     e.process(&mut out, &[on(60)]);
@@ -1812,7 +1812,7 @@ fn a_modulation_value_no_route_reads_is_still_read_back() {
 /// edit would, over the assignment's range, and its callback runs.
 #[test]
 fn a_controller_tied_to_a_slider_moves_it_and_runs_its_callback() {
-    use kontra_engine::ir::{CcLink, Linked};
+    use contra_engine::ir::{CcLink, Linked};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let source = "on init
             declare ui_slider $a (0, 10)
@@ -1822,16 +1822,16 @@ fn a_controller_tied_to_a_slider_moves_it_and_runs_its_callback() {
         on ui_control ($dynamics)
             message($dynamics)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
-    let mut planned = kontra_host::script::plan(&script, &[], &[]);
+    let mut planned = contra_host::script::plan(&script, &[], &[]);
     let link = CcLink {
         cc: 1,
         control: Linked::Slider(1),
         from: 0.0,
         to: 0.5,
     };
-    planned.links = kontra_host::script::links(&script, &[link]);
+    planned.links = contra_host::script::links(&script, &[link]);
     plan.scripts = vec![planned];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let cc = |v| Timed {
@@ -1988,7 +1988,7 @@ fn an_effect_type_change_outside_init_completes_asynchronously() {
 /// install.
 #[test]
 fn a_script_loads_an_effect_type_into_a_slot() {
-    use kontra_engine::{Prepared, ir};
+    use contra_engine::{Prepared, ir};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].mods.clear();
@@ -2019,7 +2019,7 @@ fn a_script_loads_an_effect_type_into_a_slot() {
     plan.slot_shapes.types = vec![ty(0, None), ty(7, Some(effect))];
     plan.inserts.push(None);
     plan.slot_shapes.subtypes = vec![(ir::RackAt::Inserts, 1, 90)];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $a
             declare $b
@@ -2035,7 +2035,7 @@ fn a_script_loads_an_effect_type_into_a_slot() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     // The loaded type's subtype, and slot 1's saved one.
     assert_eq!(e.last_message(), "70 90");
@@ -2057,7 +2057,7 @@ fn a_script_loads_an_effect_type_into_a_slot() {
 /// menu: subtype, wait, cutoff).
 #[test]
 fn wait_async_holds_until_the_effect_type_is_installed() {
-    use kontra_engine::{Prepared, ir};
+    use contra_engine::{Prepared, ir};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.groups[0].mods.clear();
@@ -2070,7 +2070,7 @@ fn wait_async_holds_until_the_effect_type_is_installed() {
         laws: Vec::new().into(),
     };
     plan.slot_shapes.types = vec![ty(0), ty(7)];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_EFFECT_TYPE, 7, -1, 0, 1)
             message(\"init \" & get_engine_par($ENGINE_PAR_EFFECT_SUBTYPE, -1, 0, 1))
@@ -2082,7 +2082,7 @@ fn wait_async_holds_until_the_effect_type_is_installed() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "init 70");
     level(&mut e, &[on(60)]);
@@ -2100,17 +2100,17 @@ fn wait_async_holds_until_the_effect_type_is_installed() {
 /// it saves no effect type, and the network it already plays asks nothing.
 #[test]
 fn a_reverb_type_change_rebuilds_the_reverb_with_its_network() {
-    use kontra_engine::{Prepared, ir};
-    let [room, hall] = kontra_format_kontakt::reverb_networks();
+    use contra_engine::{Prepared, ir};
+    let [room, hall] = contra_format_kontakt::reverb_networks();
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.inserts = vec![Some(ir::Effect {
-        kind: ir::EffectKind::Reverb(kontra_format_kontakt::reverb(0, [0.5; 9])),
+        kind: ir::EffectKind::Reverb(contra_format_kontakt::reverb(0, [0.5; 9])),
         bypass: false,
         output: 1.0,
         dry: 0.0,
     })];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             set_engine_par($ENGINE_PAR_RV2_TIME, 0, -1, 0, $NI_INSERT_BUS)
             set_engine_par($ENGINE_PAR_RV2_TYPE, $NI_REVERB2_TYPE_HALL, -1, 0, $NI_INSERT_BUS)
@@ -2118,7 +2118,7 @@ fn a_reverb_type_change_rebuilds_the_reverb_with_its_network() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     let mut requests = Vec::new();
@@ -2183,9 +2183,9 @@ fn reset_rls_trig_counter_restarts_the_release_triggers_decay() {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let attack = zone(&mut store, 0.5, 0);
         let mut tail = zone(&mut store, 0.4, 1);
-        tail.trigger = kontra_engine::Trigger::Release;
+        tail.trigger = contra_engine::Trigger::Release;
         tail.release_decay_db = 6.0; // per second held
-        let script = kontra_ksp::compile(
+        let script = contra_ksp::compile(
             "on controller
                 reset_rls_trig_counter(60)
                 reset_rls_trig_counter(128)
@@ -2198,7 +2198,7 @@ fn reset_rls_trig_counter_restarts_the_release_triggers_decay() {
             g.mods.clear();
             g.envelope.release = 16;
         }
-        plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
         let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
         level(&mut e, &[on(60)]);
         for _ in 0..(RATE as usize / 4096) {
@@ -2243,7 +2243,7 @@ fn output_channels_and_disable_logging_are_answered() {
 /// once, later through the host and an async id.
 #[test]
 fn a_script_loads_a_library_response_into_a_convolution() {
-    use kontra_engine::{Prepared, Response, ir};
+    use contra_engine::{Prepared, Response, ir};
     // One frame at half scale, 16-bit stereo at 48 kHz.
     let half = 16_384i16.to_le_bytes();
     let mut wav = b"RIFF".to_vec();
@@ -2296,7 +2296,7 @@ fn a_script_loads_a_library_response_into_a_convolution() {
             keystream: None,
         },
     )];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $id
             load_ir_sample(\"Half.ncw\", 0, $NI_INSERT_BUS)
@@ -2304,8 +2304,8 @@ fn a_script_loads_a_library_response_into_a_convolution() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
-    let later = kontra_ksp::compile(
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let later = contra_ksp::compile(
         "on init
             declare $id
         end on
@@ -2319,7 +2319,7 @@ fn a_script_loads_a_library_response_into_a_convolution() {
     )
     .unwrap();
     let mut resumed = plan.clone();
-    resumed.scripts = vec![kontra_host::script::plan(&later, &[], &[])];
+    resumed.scripts = vec![contra_host::script::plan(&later, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let l = level(&mut e, &[on(60)]);
     assert!((l - 0.25).abs() < 1e-3, "{l}");
@@ -2350,7 +2350,7 @@ fn a_script_loads_a_library_response_into_a_convolution() {
 /// back what it was set to.
 #[test]
 fn a_scripts_convolution_predelay_prepares_its_response_again() {
-    use kontra_engine::{Response, ir};
+    use contra_engine::{Response, ir};
     let half = 16_384i16.to_le_bytes();
     let mut wav = b"RIFF".to_vec();
     wav.extend(40u32.to_le_bytes());
@@ -2400,7 +2400,7 @@ fn a_scripts_convolution_predelay_prepares_its_response_again() {
             keystream: None,
         },
     )];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             set_engine_par($ENGINE_PAR_IRC_PREDELAY, 500000, -1, 0, $NI_INSERT_BUS)
             message(get_engine_par($ENGINE_PAR_IRC_PREDELAY, -1, 0, $NI_INSERT_BUS))
@@ -2408,7 +2408,7 @@ fn a_scripts_convolution_predelay_prepares_its_response_again() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let read: i32 = e.last_message().parse().unwrap();
     assert!((read - 500_000).abs() <= 1, "{read}");
@@ -2431,14 +2431,14 @@ fn a_bus_pan_glides_in_a_line_over_50_ms() {
     }
     let bus = plan.buses[0].clone();
     plan.buses.push(bus);
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on controller
             set_engine_par($ENGINE_PAR_PAN, 0, -1, -1, 1024)
         end on",
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let mut out = vec![[0.0; 2]; 480];
     e.process(&mut out, &[on(60)]);
@@ -2471,8 +2471,8 @@ fn a_scripts_group_pan_glides_as_a_one_pole() {
         g.mods.clear();
     }
     let source = "on controller\n  set_engine_par($ENGINE_PAR_PAN, 1000000, 0, -1, -1)\nend on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    let script = contra_ksp::compile(source, &[]).unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     let mut out = vec![[0.0f32; 2]; 48_000];
     e.process(&mut out, &[on(60)]);
@@ -2497,7 +2497,7 @@ fn a_scripts_group_pan_glides_as_a_one_pole() {
 
 #[test]
 fn a_linear_volume_controller_and_an_expression_controller_scale_the_output() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     for g in &mut plan.groups {
@@ -2529,7 +2529,7 @@ fn a_linear_volume_controller_and_an_expression_controller_scale_the_output() {
 
 #[test]
 fn volume_and_pan_controllers_set_the_output_unless_a_script_ignores_them() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let run = |source: &str| {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
@@ -2548,8 +2548,8 @@ fn volume_and_pan_controllers_set_the_output_unless_a_script_ignores_them() {
             }),
             ..ir::Output::UNITY
         };
-        let script = kontra_ksp::compile(source, &[]).unwrap();
-        plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+        let script = contra_ksp::compile(source, &[]).unwrap();
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
         let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
         let cc = |n: u8, v: u8| Timed {
             at: SampleTime(0),
@@ -2579,7 +2579,7 @@ fn volume_and_pan_controllers_set_the_output_unless_a_script_ignores_them() {
 /// the high pass it becomes blocks it.
 #[test]
 fn a_loaded_filter_follows_its_subtype() {
-    use kontra_engine::{Prepared, ir};
+    use contra_engine::{Prepared, ir};
     let filter = |pass| ir::Filter {
         pass,
         hz: 2000.0,
@@ -2613,7 +2613,7 @@ fn a_loaded_filter_follows_its_subtype() {
         filter: filter(ir::Pass::High),
         laws: Vec::new().into(),
     }];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on note
             wait_async(set_engine_par($ENGINE_PAR_EFFECT_TYPE, 7, -1, 0, 1))
             set_engine_par($ENGINE_PAR_EFFECT_SUBTYPE, 54, -1, 0, 1)
@@ -2621,7 +2621,7 @@ fn a_loaded_filter_follows_its_subtype() {
         &[],
     )
     .unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     let mut requests = Vec::new();
@@ -2739,17 +2739,17 @@ fn a_text_edit_callback_reads_the_typed_text() {
         on ui_control(@name)
             message(@name)
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
-    let cell = kontra_host::ui::Face::of(&script, &[])
+    let script = contra_ksp::compile(source, &[]).unwrap();
+    let cell = contra_host::ui::Face::of(&script, &[])
         .text_cell("@name")
         .unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[]);
     let id: i32 = e.last_message().parse().unwrap();
-    let typed = kontra_engine::Text::from_str_cut("Hi").0;
+    let typed = contra_engine::Text::from_str_cut("Hi").0;
     e.vm_mut(0).unwrap().set_text(cell as usize, typed);
     e.set_control(0, id, 0);
     assert_eq!(e.last_message(), "Hi");
@@ -2766,10 +2766,10 @@ fn a_table_click_sets_its_cell_and_names_it() {
         on ui_control(%t)
             message($NI_CONTROL_PAR_IDX & \",\" & %t[2] & %t[0])
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[]);
     let id: i32 = e.last_message().parse().unwrap();
@@ -2794,10 +2794,10 @@ fn a_switch_callback_reads_the_keys_held_at_the_click() {
             $id := get_ui_id($s)
             message(get_control_par($id, $CONTROL_PAR_KEY_SHIFT) & get_control_par($id, $CONTROL_PAR_KEY_ALT) & get_control_par($id, $CONTROL_PAR_KEY_CONTROL))
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(Vec::new(), 16);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[]);
     let id: i32 = e.last_message().parse().unwrap();
@@ -2816,24 +2816,24 @@ fn a_switch_callback_reads_the_keys_held_at_the_click() {
 fn load_array_mode_two_restores_text_from_library_data() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     let source = "on init\n declare !names[3]\n load_array(!names, 2)\n message(!names[0] & \":\" & !names[1])\nend on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
+    let script = contra_ksp::compile(source, &[]).unwrap();
     let data = vec![("names".into(), b"!names\nfirst\nsecond\n".to_vec())];
     let mut plan = Plan::new(vec![], 4);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &data)];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &data)];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.last_message(), "first:second");
     assert_eq!(e.stats().actions_unhandled, 0);
 
     let wrong_name = vec![("names".into(), b"!other\nfirst\n".to_vec())];
     let mut plan = Plan::new(vec![], 4);
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &wrong_name)];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &wrong_name)];
     let e = Engine::new(Arc::new(plan), store.client(), RATE);
     assert_eq!(e.stats().actions_unhandled, 1);
 }
 
 #[test]
 fn get_folder_patch_returns_prepared_directory() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let source = "on init\n message(get_folder($GET_FOLDER_LIBRARY_DIR) & get_folder($GET_FOLDER_PATCH_DIR))\nend on";
     let instrument = ir::Instrument {
@@ -2849,7 +2849,7 @@ fn get_folder_patch_returns_prepared_directory() {
         }],
         ..ir::Instrument::DEFAULT
     };
-    let loaded = kontra_host::instrument::build(instrument, RATE, &mut store);
+    let loaded = contra_host::instrument::build(instrument, RATE, &mut store);
     let e = Engine::new(Arc::new(loaded.plan), store.client(), RATE);
     assert_eq!(e.last_message(), "/library//library/Instruments/");
     assert_eq!(e.stats().actions_unhandled, 0);
@@ -2861,7 +2861,7 @@ fn get_folder_patch_returns_prepared_directory() {
 fn a_shorter_fade_out_ends_a_stolen_voice_sooner() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let zones = vec![zone(&mut store, 0.5, 0)];
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init
             declare $first := 0
         end on
@@ -2880,7 +2880,7 @@ fn a_shorter_fade_out_ends_a_stolen_voice_sooner() {
     for g in &mut plan.groups {
         g.mods.clear();
     }
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     // The steal alone fades over 10 ms (480 frames); the 100 µs fade ends it
@@ -2893,7 +2893,7 @@ fn a_shorter_fade_out_ends_a_stolen_voice_sooner() {
 
 #[test]
 fn get_folder_factory_returns_prepared_path_or_empty() {
-    let script = kontra_ksp::compile(
+    let script = contra_ksp::compile(
         "on init\n message(get_folder($GET_FOLDER_FACTORY_DIR))\nend on",
         &[],
     )
@@ -2901,8 +2901,8 @@ fn get_folder_factory_returns_prepared_path_or_empty() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
     for (folder, expected) in [(Some("/factory/"), "/factory/"), (None, "")] {
         let mut plan = Plan::new(vec![], 4);
-        let mut script_plan = kontra_host::script::plan(&script, &[], &[]);
-        script_plan.factory_folder = folder.map(|f| kontra_engine::Text::from_str_cut(f).0);
+        let mut script_plan = contra_host::script::plan(&script, &[], &[]);
+        script_plan.factory_folder = folder.map(|f| contra_engine::Text::from_str_cut(f).0);
         plan.scripts.push(script_plan);
         let engine = Engine::new(Arc::new(plan), store.client(), RATE);
         assert_eq!(engine.last_message(), expected);
@@ -3036,7 +3036,7 @@ fn a_parameter_on_a_missing_target_reads_zero_and_shows_nothing() {
 }
 
 /// KSP manual (`load_array`, `save_array`): mode 0 opens a file dialog and
-/// the callback goes on. KONTRA shows none yet, so it is a dialog cancelled
+/// the callback goes on. CONTRA shows none yet, so it is a dialog cancelled
 /// at once: an async id, the array as it was, `on async_complete` with 0.
 #[test]
 fn a_file_dialog_array_is_cancelled_and_completes_with_failure() {
@@ -3088,7 +3088,7 @@ fn pgs_init_is_sized_for_every_key_and_shared_between_slots() {
     second.push_str("if (pgs_get_key_val(K0, 1) # 0)\n inc($errors)\nend if\n");
     second.push_str("message($errors)\nend on\non note\n message(pgs_get_key_val(K419, 6) & \" \" & pgs_get_str_key_val(S419))\nend on\n");
     let slot = |source: &str| {
-        kontra_host::script::plan(&kontra_ksp::compile(source, &[]).unwrap(), &[], &[])
+        contra_host::script::plan(&contra_ksp::compile(source, &[]).unwrap(), &[], &[])
     };
     let mut plan = Plan::new(vec![], 0);
     plan.scripts = vec![slot(&first), slot(&second)];
@@ -3177,7 +3177,7 @@ fn pgs_callback_timing() {
 /// slot without relying on rendered audio to identify a field.
 #[test]
 fn reverb_controls_write_read_and_keep_missing_target_semantics() {
-    use kontra_engine::{Prepared, ir};
+    use contra_engine::{Prepared, ir};
     let cases = [
         ("TIME", ir::ReverbPar::Seconds),
         ("SIZE", ir::ReverbPar::Size),
@@ -3191,7 +3191,7 @@ fn reverb_controls_write_read_and_keep_missing_target_semantics() {
     for (name, par) in cases {
         let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
         let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
-        let original = kontra_format_kontakt::reverb(0, [0.5; 9]);
+        let original = contra_format_kontakt::reverb(0, [0.5; 9]);
         plan.inserts = vec![Some(ir::Effect {
             kind: ir::EffectKind::Reverb(original),
             bypass: false,
@@ -3205,8 +3205,8 @@ fn reverb_controls_write_read_and_keep_missing_target_semantics() {
             set_engine_par($ENGINE_PAR_RV2_TYPE, $NI_REVERB2_TYPE_HALL, -1, 0, $NI_INSERT_BUS)\n\
             end on"
         );
-        let script = kontra_ksp::compile(&source, &[]).unwrap();
-        plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+        let script = contra_ksp::compile(&source, &[]).unwrap();
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
         let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
         level(&mut e, &[on(60)]);
         let read: i32 = e.last_message().parse().unwrap();
@@ -3219,7 +3219,7 @@ fn reverb_controls_write_read_and_keep_missing_target_semantics() {
         let Some(ir::EffectKind::Reverb(actual)) = request.effect.map(|effect| effect.kind) else {
             panic!("{name}: {request:?}");
         };
-        let expected = kontra_format_kontakt::reverb_laws().get(par).eval(0.25);
+        let expected = contra_format_kontakt::reverb_laws().get(par).eval(0.25);
         for control in ir::ReverbPar::ALL {
             let want = if control == par {
                 expected
@@ -3247,7 +3247,7 @@ fn reverb_controls_write_read_and_keep_missing_target_semantics() {
 
 #[test]
 fn reverb_control_on_non_reverb_remains_unhandled() {
-    use kontra_engine::ir;
+    use contra_engine::ir;
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
     plan.inserts = vec![Some(ir::Effect {
@@ -3260,21 +3260,21 @@ fn reverb_control_on_non_reverb_remains_unhandled() {
         set_engine_par($ENGINE_PAR_RV2_TIME, 250000, -1, 0, $NI_INSERT_BUS)\n\
         message(get_engine_par($ENGINE_PAR_RV2_TIME, -1, 0, $NI_INSERT_BUS))\n\
         end on";
-    let script = kontra_ksp::compile(source, &[]).unwrap();
-    plan.scripts = vec![kontra_host::script::plan(&script, &[], &[])];
+    let script = contra_ksp::compile(source, &[]).unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
     level(&mut e, &[on(60)]);
     let actions = e.unhandled_actions();
     assert!(
         actions
             .iter()
-            .any(|(action, _)| *action == kontra_engine::Action::SetEnginePar),
+            .any(|(action, _)| *action == contra_engine::Action::SetEnginePar),
         "{actions:?}"
     );
     assert!(
         actions
             .iter()
-            .any(|(action, _)| *action == kontra_engine::Action::GetEnginePar),
+            .any(|(action, _)| *action == contra_engine::Action::GetEnginePar),
         "{actions:?}"
     );
 }

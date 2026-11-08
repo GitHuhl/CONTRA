@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use kontra_format_kontakt::Resources;
-use kontra_ui_model as ui;
+use contra_format_kontakt::Resources;
+use contra_ui_model as ui;
 
 /// A library's resource files, read by tree asset path.
 pub enum Library {

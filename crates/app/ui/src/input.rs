@@ -8,7 +8,7 @@
 //! as [`Edit`]s for the host to write into the engine; the caller shows them
 //! at once with [`apply`]. A text edit takes typed text the same way.
 
-use kontra_ui_model::{self as model, Interface, Kind, Orientation, PageRef, Sweep, WidgetRef};
+use contra_ui_model::{self as model, Interface, Kind, Orientation, PageRef, Sweep, WidgetRef};
 use mui::prelude::*;
 
 use crate::kit;
@@ -55,7 +55,7 @@ const REPEAT_STEP: f64 = 0.15;
 /// The id of widget `n`'s surface on face `face` (a rack part): every
 /// face's ids are its own, so two open parts never share one.
 pub fn surface(face: usize, n: usize) -> String {
-    format!("kontra-w-{face}-{n}")
+    format!("contra-w-{face}-{n}")
 }
 
 /// Whether a widget of `kind` takes the pointer.

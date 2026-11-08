@@ -1,14 +1,14 @@
 //! The plugin's editor in a window of its own, through the same windowing
-//! code a host opens it with. `kontra-window state <instrument> <file>`
-//! writes a state holding that instrument; `kontra-window --state <file>`
-//! opens the editor on it; `kontra-window read <instrument> <name>` prints
+//! code a host opens it with. `contra-window state <instrument> <file>`
+//! writes a state holding that instrument; `contra-window --state <file>`
+//! opens the editor on it; `contra-window read <instrument> <name>` prints
 //! one of its library's resources (`Resources/pictures/x.txt`), as the
-//! editor reads it. `tools/kontra-window/drive.sh` drives it under
+//! editor reads it. `tools/contra-window/drive.sh` drives it under
 //! Xvfb with real pointer events.
 
 use std::path::PathBuf;
 
-use kontra_host::state::{Saved, SavedPart, VERSION};
+use contra_host::state::{Saved, SavedPart, VERSION};
 use moose::core::export::PluginExport;
 use moose::core::state::snapshot_plugin;
 
@@ -17,9 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = args.next();
     if first.as_ref().is_some_and(|a| a == "read") {
         let (Some(path), Some(name)) = (args.next(), args.next()) else {
-            return Err("usage: kontra-window read <instrument> <name>".into());
+            return Err("usage: contra-window read <instrument> <name>".into());
         };
-        let bytes = kontra_host::ui::Library::open(std::path::Path::new(&path))
+        let bytes = contra_host::ui::Library::open(std::path::Path::new(&path))
             .read(&name.to_string_lossy())
             .ok_or("no such resource")?;
         std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
@@ -27,9 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if first.is_some_and(|a| a == "state") {
         let (Some(path), Some(out)) = (args.next(), args.next()) else {
-            return Err("usage: kontra-window state <instrument> <file>".into());
+            return Err("usage: contra-window state <instrument> <file>".into());
         };
-        let plugin = kontra_plugin::Plugin::create();
+        let plugin = contra_plugin::Plugin::create();
         let saved = Saved {
             version: VERSION,
             parts: vec![SavedPart {
@@ -54,6 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(out, snapshot_plugin(&plugin))?;
         return Ok(());
     }
-    moose_standalone::run::<kontra_plugin::Plugin>();
+    moose_standalone::run::<contra_plugin::Plugin>();
     Ok(())
 }

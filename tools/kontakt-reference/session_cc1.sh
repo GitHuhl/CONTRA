@@ -12,7 +12,7 @@ for inst in ${INSTS:-barbarian vista}; do
   for r in a b; do
     [ $inst = barbarian ] && export KONTAKT_NO_VIEW_FIX=1 || unset KONTAKT_NO_VIEW_FIX
     "$here/kontakt.sh" start "$nki" || { say "$inst start failed"; continue; }
-    export KONTRA_NO_STATE_CHECK="instrument GUI header does not match the control-crop goldens at 1600x1000; master and CC7 untouched this session, calibration before and after"
+    export CONTRA_NO_STATE_CHECK="instrument GUI header does not match the control-crop goldens at 1600x1000; master and CC7 untouched this session, calibration before and after"
     rec cc1_${inst}_$r cc1_$inst 6 $n
     "$here/kontakt.sh" stop; sleep 3
   done

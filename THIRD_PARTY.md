@@ -4,7 +4,7 @@ Project-authored code is offered under Apache-2.0 (see LICENSE and NOTICE).
 Vendored and other third-party components retain their own terms. The
 crate inventory was checked on 2026-10-02 with
 `cargo deny --all-features list --format json` (cargo-deny 0.20.2) against
-Cargo.lock at source snapshot `e531505`: 470 licensed package/version entries (including KONTRA) and
+Cargo.lock at source snapshot `e531505`: 470 licensed package/version entries (including CONTRA) and
 one unlicensed entry, `ni-file`. This includes development dependencies
 and multiple platforms; it is not a per-binary bill of materials or
 confirmation that every distribution obligation has been satisfied.
@@ -25,7 +25,7 @@ and `symphonia-utils-xiph`; both are included in fresh covered-source bundles.
 > [Cargo.toml](https://github.com/Ma5onic/ni-file/blob/1b7a518243125857fddec8217167b47a35cb58fa/Cargo.toml)
 > has no license field. This records the upstream metadata; it does not
 > assign Apache-2.0 to upstream code or claim that any instrument library
-> is included in KONTRA.
+> is included in CONTRA.
 > Local patches add modulation, archive, and resource decoding; they do
 > not resolve the upstream licensing question.
 
@@ -33,7 +33,7 @@ and `symphonia-utils-xiph`; both are included in fresh covered-source bundles.
 not itself a redistribution license. Obtain a grant covering the upstream
 authors' code and relevant fork contributions, or replace the dependency
 with code whose redistribution rights are established. Neither this notice
-nor KONTRA's Apache-2.0 license supplies that permission.
+nor CONTRA's Apache-2.0 license supplies that permission.
 [GitHub's licensing guidance](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository)
 distinguishes public viewing/forking from a software license.
 
@@ -85,10 +85,10 @@ The Truce License is MIT or Apache-2.0 at your option, except that
 offering truce (or a derivative) **as a commercial plug-in framework or
 framework service to other developers** needs written permission
 (section 2.1). Section 2.2 names audio plug-ins and plug-in suites as
-not covered, so KONTRA, an audio plug-in, has the plain MIT/Apache-2.0
+not covered, so CONTRA, an audio plug-in, has the plain MIT/Apache-2.0
 grant. The rider would matter only if the vendored `moose-*` crates were
 split out and sold as a framework. The name "truce" may not be used for
-KONTRA (section 3), and it is not.
+CONTRA (section 3), and it is not.
 
 ### Plug-in interfaces
 
@@ -105,7 +105,7 @@ The project does not build a VST2 variant.
 
 ## Dependency inventory (all sources)
 
-The following groups exclude KONTRA itself; multiple versions count as
+The following groups exclude CONTRA itself; multiple versions count as
 separate entries. Source-specific components are described above.
 
 | License | Crates |
@@ -162,7 +162,7 @@ and license texts with redistributed material. Linux and Windows nightlies
 consolidate the complete root notices, legal review, dependency notices, MOOSE
 rider and NOTICE, MUI text, and font licenses in `LICENSES.txt`.
 The original paths identify sections of this file rather than separate files.
-The release asset `KONTRA-nightly-covered-source.zip` supplies the MPL dependency
+The release asset `CONTRA-nightly-covered-source.zip` supplies the MPL dependency
 source archives; `release-manifest.json` records their checksums. macOS retains
 its license bundle and covered source inside the universal installer. The patched
 `symphonia-format-riff` and `symphonia-bundle-flac` archives contain their

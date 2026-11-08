@@ -2,17 +2,17 @@
 //! [`Action`]s. The event of a note callback, and the notes it plays, start
 //! when the callback returns or first waits; `wait` resumes through the queue.
 
-use kontra_events::HostNote;
-use kontra_time::SampleTime;
-use kontra_vm::{Action, HostApi, HostCall, HostValue, Text, event};
-use kontra_voice::FadeTarget;
+use contra_events::HostNote;
+use contra_time::SampleTime;
+use contra_vm::{Action, HostApi, HostCall, HostValue, Text, event};
+use contra_voice::FadeTarget;
 
 use crate::ledger::{Note, NoteRef, Origin, Releases};
 use crate::queue::{Exit, Work};
 use crate::{Engine, EnginePar};
 
-pub(crate) use kontra_ledger::running::{Kind, Running};
-pub use kontra_plan::{Callbacks, CcLink, Controls, LookPars, ScriptPlan};
+pub(crate) use contra_ledger::running::{Kind, Running};
+pub use contra_plan::{Callbacks, CcLink, Controls, LookPars, ScriptPlan};
 
 /// KSP's `$NI_NOT_FOUND`, what the `get_*_idx` lookups answer for a miss
 /// (measured on the oracle: `probes/ni_not_found.lua`).
@@ -608,9 +608,9 @@ impl HostApi for Engine {
                     HostValue::Nothing
                 }
             }
-            // Mode 0 asks for a file in a dialog KONTRA does not show yet,
+            // Mode 0 asks for a file in a dialog CONTRA does not show yet,
             // taken as cancelled; mode 1 is the user's Data folder, which
-            // KONTRA never holds. The array stays as it is and `on
+            // CONTRA never holds. The array stays as it is and `on
             // async_complete` reports failure (KSP manual).
             Action::LoadArray | Action::SaveArray if int(2) <= 1 => {
                 HostValue::Int(self.start_async(Exit::Failed))
@@ -645,7 +645,7 @@ impl HostApi for Engine {
                 HostValue::Int(self.request_file(request))
             }
             Action::SetSnapshotType => {
-                self.recall = kontra_plan::Recall::of_type(i64::from(int(0)));
+                self.recall = contra_plan::Recall::of_type(i64::from(int(0)));
                 HostValue::Nothing
             }
             Action::EventStatus => {

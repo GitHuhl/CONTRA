@@ -1,6 +1,6 @@
 //! Encode the exact inspector input clock as a type-0 MIDI file for the oracle.
 use anyhow::{Result, bail, ensure};
-use kontra_engine::Event;
+use contra_engine::Event;
 
 use crate::scenario::Input;
 

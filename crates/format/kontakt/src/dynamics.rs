@@ -3,9 +3,9 @@
 //! dyn-limiters-transient.md; saved layouts from v2 sampler-kontakt
 //! effects/dynamics.rs).
 
-use kontra_ir as ir;
-use kontra_law::common::DB_GAIN;
-use kontra_law::kontakt::{FEEDBACK_KNEE, FEEDBACK_THRESHOLD};
+use contra_ir as ir;
+use contra_law::common::DB_GAIN;
+use contra_law::kontakt::{FEEDBACK_KNEE, FEEDBACK_THRESHOLD};
 
 /// The record's effect and, when it sets something not carried, its name.
 pub(crate) fn effect(
@@ -49,7 +49,7 @@ pub(crate) fn effect(
 
 /// Setter 0x141ac87b0: attack `2(x − ½)·120` and sustain `2(x − ½)·115` dB
 /// per envelope unit; gain `(x − ½)·12` dB above the centre, `·48` below.
-/// The core's follower rates and thresholds (in `kontra-dsp-dynamics`) come
+/// The core's follower rates and thresholds (in `contra-dsp-dynamics`) come
 /// from process 0x141aaac90 and reset 0x141aa0b80.
 fn transient(attack: f32, sustain: f32, gain: f32, clip: bool) -> ir::Transient {
     let [attack, sustain, gain] = [attack, sustain, gain].map(|x| x.clamp(0.0, 1.0) - 0.5);

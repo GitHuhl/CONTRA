@@ -1,10 +1,10 @@
 //! The note ledger: one table of sounding notes, addressed by generational handles.
 //! A note owns its voices; every operation on voices goes through their note.
 
-use kontra_events::{HostNote, HostPattern};
-use kontra_time::SampleTime;
+use contra_events::{HostNote, HostPattern};
+use contra_time::SampleTime;
 
-use kontra_behaviour::RrDraw;
+use contra_behaviour::RrDraw;
 
 /// A note handle. Stale handles (the note ended) match nothing.
 /// Generations a slot cycles through: 13 bits, so a note's event ID (the
@@ -95,7 +95,7 @@ pub struct Note {
     pub noted_off: bool,
     /// The last fade a script asked of it (target, frames): its attack
     /// voices yet to start begin with it.
-    pub fade: Option<(kontra_voice::FadeTarget, u32)>,
+    pub fade: Option<(contra_voice::FadeTarget, u32)>,
     /// Script tuning, millicents.
     pub script_tune: i32,
     /// Script volume, millidecibels.
@@ -204,8 +204,8 @@ impl Ramp {
 /// One resting ramp for each "from script" index the plan's routes read, so
 /// every index a route reads keeps its value however many a script sends,
 /// and [`SPARE_RAMPS`] free ones that keep values only scripts read back.
-pub fn script_ramps(plan: &kontra_plan::Plan) -> Box<[Option<(u16, Ramp)>]> {
-    use kontra_ir::Source;
+pub fn script_ramps(plan: &contra_plan::Plan) -> Box<[Option<(u16, Ramp)>]> {
+    use contra_ir::Source;
     let blends = plan.buses.iter().flat_map(|b| &b.blends);
     let inputs = blends
         .flat_map(|b| &b.terms)
@@ -219,7 +219,7 @@ pub fn script_ramps(plan: &kontra_plan::Plan) -> Box<[Option<(u16, Ramp)>]> {
         );
     let routes = (plan.groups.iter().flat_map(|g| &g.mods).map(|m| &m.kind))
         .chain(plan.buses.iter().flat_map(|b| &b.mods));
-    let mut indices: Vec<u16> = (routes.filter_map(kontra_plan::source))
+    let mut indices: Vec<u16> = (routes.filter_map(contra_plan::source))
         .chain(inputs)
         .filter_map(|s| match s {
             Source::Script(i) => Some(i),

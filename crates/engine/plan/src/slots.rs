@@ -1,7 +1,7 @@
 //! A recalled project's effect slots, put back in the plan before the
 //! scripts run.
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
 use crate::Plan;
 
@@ -43,7 +43,7 @@ impl Plan {
         };
         let found = (self.responses.iter()).find(|(n, _)| n.eq_ignore_ascii_case(name));
         let Some(r) =
-            found.and_then(|(_, sample)| kontra_effects::response(sample, &law, rate).ok())
+            found.and_then(|(_, sample)| contra_effects::response(sample, &law, rate).ok())
         else {
             return false;
         };

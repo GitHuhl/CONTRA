@@ -15,9 +15,9 @@
 //! Versatile in a group (Una Corda Cotton and Felt, the room-hiss group),
 //! bypassed and never enabled by their script (2026-10-29).
 
-use kontra_ir as ir;
+use contra_ir as ir;
 
-use kontra_plan::Group;
+use contra_plan::Group;
 
 use crate::voice_rack::Unit;
 

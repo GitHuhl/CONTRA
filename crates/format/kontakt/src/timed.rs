@@ -1,7 +1,7 @@
 //! Timed modulation translation and its law provenance.
 
-use kontra_format::Notes;
-use kontra_ir as ir;
+use contra_format::Notes;
+use contra_ir as ir;
 use ni_file::kontakt::objects::{InternalModParams, Modulator};
 
 use crate::laws;
@@ -15,8 +15,8 @@ fn trace_timed(
     input: &impl std::fmt::Debug,
     output: &impl std::fmt::Debug,
 ) {
-    kontra_law::record(|| kontra_law::Application {
-        id: kontra_law::LawId(id),
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId(id),
         location: format!("groups/{group}/routes/{slot}/{field}"),
         input: format!("{input:?}"),
         output: format!("{output:?}"),
@@ -147,8 +147,8 @@ pub(crate) fn timed(
                 .is_some() =>
             {
                 let result = laws::eq_gain(source, insert, param, t.signed_intensity());
-                kontra_law::record(|| kontra_law::Application {
-                    id: kontra_law::LawId("kontakt.eq_gain_route.v1"),
+                contra_law::record(|| contra_law::Application {
+                    id: contra_law::LawId("kontakt.eq_gain_route.v1"),
                     location: format!("groups/{group_index}/routes/{slot}/targets/{target}"),
                     input: format!("{:?}", (source, insert, param, t.signed_intensity())),
                     output: format!("{result:?}"),

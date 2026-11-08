@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use kontra_engine::{Engine, Plan, Timed, Zone};
-use kontra_events::{Event, HostNote, HostPattern};
-use kontra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
-use kontra_time::SampleTime;
-use kontra_voice::Region;
+use contra_engine::{Engine, Plan, Timed, Zone};
+use contra_events::{Event, HostNote, HostPattern};
+use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+use contra_time::SampleTime;
+use contra_voice::Region;
 
 const RATE: u32 = 48_000;
 const FMT: SampleFmt = SampleFmt {
@@ -177,7 +177,7 @@ fn every_layer_of_a_note_starts_on_the_notes_sample() {
 fn the_pedal_holds_released_notes_until_it_lifts() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(region(&mut store, "loop", 1000).unwrap(), 0.0);
-    z.region.loops = vec![kontra_voice::Loop {
+    z.region.loops = vec![contra_voice::Loop {
         start: 0,
         end: 1000,
         crossfade: 0,
@@ -199,14 +199,14 @@ fn the_pedal_holds_released_notes_until_it_lifts() {
 fn a_script_owned_pedal_does_not_hold_released_notes() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let mut z = zone(region(&mut store, "loop", 1000).unwrap(), 0.0);
-    z.region.loops = vec![kontra_voice::Loop {
+    z.region.loops = vec![contra_voice::Loop {
         start: 0,
         end: 1000,
         crossfade: 0,
         ..Default::default()
     }];
     let mut p = (*plan(vec![z], 8)).clone();
-    p.sustain_pedal = kontra_engine::SustainPedal::ToScripts;
+    p.sustain_pedal = contra_engine::SustainPedal::ToScripts;
     let mut engine = Engine::new(Arc::new(p), store.client(), RATE);
     render(
         &mut engine,

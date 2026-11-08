@@ -6,7 +6,7 @@ mod expr;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use kontra_vm::{Action, Cmp, Op, Program, Returns, Text};
+use contra_vm::{Action, Cmp, Op, Program, Returns, Text};
 
 use crate::builtins::{Arg, Builtin, Ret};
 use crate::consts::{self, FIRST_UI_ID, SYMBOL_BASE};

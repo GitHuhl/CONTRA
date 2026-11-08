@@ -19,7 +19,7 @@ moose-params = {path = "../moose-params"}
 mui = {features = ["gpu-effects"], path = "../mui"}
 # Keep the Rust import alias stable while separating the custom host package
 # from upstream mui-baseview, whose public native bridges it now consumes.
-mui-baseview = {package = "kontra-native-host", path = "../mui-baseview"}
+mui-baseview = {package = "contra-native-host", path = "../mui-baseview"}
 # baseview's parent handle is raw-window-handle 0.6.
 raw-window-handle = "0.6"
 

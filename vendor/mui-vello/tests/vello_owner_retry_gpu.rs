@@ -1,5 +1,5 @@
 //! Real-device public Renderer regression for refused coarse image uploads.
-//! Requires gpu-effects and an absolute KONTRA_GPU_RECEIPT_DIR. No adapter,
+//! Requires gpu-effects and an absolute CONTRA_GPU_RECEIPT_DIR. No adapter,
 //! device loss, timeout, or pixel mismatch is an accepted skip. Software GPUs
 //! are allowed and their adapter identity is printed in the receipt.
 #![cfg(feature = "gpu-effects")]
@@ -452,8 +452,8 @@ fn public_renderer_owner_retry_pixels() {
     let started = Instant::now();
     let deadline = started + TEST_BUDGET;
     let directory = PathBuf::from(
-        std::env::var_os("KONTRA_GPU_RECEIPT_DIR")
-            .expect("KONTRA_GPU_RECEIPT_DIR must name an absolute retained artifact directory"),
+        std::env::var_os("CONTRA_GPU_RECEIPT_DIR")
+            .expect("CONTRA_GPU_RECEIPT_DIR must name an absolute retained artifact directory"),
     );
     assert!(
         directory.is_absolute(),

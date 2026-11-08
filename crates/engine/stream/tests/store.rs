@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use kontra_stream::{
+use contra_stream::{
     BlobKey, Encoding, MAX_CHANNELS, MemSource, PAGE_FRAMES, SampleFmt, Source, Store, StoreConfig,
 };
 
@@ -185,7 +185,7 @@ fn one_sample_twice_in_a_load_is_read_and_held_once() {
         offset: 0,
         fmt: FMT,
     };
-    let request = |pin| kontra_stream::LoadRequest {
+    let request = |pin| contra_stream::LoadRequest {
         key: key.clone(),
         source: source.clone(),
         frames: 2 * PAGE_FRAMES,
@@ -274,9 +274,9 @@ fn an_ncw_head_stays_compressed_and_plays_exactly() {
         sample_rate: 48_000,
     };
     let data = ncw::encode_pcm(&samples, spec, ncw::StereoMode::Auto).unwrap();
-    let path = std::env::temp_dir().join(format!("kontra-stream-{}.ncw", std::process::id()));
+    let path = std::env::temp_dir().join(format!("contra-stream-{}.ncw", std::process::id()));
     std::fs::write(&path, &data).unwrap();
-    let sample = kontra_ir::Sample {
+    let sample = contra_ir::Sample {
         name: "ncw".into(),
         file: path.clone(),
         offset: 0,
@@ -286,7 +286,7 @@ fn an_ncw_head_stays_compressed_and_plays_exactly() {
         rate: 48_000,
         keystream: None,
     };
-    let (source, fmt) = kontra_stream::open(&sample).unwrap();
+    let (source, fmt) = contra_stream::open(&sample).unwrap();
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
     let key = BlobKey {
         file: "ncw".into(),
@@ -335,9 +335,9 @@ fn the_samples_of_one_file_open_it_once() {
         sample_rate: 48_000,
     };
     let one = ncw::encode_pcm(&samples, spec, ncw::StereoMode::Auto).unwrap();
-    let path = std::env::temp_dir().join(format!("kontra-monolith-{}.nkx", std::process::id()));
+    let path = std::env::temp_dir().join(format!("contra-monolith-{}.nkx", std::process::id()));
     std::fs::write(&path, [one.as_slice(), one.as_slice()].concat()).unwrap();
-    let at = |offset: u64| kontra_ir::Sample {
+    let at = |offset: u64| contra_ir::Sample {
         name: format!("at {offset}"),
         file: path.clone(),
         offset,
@@ -352,7 +352,7 @@ fn the_samples_of_one_file_open_it_once() {
             .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|p| p == path))
             .count()
     };
-    let files = kontra_stream::Files::new([path.as_path()]);
+    let files = contra_stream::Files::new([path.as_path()]);
     let opened = [at(0), at(one.len() as u64)].map(|s| files.open(&s).unwrap());
     drop(files);
     assert_eq!(handles(), 1);

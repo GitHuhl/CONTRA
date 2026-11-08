@@ -1,5 +1,5 @@
 {
-  description = "KONTRA: a Kontakt-compatible sampler plugin (CLAP, VST3) for NixOS";
+  description = "CONTRA: a Kontakt-compatible sampler plugin (CLAP, VST3) for NixOS";
 
   # nixos-unstable ships rustc 1.99.0, the version rust-toolchain.toml pins.
   inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
@@ -29,8 +29,8 @@
         wayland
       ];
 
-      kontra = pkgs.rustPlatform.buildRustPackage {
-        pname = "kontra";
+      contra = pkgs.rustPlatform.buildRustPackage {
+        pname = "contra";
         version = "3.0.0-dev";
         src = lib.cleanSourceWith {
           src = ./.;
@@ -43,18 +43,18 @@
         nativeBuildInputs = with pkgs; [ pkg-config patchelf ];
         buildInputs = runtimeLibs ++ [ pkgs.alsa-lib ];
 
-        cargoBuildFlags = [ "-p" "kontra-plugin" ];
+        cargoBuildFlags = [ "-p" "contra-plugin" ];
         # The full suite runs in the dev shell (`cargo test --workspace`);
         # the package build only builds.
         doCheck = false;
 
         installPhase = ''
           runHook preInstall
-          so=$(find target -path '*/release/libkontra_plugin.so' | head -n1)
+          so=$(find target -path '*/release/libcontra_plugin.so' | head -n1)
 
-          mkdir -p $out/lib/clap $out/lib/vst3/KONTRA.vst3/Contents/x86_64-linux
-          install -m755 "$so" $out/lib/clap/KONTRA.clap
-          install -m755 "$so" $out/lib/vst3/KONTRA.vst3/Contents/x86_64-linux/KONTRA.so
+          mkdir -p $out/lib/clap $out/lib/vst3/CONTRA.vst3/Contents/x86_64-linux
+          install -m755 "$so" $out/lib/clap/CONTRA.clap
+          install -m755 "$so" $out/lib/vst3/CONTRA.vst3/Contents/x86_64-linux/CONTRA.so
           runHook postInstall
         '';
 
@@ -62,13 +62,13 @@
         # libraries and would drop every dlopen'd one.
         dontPatchELF = true;
         postFixup = ''
-          for f in $out/lib/clap/KONTRA.clap $out/lib/vst3/KONTRA.vst3/Contents/x86_64-linux/KONTRA.so; do
+          for f in $out/lib/clap/CONTRA.clap $out/lib/vst3/CONTRA.vst3/Contents/x86_64-linux/CONTRA.so; do
             patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} "$f"
           done
         '';
 
         meta = {
-          description = "KONTRA sampler plugin (CLAP and VST3)";
+          description = "CONTRA sampler plugin (CLAP and VST3)";
           license = lib.licenses.asl20;
           platforms = [ "x86_64-linux" ];
         };
@@ -78,7 +78,7 @@
       clap-probe = pkgs.rustPlatform.buildRustPackage {
         pname = "clap-probe";
         version = "0.0.0";
-        inherit (kontra) src;
+        inherit (contra) src;
         cargoLock.lockFile = ./Cargo.lock;
         cargoBuildFlags = [ "-p" "clap-probe" ];
         doCheck = false;
@@ -97,7 +97,7 @@
     in
     {
       packages.${system} = {
-        default = kontra;
+        default = contra;
         inherit clap-probe vst3-probe;
       };
 
@@ -108,7 +108,7 @@
       # the check's output.
       checks.${system} =
         let
-          uiCheck = name: probe: plugin: pkgs.runCommand "kontra-ui-${name}" {
+          uiCheck = name: probe: plugin: pkgs.runCommand "contra-ui-${name}" {
             nativeBuildInputs = [ pkgs.xvfb-run ];
           } ''
             export HOME=$TMPDIR
@@ -122,17 +122,19 @@
           '';
         in
         {
-          ui-clap = uiCheck "clap" clap-probe "${kontra}/lib/clap/KONTRA.clap";
-          ui-vst3 = uiCheck "vst3" vst3-probe "${kontra}/lib/vst3/KONTRA.vst3";
+          ui-clap = uiCheck "clap" clap-probe "${contra}/lib/clap/CONTRA.clap";
+          ui-vst3 = uiCheck "vst3" vst3-probe "${contra}/lib/vst3/CONTRA.vst3";
         };
 
       devShells.${system}.default = pkgs.mkShell {
-        inputsFrom = [ kontra ];
-        packages = with pkgs; [ rustc cargo clippy rustfmt rust-analyzer xvfb-run mesa ];
+        inputsFrom = [ contra ];
+        packages = with pkgs; [ rustc cargo clippy rustfmt rust-analyzer xvfb-run mesa gnumake patchelf ];
         LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
+        # What `make clap` / `make vst3` bake into the plugin, as the package does.
+        CONTRA_RPATH = lib.makeLibraryPath runtimeLibs;
         # Mesa's software Vulkan, for GPU tests on a machine without a GPU
-        # (CI): `VK_DRIVER_FILES=$KONTRA_SOFTWARE_VULKAN cargo test ...`.
-        KONTRA_SOFTWARE_VULKAN = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
+        # (CI): `VK_DRIVER_FILES=$CONTRA_SOFTWARE_VULKAN cargo test ...`.
+        CONTRA_SOFTWARE_VULKAN = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
       };
     };
 }

@@ -2,10 +2,10 @@
 
 `tools/oracle/oracle-slot CMD...` runs CMD in a free slot and exports (see that script):
   ORACLE_SLOT (1..ORACLE_SLOTS)   ORACLE_PREFIX (this slot's Wine prefix)   ORACLE_DISPLAY (:7N)
-  ORACLE_SINK (PipeWire null sink kontra_ref_N)   ORACLE_WORK (scratch dir for this slot)
+  ORACLE_SINK (PipeWire null sink contra_ref_N)   ORACLE_WORK (scratch dir for this slot)
 
 Unset ORACLE_SLOT is the single-session setup every tool had before: default Wine prefix, the
-tool's own display, sink kontra_ref, one Kontakt per machine (the caller holds the legacy lock).
+tool's own display, sink contra_ref, one Kontakt per machine (the caller holds the legacy lock).
 
 All slots share ALSA "Midi Through", so every slot owns a block of MIDI channels (channel_block):
 an instrument in slot N only hears notes on its own channels, never another slot's.
@@ -102,7 +102,7 @@ def stop_kontakt(timeout=20):
 
 
 def ensure_sink(name):
-    """Creates the PipeWire null sink `name` when missing. Exact name match (kontra_ref is a prefix of kontra_ref_1)."""
+    """Creates the PipeWire null sink `name` when missing. Exact name match (contra_ref is a prefix of contra_ref_1)."""
     rows = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout.splitlines()
     if any(r.split()[1:2] == [name] for r in rows):
         return

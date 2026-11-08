@@ -1,5 +1,5 @@
 [package]
-name = "kontra-engine"
+name = "contra-engine"
 version = "0.0.0"
 edition.workspace = true
 license = "Apache-2.0"
@@ -9,20 +9,20 @@ publish = false
 workspace = true
 
 [features]
-trace = ["kontra-voice/trace", "dep:kontra-trace"]
+trace = ["contra-voice/trace", "dep:contra-trace"]
 
 [dependencies]
-kontra-events = { path = "../../model/events" }
-kontra-stream = { path = "../stream" }
-kontra-time = { path = "../../base/time" }
-kontra-vm = { path = "../vm" }
-kontra-behaviour = { path = "../behaviour" }
-kontra-ledger = { path = "../ledger" }
-kontra-racks = { path = "../racks" }
-kontra-plan = { path = "../plan" }
-kontra-script-ui = { path = "../script-ui" }
-kontra-ir = { path = "../../model/ir" }
-kontra-voice = { path = "../voice" }
-kontra-dsp = { path = "../../dsp/registry" }
-kontra-effects = { path = "../effects" }
-kontra-trace = { path = "../trace", optional = true }
+contra-events = { path = "../../model/events" }
+contra-stream = { path = "../stream" }
+contra-time = { path = "../../base/time" }
+contra-vm = { path = "../vm" }
+contra-behaviour = { path = "../behaviour" }
+contra-ledger = { path = "../ledger" }
+contra-racks = { path = "../racks" }
+contra-plan = { path = "../plan" }
+contra-script-ui = { path = "../script-ui" }
+contra-ir = { path = "../../model/ir" }
+contra-voice = { path = "../voice" }
+contra-dsp = { path = "../../dsp/registry" }
+contra-effects = { path = "../effects" }
+contra-trace = { path = "../trace", optional = true }

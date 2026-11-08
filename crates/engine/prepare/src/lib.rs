@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 mod levels;
 
-use kontra_ir as ir;
-use kontra_stream::{
+use contra_ir as ir;
+use contra_stream::{
     BlobKey, LoadRequest, MAX_CHANNELS, Mix, Sample, SampleFmt, Source, Store, StreamClient,
 };
-use kontra_voice::{Ahdsr, Loop, PERIOD, Read, Region, Shape, Shaper, Side, Warp};
+use contra_voice::{Ahdsr, Loop, PERIOD, Read, Region, Shape, Shaper, Side, Warp};
 
-use kontra_engine::{
+use contra_engine::{
     Atom, Bus, Control, Crossfade, Group, Level, Plan, RoundRobin, RrCounter, Trigger, Zone,
     response,
 };
@@ -136,7 +136,7 @@ pub fn prepare(
                 .samples
                 .get(i.sample)
                 .map_or("", |s| s.name.as_str());
-            (kontra_engine::stem(name).to_lowercase(), *i)
+            (contra_engine::stem(name).to_lowercase(), *i)
         })
         .collect();
     plan.responses = instrument
@@ -178,7 +178,7 @@ fn load_samples(
     // page on time; the law's own 60 KB is sized for spinning disks.
     let fast = (used.first())
         .and_then(|(index, _)| instrument.samples.get(*index))
-        .is_some_and(|s| kontra_stream::fast_storage(&s.file));
+        .is_some_and(|s| contra_stream::fast_storage(&s.file));
     let opened = parallel(&used, |(index, _)| match instrument.samples.get(*index) {
         Some(sample) => open(sample),
         None => Err(io::Error::new(
@@ -254,7 +254,7 @@ fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R>
 }
 
 /// Head bytes per channel on fast storage (05-STREAM.md §1): the chord
-/// stress (render `KONTRA_CHORDS`, cold page cache) has no late page down to
+/// stress (render `CONTRA_CHORDS`, cold page cache) has no late page down to
 /// 4 KiB on Areia and Vista; this keeps 3× that margin.
 const FAST_HEAD: u32 = 12 << 10;
 
@@ -496,7 +496,7 @@ fn broken(feature: &str, detail: String) -> ir::Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontra_stream::Encoding;
+    use contra_stream::Encoding;
 
     const STEREO_24: SampleFmt = SampleFmt {
         encoding: Encoding::I24,

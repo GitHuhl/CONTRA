@@ -1,7 +1,7 @@
 //! A Kontakt wavetable group (source mode 9) as the model's wavetable.
 
-use kontra_format::Notes;
-use kontra_ir::{self as ir, FormShaper, Side, Warp, WarpShape};
+use contra_format::Notes;
+use contra_ir::{self as ir, FormShaper, Side, Warp, WarpShape};
 use ni_file::kontakt::objects::WavetableSource;
 
 /// The source's table and forms. Its modulation oscillator, inharmonic

@@ -4,10 +4,10 @@
 //! up to the stage's limit), the resonance setters `FUN_140966230`,
 //! `FUN_1409663f0` and `FUN_1409665c0`, the normaliser `FUN_14096f840` and
 //! process `FUN_140aef6e0` (docs/re/engine/filt-multi-versatile.md; the DSP
-//! matches them under kemu, kontra-dsp-filter tests/cascade.rs).
+//! matches them under kemu, contra-dsp-filter tests/cascade.rs).
 
-use kontra_ir as ir;
-use kontra_law::kontakt::VERSATILE_NOTE_HZ;
+use contra_ir as ir;
+use contra_law::kontakt::VERSATILE_NOTE_HZ;
 
 use crate::script_knobs::SlotKnob;
 
@@ -55,7 +55,7 @@ pub(crate) fn cascade(k: Knobs) -> ir::Cascade {
         hz: hz(cut),
         shifts: [sb * SHIFT_OCTAVES, sc * SHIFT_OCTAVES],
         stages: [stage(res, ta, wa), stage(rb, tb, wb), stage(rc, tc, wc)],
-        gain: kontra_law::kontakt::VERSATILE_GAIN.eval(gain),
+        gain: contra_law::kontakt::VERSATILE_GAIN.eval(gain),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Type-level ownership contract; native execution is covered by x11_visibility.
 #![cfg(target_os = "linux")]
 
-use kontra_native_host::baseview::{ThreadedWindow, Window, host::HostCallbacks};
+use contra_native_host::baseview::{ThreadedWindow, Window, host::HostCallbacks};
 
 static_assertions::assert_impl_all!(ThreadedWindow: Send);
 static_assertions::assert_not_impl_any!(ThreadedWindow: Sync);
