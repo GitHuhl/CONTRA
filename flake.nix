@@ -1,14 +1,26 @@
 {
   description = "CONTRA: a Kontakt-compatible sampler plugin (CLAP, VST3) for NixOS";
 
-  # nixos-unstable ships rustc 1.99.0, the version rust-toolchain.toml pins.
-  inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+  # Everything the plugin links and loads comes from NixOS stable: a plugin
+  # runs inside the DAW's process and must not need a newer glibc than the
+  # DAW's. Code built against stable's glibc loads on stable and unstable
+  # alike, never the other way round. Only the Rust compiler comes from
+  # unstable (1.99, the version rust-toolchain.toml pins; stable has 1.95);
+  # it links with stable's toolchain, and Rust's standard library asks for
+  # no recent glibc.
+  inputs = {
+    nixpkgs.url = "https://channels.nixos.org/nixos-26.05/nixexprs.tar.xz";
+    nixpkgs-unstable.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixpkgs-unstable }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      unstable = nixpkgs-unstable.legacyPackages.${system};
       lib = pkgs.lib;
+      rust = { inherit (unstable) rustc cargo clippy rustfmt rust-analyzer; };
+      rustPlatform = pkgs.makeRustPlatform { inherit (rust) rustc cargo; };
 
       # What the editor opens at run time with dlopen: the Vulkan loader
       # (which finds the system's drivers in /run/opengl-driver), EGL/GL,
@@ -29,7 +41,7 @@
         wayland
       ];
 
-      contra = pkgs.rustPlatform.buildRustPackage {
+      contra = rustPlatform.buildRustPackage {
         pname = "contra";
         version = "3.0.0-dev";
         src = lib.cleanSourceWith {
@@ -75,7 +87,7 @@
       };
       # A bare CLAP host that opens the editor in an X11 window and
       # screenshots it: the UI check that needs no DAW (tools/clap-probe).
-      clap-probe = pkgs.rustPlatform.buildRustPackage {
+      clap-probe = rustPlatform.buildRustPackage {
         pname = "clap-probe";
         version = "0.0.0";
         inherit (contra) src;
@@ -128,7 +140,7 @@
 
       devShells.${system}.default = pkgs.mkShell {
         inputsFrom = [ contra ];
-        packages = with pkgs; [ rustc cargo clippy rustfmt rust-analyzer xvfb-run mesa gnumake patchelf ];
+        packages = (builtins.attrValues rust) ++ (with pkgs; [ xvfb-run mesa gnumake patchelf ]);
         LD_LIBRARY_PATH = lib.makeLibraryPath runtimeLibs;
         # What `make clap` / `make vst3` bake into the plugin, as the package does.
         CONTRA_RPATH = lib.makeLibraryPath runtimeLibs;
