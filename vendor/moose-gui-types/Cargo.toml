@@ -1,0 +1,16 @@
+[package]
+name = "moose-gui-types"
+description = "Lightweight GUI types for moose - layout, render trait, widget regions. No rasterization, no windowing."
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+
+# iOS-only Obj-C runtime bindings, used by the `ios` module's
+# `ivar_offset` helper. Other GUI backends pick this up transitively
+# via `moose-gui` and call into the helpers from their `editor_ios.rs`.

@@ -76,17 +76,11 @@ fn mb(bytes: u64) -> u32 {
 }
 
 /// The process's resident bytes.
-#[cfg(target_os = "linux")]
 fn resident() -> Option<u64> {
     // ponytail: 4 KiB pages; a 16 KiB-page kernel reads a quarter.
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
     Some(pages * 4096)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn resident() -> Option<u64> {
-    None
 }
 
 #[cfg(test)]

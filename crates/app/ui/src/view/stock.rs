@@ -672,7 +672,7 @@ pub(super) fn shows(tree: &Interface, w: &Widget, bare: bool) -> bool {
 
 /// A KSP control with no picture, or one the library lacks; `false` for
 /// one still decoding.
-// ponytail: KSP's stock look only; UVI's own once a Lua library needs it.
+// KSP's stock look.
 fn unpictured(tree: &Interface, w: &Widget) -> bool {
     matches!(tree.source, Source::Ksp { .. })
         && !w.images.first().is_some_and(|u| {

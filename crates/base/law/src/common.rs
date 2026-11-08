@@ -61,14 +61,6 @@ pub const LFO_FADE_IN: Law = Law::ExpAffine {
     scale: 0.3,
 };
 
-/// The square root: an equal-power mix (UVI's delay and reverb `Mix`) and UVI's upper
-/// key follow.
-pub const SQUARE_ROOT: Law = Law::Power {
-    lo: 0.0,
-    hi: 1.0,
-    exponent: 0.5,
-};
-
 /// Geometric from `from` to `from·ratio`, `from·ratio^x`: a stage time a source moves
 /// between a floor and the stage's own length.
 #[must_use]
@@ -124,25 +116,6 @@ mod tests {
             assert_eq!(CUBE.eval(x), x.powi(3), "cubic at {x}");
         }
         assert_eq!(CUBE.eval(-1.0), 0.0);
-    }
-
-    /// `powf(0.5)` and `sqrt` may differ in the last bit; never by more.
-    #[test]
-    fn square_root_matches_sqrt_to_an_ulp() {
-        for n in 0..=100_000 {
-            let x = n as f32 / 100_000.0;
-            let (got, want) = (SQUARE_ROOT.eval(x), x.sqrt());
-            assert!(
-                got.to_bits().abs_diff(want.to_bits()) <= 1,
-                "{x}: {got} vs {want}"
-            );
-            let x = f64::from(x);
-            let (got, want) = (SQUARE_ROOT.eval_f64(x), x.sqrt());
-            assert!(
-                got.to_bits().abs_diff(want.to_bits()) <= 1,
-                "{x}: {got} vs {want}"
-            );
-        }
     }
 
     /// The inverses replace hand-written `20·log10` and `12·log2` bit for bit.

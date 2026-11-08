@@ -14,21 +14,21 @@ software-window = ["mui-vello/software-window"]
 
 [dependencies]
 color = "0.3"
-mui-scene = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-material = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-motion = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-layout = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-geometry = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-input = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
+mui-scene = {path = "../mui-scene"}
+mui-material = {path = "../mui-material"}
+mui-motion = {path = "../mui-motion"}
+mui-layout = {path = "../mui-layout"}
+mui-geometry = {path = "../mui-geometry"}
+mui-input = {path = "../mui-input"}
 rustc-hash = "2"
-mui-text = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
-mui-vello = { git = "https://github.com/Matari-Audio/MUI", rev = "dcf0796082feec053af1418e3a38a302ee61da0a" }
+mui-text = {path = "../mui-text"}
+mui-vello = {path = "../mui-vello"}
 unicode-segmentation = "1.13"
 
 [dev-dependencies]
 epaint_default_fonts = "0.36"
 png = "0.18"
-ttf-inter = { version = "0.1", default-features = false, features = ["v"] }
+ttf-inter = {version = "0.1", default-features = false, features = ["v"]}
 libc = "0.2"
 
 [lints.rust]

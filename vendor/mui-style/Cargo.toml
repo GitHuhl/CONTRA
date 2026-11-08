@@ -1,0 +1,23 @@
+[package]
+name = "mui-style"
+description = "Theme data for MUI: Oklch colours, palettes, roles, fills, gradients, shadows and the Style a node paints by."
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[dependencies]
+# Shared vector primitives; the renderer uses the same version via vello_common.
+kurbo = "0.13.1"
+peniko = "0.6.1"
+# The renderer reaches us through the same crate, so colour types cannot
+# version-skew with what vello paints. No transitive dependencies of its own.
+# Only for CornerStyle.
+# Only for the spacing vocabulary a shell's thickness is stated in; the
+# solver does not depend on style, so no cycle.
+# Only for the theme's icon font.
+color = {version = "0.3"}
+mui-geometry = {path = "../mui-geometry"}
+mui-layout = {path = "../mui-layout"}
+mui-text = {path = "../mui-text"}
+

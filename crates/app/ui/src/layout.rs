@@ -10,7 +10,7 @@ const GRID: (i32, i32, i32, i32) = (92, 21, 66, 2);
 const GRID_ROW_HEIGHT: u32 = 68;
 
 /// A widget's size where its source left it to the host: Kontakt's stock sizes.
-// ponytail: KSP stock sizes for every source; per-source tables once Falcon UIs arrive.
+// KSP stock sizes.
 fn default_size(kind: &Kind) -> (u32, u32) {
     match kind {
         Kind::Knob { .. } => (85, 52),

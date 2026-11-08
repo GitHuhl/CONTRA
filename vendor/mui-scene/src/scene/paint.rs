@@ -1,0 +1,782 @@
+//! A node's own paint: fill, shells, shadows, stroke and border ramp, and
+//! the one place an entry is pushed.
+use std::sync::Arc;
+
+use mui_geometry::{BooleanOp, Path, Point, Rect, RoundedRect, Vec2};
+
+use super::outline::Contour;
+use super::{Layer, Painted, SceneError, Walk, empty, find, missing};
+use crate::material_weld::MaterialWeld;
+use crate::regions::{Operation, RAMP_OUTSIDE, SHELL, STROKE_BAND};
+use crate::{
+    BorderRamp, Color, Content, El, Element, Fill, Paint, Radius, Role, Shadow, ShadowKind,
+};
+use crate::{Stroke, Style};
+
+/// What a structural entry paints: nothing a renderer looks at.
+const CLEAR: Color = Color::oklcha(0.0, 0.0, 0.0, 0.0);
+
+/// A stroke held back until the node's children have painted: path, rect,
+/// paint, width, and whether it is clipped to its own path.
+pub(super) type LateStroke = (Arc<Path>, Option<RoundedRect>, Fill, f64, bool);
+
+/// The colour a painted entry leaves for what paints on it.
+fn solid(p: Option<&mut Painted>, or: Color) -> Color {
+    p.map_or(or, |p| ground(&p.paint, or))
+}
+
+/// Contrast follows the visible colour, while the paint keeps its alpha.
+fn ground(paint: &Paint, under: Color) -> Color {
+    let color = paint.solid();
+    if color.alpha() >= 1.0 {
+        return color;
+    }
+    if color.alpha() <= 0.0 {
+        return under;
+    }
+    let foreground = color.to_srgb();
+    let composed = (foreground.premultiply()
+        + under.to_srgb().premultiply() * (1.0 - foreground.components[3]))
+        .un_premultiply();
+    let [r, g, b, a] = composed.components;
+    Color::srgba(r, g, b, a)
+}
+
+impl Walk<'_> {
+    /// The node's fill -- or its material weld's image -- and the colour it
+    /// leaves for what paints on it.
+    pub(super) fn fill(
+        &mut self,
+        e: &Element,
+        material: Option<&MaterialWeld>,
+        contour: &Contour,
+        under: Color,
+    ) -> Color {
+        match material {
+            Some(MaterialWeld {
+                external: Some(external),
+                image_rect,
+                ..
+            }) => {
+                self.out
+                    .external_welds
+                    .insert(self.key.clone(), external.clone());
+                self.out.paint.push(Painted {
+                    key: self.key.clone(),
+                    layer: Layer::External,
+                    path: Arc::new(image_rect.path()),
+                    paint: Paint::Solid(under),
+                    rect: Some(*image_rect),
+                    offset: Point::ZERO,
+                    transform: self.transform,
+                    width: 0.0,
+                    blur: 0.0,
+                    text: None,
+                });
+                under
+            }
+            Some(m) => solid(
+                self.push(
+                    Layer::Fill,
+                    m.image_rect.path(),
+                    Some(m.image_rect),
+                    &m.image_fill,
+                    under,
+                ),
+                under,
+            ),
+            // Text's own fill is its ink, not a box behind it: never pushed,
+            // though its colour still grounds the shells as before.
+            None if matches!(e.content, Content::Text(_)) && e.extras().editable_text.is_none() => {
+                self.paint_of(e.style.fill.as_ref().unwrap_or(&Fill::None), under)
+                    .map_or(under, |p| ground(&p, under))
+            }
+            // A joined tab takes the owner's border material; its fill only
+            // grounds its content.
+            None if e.extras().border_join.is_some() => self
+                .paint_of(e.style.fill.as_ref().unwrap_or(&Fill::None), under)
+                .map_or(under, |p| ground(&p, under)),
+            None => {
+                let path = contour.path.clone();
+                let mut p = self.push(
+                    Layer::Fill,
+                    path,
+                    contour.rect,
+                    e.style.fill.as_ref().unwrap_or(&Fill::None),
+                    under,
+                );
+                if let Some(p) = p.as_deref_mut() {
+                    p.offset = contour.offset;
+                }
+                solid(p, under)
+            }
+        }
+    }
+
+    /// Every shell, each a parallel inset of the one before; returns the
+    /// colour the innermost one leaves.
+    pub(super) fn shells(
+        &mut self,
+        s: &Style,
+        contour: &mut Contour,
+        mut bg: Color,
+    ) -> Result<Color, SceneError> {
+        // The shell before this one: an analytic rect insets as one, and
+        // only a path shell needs the previous path kept.
+        let (mut cur, mut cur_rect) = (None::<Arc<Path>>, contour.rect);
+        for (i, (d, f)) in s.shells.iter().flatten().enumerate() {
+            let d = d.resolve(self.spec.theme.spacing);
+            if !(d.is_finite() && d >= 0.0) {
+                return Err(SceneError::InvalidRadius);
+            }
+            let shell = if let Some(rr) = cur_rect {
+                let i2 = rr.inset(d)?;
+                contour.changed |= i2.corner_collapsed;
+                let Some(child) = i2.shape else { break };
+                cur_rect = Some(child);
+                self.rect_path(child, mui_geometry::CornerStyle::Round)
+            } else {
+                let from = (**cur.as_ref().unwrap_or(&contour.path)).clone();
+                let (path, changed) = self.caches.regions.resolve_counted(
+                    (self.key.clone(), SHELL.wrapping_add(i as u8)),
+                    Operation::Inset(from, d),
+                    self.spec.offsets,
+                    self.spec.geometry,
+                )?;
+                contour.changed |= changed;
+                cur.insert(Arc::new(path)).clone()
+            };
+            let mut p = self.push(Layer::Shell(i), shell, cur_rect, f, bg);
+            if let Some(p) = p.as_deref_mut() {
+                p.offset = contour.offset;
+            }
+            bg = solid(p, bg);
+        }
+        Ok(bg)
+    }
+
+    /// Inset shadows, inside the shape and over everything it has painted so
+    /// far: the inverse blur is opaque *outside* its rectangle, so the
+    /// outline is what keeps it in the box.
+    pub(super) fn inset_shadows(
+        &mut self,
+        s: &Style,
+        contour: &Contour,
+        bg: Color,
+    ) -> Result<(), SceneError> {
+        if !s
+            .shadow
+            .iter()
+            .flatten()
+            .any(|sh| sh.kind == ShadowKind::Inset)
+        {
+            return Ok(());
+        }
+        self.mark_on(Layer::Clip, contour);
+        for sh in s
+            .shadow
+            .iter()
+            .flatten()
+            .filter(|sh| sh.kind == ShadowKind::Inset)
+        {
+            self.shadow(sh, contour, bg)?;
+        }
+        self.mark(Layer::Unclip, empty(), None);
+        Ok(())
+    }
+
+    /// One shadow of a node, offset and spread off the node's own outline.
+    ///
+    /// A rounded rect blurs analytically, so that is what the entry carries
+    /// whenever the outline is one. A welded outline is not, and becomes one
+    /// blurred rect per welded child instead.
+    pub(super) fn shadow(
+        &mut self,
+        sh: &Shadow,
+        contour: &Contour,
+        under: Color,
+    ) -> Result<(), SceneError> {
+        let d = Vec2::new(sh.dx, sh.dy);
+        // CSS spread: the drop grows, the inset shrinks, and the radius
+        // follows so the corner keeps its shape.
+        let grow = match sh.kind {
+            ShadowKind::Drop => sh.spread,
+            ShadowKind::Inset => -sh.spread,
+        };
+        let moved = |r: RoundedRect| {
+            let b = r.bounds();
+            RoundedRect::new(
+                Rect::new(
+                    b.x0 + d.x - grow,
+                    b.y0 + d.y - grow,
+                    b.x1 + d.x + grow,
+                    b.y1 + d.y + grow,
+                ),
+                (r.radius() + grow).max(0.0),
+            )
+        };
+        // A zero-spread drop follows the final outline, including a weld's
+        // filleted corners, rather than its original square participants.
+        // ponytail: inset and spread shadows still use participant rects;
+        // inverse-path blur and path offsets are their upgrade.
+        let rects = match &contour.rect {
+            Some(r) => std::slice::from_ref(r),
+            None if !contour.shadow_rects.is_empty()
+                && (sh.kind != ShadowKind::Drop || grow != 0.0) =>
+            {
+                &contour.shadow_rects[..]
+            }
+            // ponytail: no analytic rect and no welds -- the shape travels
+            // as a path, and the spread with it is dropped.
+            None => {
+                let path = contour.path.clone();
+                if let Some(p) = self.push(Layer::Shadow(sh.kind), path, None, &sh.fill, under) {
+                    p.blur = sh.blur;
+                    p.offset = contour.offset + d;
+                }
+                return Ok(());
+            }
+        };
+        for &r in rects {
+            let r = moved(r)?;
+            let path = self.rect_path(r, mui_geometry::CornerStyle::Round);
+            if let Some(p) = self.push(Layer::Shadow(sh.kind), path, Some(r), &sh.fill, under) {
+                p.blur = sh.blur;
+                p.offset = contour.offset;
+            }
+        }
+        Ok(())
+    }
+
+    /// The node's stroke. Painted now, or handed back when it has to paint
+    /// after the children.
+    ///
+    /// A union parent is one continuous outline, but its children paint
+    /// after the parent. Keep the stroke until the subtree is complete so a
+    /// child fill cannot erase the shared outer border. Ordinary nodes
+    /// retain the historical ordering (stroke before their content).
+    pub(super) fn stroke(
+        &mut self,
+        st: &Stroke,
+        e: &Element,
+        contour: &Contour,
+        bg: Color,
+    ) -> Result<Option<LateStroke>, SceneError> {
+        let w = st.width.unwrap_or(self.spec.theme.stroke_width);
+        // An unset paint (a width with no colour anywhere) paints nothing.
+        let fill = st.fill.clone().unwrap_or(crate::Fill::None);
+        if !(w.is_finite() && w >= 0.0) {
+            return Err(SceneError::InvalidRadius);
+        }
+        if let (crate::BorderAlign::Inside, Some(rr)) = (e.border_align, contour.rect) {
+            let Some(rr) = rr.inset(w / 2.)?.shape else {
+                return Ok(Some((contour.path.clone(), None, fill.clone(), 0., false)));
+            };
+            let path = self.rect_path(rr, mui_geometry::CornerStyle::Round);
+            if e.style.union.unwrap_or_default() {
+                return Ok(Some((path, Some(rr), fill.clone(), w, false)));
+            }
+            if let Some(p) = self.push(Layer::Stroke, path, Some(rr), &fill, bg) {
+                p.width = w;
+                p.offset = contour.offset;
+            }
+            return Ok(None);
+        }
+        // Any other outline is stroked by the renderer, not offset here: the
+        // band of a welded outline was a fresh boolean on every resize. An
+        // inside stroke is a centred one twice as wide, clipped to the outline.
+        match e.border_align {
+            _ if w == 0. => Ok(None),
+            crate::BorderAlign::Center => {
+                Ok(Some((contour.path.clone(), None, fill.clone(), w, false)))
+            }
+            crate::BorderAlign::Inside => Ok(Some((
+                contour.path.clone(),
+                None,
+                fill.clone(),
+                2. * w,
+                true,
+            ))),
+            crate::BorderAlign::Outside => {
+                // The same outline `Arc` is the same outline: its band is last
+                // frame's, with no path cloned to find that out.
+                let generation = self.caches.outlines.generation;
+                if let Some((outline, width, _, band, seen)) =
+                    self.caches.outlines.bands.get_mut(&self.key)
+                    && Arc::ptr_eq(outline, &contour.path)
+                    && *width == w
+                {
+                    *seen = generation;
+                    let band = band.clone();
+                    self.caches.regions.keep(&(self.key.clone(), STROKE_BAND));
+                    return Ok(Some((band, None, fill.clone(), 0., false)));
+                }
+                // Shared with a surface owner's clearance: one entry per node.
+                let band = Arc::new(self.cached_region(
+                    (self.key.clone(), STROKE_BAND),
+                    Operation::Border((*contour.path).clone(), w, e.border_align),
+                )?);
+                self.caches.outlines.bands.insert(
+                    self.key.clone(),
+                    (
+                        contour.path.clone(),
+                        w,
+                        e.border_align,
+                        band.clone(),
+                        generation,
+                    ),
+                );
+                Ok(Some((band, None, fill.clone(), 0., false)))
+            }
+        }
+    }
+
+    /// A border ramp's band, painted after the children. One with tabs moves
+    /// to just after the node's fill, under its shells and everything else.
+    pub(super) fn border_ramp(
+        &mut self,
+        n: &El,
+        ramp: &BorderRamp,
+        at: usize,
+        contour: &Contour,
+        bg: Color,
+        border_background: usize,
+    ) -> Result<(), SceneError> {
+        let spec = self.spec;
+        let th = &spec.theme;
+        let named_frame = |id: &mui_layout::Id| -> Result<_, SceneError> {
+            if let Some(frame) = self.plan.ramp_frames.get(&(at, id.clone())) {
+                return Ok(*frame);
+            }
+            let index = find(n, id.as_str(), at, &self.tree.sizes)
+                .ok_or_else(|| missing("border ramp tab", id))?;
+            Ok(self.tree.frames[index])
+        };
+        let anchor = match self.plan.ramp_anchors.get(at) {
+            Some(frame) => *frame,
+            None => match &ramp.anchor {
+                None => self.tree.frames[at],
+                Some(id) => named_frame(id)?,
+            },
+        };
+        if anchor.size.width <= 0.0 {
+            return Err(
+                mui_geometry::Error::InvalidOptions("border ramp anchor has no width").into(),
+            );
+        }
+        let mut sweep = ramp.clone();
+        if ramp.align == crate::BorderAlign::Center {
+            sweep.from.1 *= 0.5;
+            sweep.to.1 *= 0.5;
+        }
+        // Anchors are frames, so the band is made in scene space.
+        let world = contour.world();
+        let mut band = self.caches.borders.band(
+            &self.key,
+            &world,
+            &sweep,
+            anchor,
+            0.1 / self.spec.device_scale.unwrap_or(1.0),
+        )?;
+        // Extend the same material into the tabs and their concave shoulders.
+        // The final welded outline supplies all corners through the clip.
+        let shoulder = match n.payload().style.radius.unwrap_or_default() {
+            Radius::Pair(_, concave) => concave,
+            Radius::Scale(k) => th.corners.concave * k,
+            _ => th.corners.concave,
+        };
+        crate::border_ramp::decorate(&mut band, ramp, anchor, shoulder, named_frame)?;
+        if let Some(joins) = self.plan.surface_joins.get(at) {
+            band.commands.extend(joins.commands.iter().copied());
+        }
+        if ramp.align == crate::BorderAlign::Outside {
+            let merged = self.cached_region((self.key.clone(), 7), Operation::Sweep(band))?;
+            band = self.cached_region(
+                (self.key.clone(), RAMP_OUTSIDE),
+                Operation::Combine(merged, (*world).clone(), BooleanOp::Difference),
+            )?;
+        }
+        let Some(bounds) = mui_geometry::bounds(band.flatten(0.1, 250_000)?.concat()) else {
+            return Ok(());
+        };
+        let start = self.out.paint.len();
+        if ramp.align == crate::BorderAlign::Inside {
+            self.mark_on(Layer::Clip, contour);
+        }
+        self.push(Layer::Stroke, band, None, &ramp.fill(anchor, bounds), bg);
+        if ramp.align == crate::BorderAlign::Inside {
+            self.mark(Layer::Unclip, empty(), None);
+        }
+        if !ramp.tabs.is_empty() || self.plan.surface_joins.contains(at) {
+            let paint: Vec<_> = self.out.paint.drain(start..).collect();
+            self.out
+                .paint
+                .splice(border_background..border_background, paint);
+        }
+        Ok(())
+    }
+
+    /// A structural entry -- a clip, a blend, or the one closing it -- whose
+    /// paint is meaningless.
+    pub(super) fn mark(&mut self, layer: Layer, path: Arc<Path>, rect: Option<RoundedRect>) {
+        self.mark_at(layer, path, rect, Point::ZERO);
+    }
+
+    /// [`Walk::mark`] along `c`, where it stands.
+    pub(super) fn mark_on(&mut self, layer: Layer, c: &Contour) {
+        self.mark_at(layer, c.path.clone(), c.rect, c.offset);
+    }
+
+    /// [`Walk::mark`] of a local path placed at `offset`.
+    pub(super) fn mark_at(
+        &mut self,
+        layer: Layer,
+        path: Arc<Path>,
+        rect: Option<RoundedRect>,
+        offset: Point,
+    ) {
+        self.out.paint.push(Painted {
+            key: self.key.clone(),
+            layer,
+            path,
+            paint: Paint::Solid(CLEAR),
+            rect,
+            offset,
+            transform: self.transform,
+            width: 0.0,
+            blur: 0.0,
+            text: None,
+        });
+    }
+
+    /// `fill` over `under`. Ink and dim are a contrast search per call, and
+    /// a walk meets the same few grounds over and over: each is asked once
+    /// per ground.
+    pub(super) fn paint_of(&mut self, fill: &Fill, under: Color) -> Option<Paint> {
+        let (role, alpha) = match *fill {
+            Fill::Role(r @ (Role::Ink | Role::Dim)) => (r, None),
+            Fill::Faded(r @ (Role::Ink | Role::Dim), a) => (r, Some(a)),
+            _ => return fill.paint(&self.spec.theme.palette, under),
+        };
+        let p = &self.spec.theme.palette;
+        let ground = [
+            under.lightness(),
+            under.chroma(),
+            under.hue(),
+            under.alpha(),
+        ]
+        .map(f32::to_bits);
+        let &mut (on, dim) = self
+            .inks
+            .entry(ground)
+            .or_insert_with(|| (p.on(under), p.dim(under)));
+        let c = if role == Role::Ink { on } else { dim };
+        Some(Paint::Solid(alpha.map_or(c, |a| c.with_alpha(a))))
+    }
+
+    pub(super) fn push(
+        &mut self,
+        layer: Layer,
+        path: impl Into<Arc<Path>>,
+        rect: Option<RoundedRect>,
+        fill: &Fill,
+        under: Color,
+    ) -> Option<&mut Painted> {
+        let paint = self.paint_of(fill, under)?;
+        self.out.paint.push(Painted {
+            key: self.key.clone(),
+            layer,
+            path: path.into(),
+            paint,
+            rect,
+            offset: Point::ZERO,
+            transform: self.transform,
+            width: 0.0,
+            blur: 0.0,
+            text: None,
+        });
+        self.out.paint.last_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use crate::prelude::*;
+    use crate::{Paint, ShadowKind};
+
+    /// An inset shadow paints over the fill and inside the outline, which
+    /// is the whole difference from a drop shadow: same call, opposite side.
+    #[test]
+    fn an_inset_shadow_paints_over_the_fill_and_clipped_to_the_outline() {
+        let root = block(40., 40.)
+            .radius(8.)
+            .fill(Role::Surface)
+            .shadow(Shadow::soft(6.))
+            .shadow(Shadow::inset(4.))
+            .id("box");
+        let s = resolve(&SceneSpec::new(root).offered(Size::new(40., 40.))).unwrap();
+        let at = |l: Layer| s.paint.iter().position(|p| p.layer == l).expect("layer");
+        let (drop, fill) = (at(Layer::Shadow(ShadowKind::Drop)), at(Layer::Fill));
+        let inset = at(Layer::Shadow(ShadowKind::Inset));
+        assert!(drop < fill, "the drop shadow is over the fill");
+        assert!(fill < at(Layer::Clip) && at(Layer::Clip) < inset);
+        assert!(
+            inset < at(Layer::Unclip),
+            "the inset shadow escapes the box"
+        );
+        assert_eq!(s.paint[inset].blur, 4.);
+    }
+
+    /// A zero-spread drop on a weld uses the final rounded outline as one path.
+    #[test]
+    fn a_welded_zero_spread_drop_shadow_uses_the_final_contour() {
+        let shadow = Shadow::soft(12.);
+        let root = row([block(20., 20.).id("a"), block(20., 40.).id("b")])
+            .union(Role::Surface)
+            .radius(8.)
+            .shadow(shadow.clone())
+            .id("weld");
+        let s = resolve(&SceneSpec::new(root).offered(Size::new(40., 40.))).unwrap();
+        let shadows: Vec<_> = s
+            .paint
+            .iter()
+            .filter(|p| p.layer == Layer::Shadow(ShadowKind::Drop))
+            .collect();
+        let outline = s
+            .paint
+            .iter()
+            .find(|p| p.key.as_str() == "weld" && p.layer == Layer::Fill)
+            .unwrap();
+        assert_eq!(shadows.len(), 1, "one drop shadow follows the weld contour");
+        let shadow_paint = shadows[0];
+        assert_eq!(shadow_paint.blur, shadow.blur);
+        assert!(
+            shadow_paint.rect.is_none(),
+            "the welded contour is not a rect"
+        );
+        assert_eq!(
+            shadow_paint.path.as_ref(),
+            outline.path.as_ref(),
+            "the shadow follows the final outline"
+        );
+        assert_eq!(
+            shadow_paint.offset,
+            outline.offset + mui_geometry::Vec2::new(shadow.dx, shadow.dy)
+        );
+    }
+
+    /// Nonzero spread still expands one blur rect per welded child.
+    #[test]
+    fn a_spread_welded_drop_shadow_uses_each_child_rect() {
+        let shadow = Shadow {
+            spread: 1.,
+            ..Shadow::soft(12.)
+        };
+        let root = row([block(20., 20.).id("a"), block(20., 40.).id("b")])
+            .union(Role::Surface)
+            .shadow(shadow.clone())
+            .id("weld");
+        let s = resolve(&SceneSpec::new(root).offered(Size::new(40., 40.))).unwrap();
+        let shadows: Vec<_> = s
+            .paint
+            .iter()
+            .filter(|p| p.layer == Layer::Shadow(ShadowKind::Drop))
+            .collect();
+        assert_eq!(shadows.len(), 2, "spread follows each welded child");
+        for (p, key) in shadows.iter().zip(["a", "b"]) {
+            assert_eq!(p.blur, shadow.blur);
+            let r = p
+                .rect
+                .expect("spread shadow keeps an analytic rect")
+                .bounds()
+                + p.offset.to_vec2();
+            let child = s.surface(key).unwrap();
+            let child = child.rect.unwrap().bounds() + child.offset.to_vec2();
+            assert!((r.x0 - child.x0 + shadow.spread).abs() < 1e-9);
+            assert!((r.y0 - child.y0 + shadow.spread - shadow.dy).abs() < 1e-9);
+            assert!((r.x1 - child.x1 - shadow.spread).abs() < 1e-9);
+            assert!((r.y1 - child.y1 - shadow.spread - shadow.dy).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn shells_are_parallel_and_paint_in_z_order() {
+        let s = resolve(&welded_tab()).unwrap();
+        let tab = s.surface("tab").unwrap().rect.unwrap();
+        let shell = s.paint.iter().find(|p| p.layer == Layer::Shell(0)).unwrap();
+        let r = shell.rect.unwrap();
+        assert!((tab.radius() - r.radius() - 12.).abs() < 1e-9);
+        assert!((r.bounds().x0 - tab.bounds().x0 - 12.).abs() < 1e-9);
+        let layers: Vec<_> = s.paint.iter().map(|p| (&*p.key, p.layer)).collect();
+        assert_eq!(
+            layers,
+            [
+                ("root", Layer::Fill),
+                ("root", Layer::Clip),
+                ("tab", Layer::Shell(0)),
+                ("root", Layer::Unclip)
+            ]
+        );
+        assert!(
+            s.surface("/0/1").is_some(),
+            "unnamed nodes are keyed by path"
+        );
+    }
+
+    #[test]
+    fn welded_stroke_paints_after_child_fills() {
+        let root = row([block(20., 20.).fill(Role::Primary).id("child")])
+            .union(Role::Surface)
+            .stroke(Role::Ink)
+            .stroke_width(2.)
+            .id("weld");
+        let s = resolve(&SceneSpec::new(root).offered(Size::new(20., 20.))).unwrap();
+        let order: Vec<_> = s.paint.iter().map(|p| (&*p.key, p.layer)).collect();
+        let at = |key: &str, layer: Layer| order.iter().position(|x| *x == (key, layer)).unwrap();
+        assert!(
+            at("weld", Layer::Fill) < at("child", Layer::Fill)
+                && at("child", Layer::Fill) < at("weld", Layer::Stroke),
+            "welded border was painted under its child: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_shell_on_a_weld_follows_the_concave_outline() {
+        let mut sp = welded_tab();
+        sp.root = sp.root.shell(6., Role::Field);
+        let r = resolve(&sp).unwrap();
+        let outer = r.surface("root").unwrap();
+        assert!(outer.rect.is_none());
+        let inner = &r
+            .paint
+            .iter()
+            .find(|p| p.layer == Layer::Shell(0))
+            .unwrap()
+            .path;
+        let oc = outer.path.flatten(0.1, 20_000).unwrap();
+        let ic = inner.flatten(0.1, 20_000).unwrap();
+        let mut min = f64::INFINITY;
+        for p in ic.iter().flatten().step_by(7) {
+            min = min.min(mui_geometry::boundary_distance(*p, &oc));
+        }
+        assert!((min - 6.0).abs() < 0.35, "measured inset={min}");
+    }
+
+    #[test]
+    fn translucent_selected_surfaces_keep_their_alpha_and_readable_child_ink() {
+        for mode in [mui_style::Mode::Light, mui_style::Mode::Dark] {
+            let root = col([col([text("selected").id("label")])
+                .fill(Role::Ink.alpha(0.08))
+                .id("selected")])
+            .fill(Role::Surface);
+            let mut spec = SceneSpec::new(root);
+            spec.theme.palette = spec.theme.palette.with_mode(mode);
+            spec.font = Some(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+            let scene = resolve(&spec).unwrap();
+            let ink = scene
+                .paint
+                .iter()
+                .find(|p| p.key == "label".into() && p.layer == Layer::Text)
+                .unwrap();
+            assert_eq!(
+                ink.paint,
+                Paint::Solid(spec.theme.palette.ink()),
+                "{mode:?}"
+            );
+            let selected = scene
+                .paint
+                .iter()
+                .find(|p| p.key == "selected".into() && p.layer == Layer::Fill)
+                .unwrap();
+            assert_eq!(
+                selected.paint,
+                Paint::Solid(
+                    spec.theme
+                        .palette
+                        .on(spec.theme.palette.surface())
+                        .with_alpha(0.08)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn nested_translucent_fills_gradients_and_shells_ground_child_contrast() {
+        for mode in [mui_style::Mode::Light, mui_style::Mode::Dark] {
+            for gradient in [false, true] {
+                let fill = if gradient {
+                    crate::Gradient::vertical(Role::Ink.alpha(0.08), Role::Ink.alpha(0.04)).into()
+                } else {
+                    Role::Ink.alpha(0.08)
+                };
+                let root = col([col([col([text("nested").id("label")])
+                    .fill(fill)
+                    .shell(0., Role::Ink.alpha(0.08))])
+                .fill(Role::Ink.alpha(0.08))])
+                .fill(Role::Surface);
+                let mut spec = SceneSpec::new(root);
+                spec.theme.palette = spec.theme.palette.with_mode(mode);
+                spec.font = Some(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+                let scene = resolve(&spec).unwrap();
+                let ink = scene
+                    .paint
+                    .iter()
+                    .find(|p| p.key == "label".into() && p.layer == Layer::Text)
+                    .unwrap();
+                assert_eq!(ink.paint, Paint::Solid(spec.theme.palette.ink()));
+                assert!(scene.paint.iter().any(|p| p.layer == Layer::Shell(0)));
+                for p in scene.paint.iter().filter(|p| {
+                    matches!(p.layer, Layer::Fill | Layer::Shell(_))
+                        && p.paint.solid().alpha() < 1.0
+                }) {
+                    assert_eq!(p.paint.solid().alpha(), 0.08);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_ground_uses_source_over_and_keeps_opaque_and_clear_identity() {
+        let red = Color::srgba(1., 0., 0., 0.5);
+        let blue = Color::srgba(0., 0., 1., 0.5);
+        let [r, g, b, a] = super::ground(&Paint::Solid(red), blue).to_srgb().components;
+        for (actual, expected) in [(r, 2. / 3.), (g, 0.), (b, 1. / 3.), (a, 0.75)] {
+            assert!(
+                (actual - expected).abs() < 0.00001,
+                "{actual} != {expected}"
+            );
+        }
+        let opaque = Color::oklch(0.6, 0.2, 70.);
+        assert_eq!(super::ground(&Paint::Solid(opaque), blue), opaque);
+        assert_eq!(super::ground(&Paint::Solid(red.with_alpha(0.)), blue), blue);
+    }
+
+    #[test]
+    fn roles_resolve_against_the_palette_and_ink_reads_on_its_ground() {
+        let root = col([text("hi").id("t")]).fill(Role::Primary).id("card");
+        let mut sp = SceneSpec::new(root);
+        sp.font = Some(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+        let s = resolve(&sp).unwrap();
+        let th = Theme::default();
+        let card = &s.paint[0];
+        assert_eq!(card.paint, Paint::Solid(th.palette.primary()));
+        let ink = s.paint.iter().find(|p| p.layer == Layer::Text).unwrap();
+        assert_eq!(ink.paint, Paint::Solid(th.palette.on(th.palette.primary())));
+        assert!(s.layout.frame("t").unwrap().size.width > 10.);
+    }
+
+    #[test]
+    fn a_stroke_paints_inside_the_frame_it_was_given() {
+        let root = stack([block(20., 20.).radius(0.).stroke(Role::Ink).id("k")]);
+        let s = resolve(&SceneSpec::new(root).offered(Size::new(20., 20.))).unwrap();
+        let st = s.paint.iter().find(|p| p.layer == Layer::Stroke).unwrap();
+        let b = mui_geometry::bounds(st.path.flatten(0.01, 100_000).unwrap().concat()).unwrap();
+        let w = st.width / 2.0;
+        let f = s.layout.frame("k").unwrap();
+        // The painted band is the path grown by half the width; inside means
+        // that band is exactly the frame.
+        assert!((b.x0 - w - f.x).abs() < 1e-9, "{b:?} {f:?} {w}");
+        assert!((b.y1 + w - f.bottom()).abs() < 1e-9, "{b:?} {f:?} {w}");
+    }
+}

@@ -1,7 +1,7 @@
 //! Every named law, for inspection: its name, where its maths was confirmed, and the input
 //! range worth sampling.
 
-use crate::{Law, common, kontakt, uvi};
+use crate::{Law, common, kontakt};
 
 /// A named law and its provenance.
 #[derive(Clone, Debug)]
@@ -16,11 +16,8 @@ pub struct Named {
     pub domain: [f32; 2],
 }
 
-/// Not found in the vendor binary.
-const UNVERIFIED: &str = "unverified";
-
-/// Every named law. Data-dependent families (`kontakt::modulation_shaper`,
-/// `uvi::fade_edge`) appear at a representative parameter.
+/// Every named law. Data-dependent families (`kontakt::modulation_shaper`)
+/// appear at a representative parameter.
 #[must_use]
 pub fn catalog() -> Vec<Named> {
     let n = |name, law: &Law, source, domain| Named {
@@ -83,12 +80,6 @@ pub fn catalog() -> Vec<Named> {
             "common::LFO_FADE_IN",
             &common::LFO_FADE_IN,
             "Kontakt 0x140b06c90",
-            unit,
-        ),
-        n(
-            "common::SQUARE_ROOT",
-            &common::SQUARE_ROOT,
-            "UVI 0x14138ab10",
             unit,
         ),
         n(
@@ -215,37 +206,6 @@ pub fn catalog() -> Vec<Named> {
             "kontakt::modulation_shaper(0.5 bend)",
             &kontakt::modulation_shaper(&[(0.0, 0.0, 0.5), (1.0, 1.0, 0.0)]),
             "0x14087c7f0",
-            unit,
-        ),
-        n("uvi::KEY_SOURCE", &uvi::KEY_SOURCE, "0x14138ab10", unit),
-        n(
-            "uvi::LOWER_KEY_FOLLOW",
-            &uvi::LOWER_KEY_FOLLOW,
-            "0x14138ab10",
-            unit,
-        ),
-        n(
-            "uvi::ENVELOPE_CURVE",
-            &uvi::ENVELOPE_CURVE,
-            "0x1410f1220",
-            [-1.0, 1.0],
-        ),
-        n(
-            "uvi::WAVESHAPER_DRIVE",
-            &uvi::WAVESHAPER_DRIVE,
-            UNVERIFIED,
-            unit,
-        ),
-        n(
-            "uvi::CLIPPER_ASYMMETRY",
-            &uvi::CLIPPER_ASYMMETRY,
-            UNVERIFIED,
-            [-1.0, 1.0],
-        ),
-        n(
-            "uvi::fade_edge(2)",
-            &uvi::fade_edge(2.0),
-            "0x140f28cba",
             unit,
         ),
     ]

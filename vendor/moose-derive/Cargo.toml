@@ -14,9 +14,9 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = {version = "2", features = ["full"]}
 toml = "1"
-moose-build = { git = "https://github.com/Matari-Audio/moose", rev = "bffa4677d0b82119d38566ce7e932dc5c463d497" }
-moose-params = { git = "https://github.com/Matari-Audio/moose", rev = "bffa4677d0b82119d38566ce7e932dc5c463d497" }
-moose-utils = { git = "https://github.com/Matari-Audio/moose", rev = "bffa4677d0b82119d38566ce7e932dc5c463d497" }
+moose-build = {path = "../moose-build"}
+moose-params = {path = "../moose-params"}
+moose-utils = {path = "../moose-utils"}
 

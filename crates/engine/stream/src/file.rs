@@ -289,14 +289,8 @@ impl Region {
     }
 }
 
-#[cfg(unix)]
 fn read_at(file: &File, out: &mut [u8], at: u64) -> io::Result<usize> {
     std::os::unix::fs::FileExt::read_at(file, out, at)
-}
-
-#[cfg(windows)]
-fn read_at(file: &File, out: &mut [u8], at: u64) -> io::Result<usize> {
-    std::os::windows::fs::FileExt::seek_read(file, out, at)
 }
 
 impl symphonia::core::io::MediaSource for RegionReader {

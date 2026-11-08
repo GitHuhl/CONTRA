@@ -615,7 +615,7 @@ fn sheet_view(ui: &mut Ui, app: &mut App, which: Sheet, out: &mut Vec<Action>) -
                 title("KONTRA"),
                 body(app.build.clone()).id("about-build"),
                 caption(
-                    "One engine that plays Kontakt, UVI and SFZ libraries as they were written."
+                    "A free sampler that plays Kontakt libraries as they were written."
                 )
                 .fill(secondary()),
             ]

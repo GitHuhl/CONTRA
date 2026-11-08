@@ -207,15 +207,15 @@ mod tests {
         .unwrap();
         let mut b = Browser::open(Some(&dir), None);
         assert_eq!(b.prefs.roots.len(), 1);
-        b.add_root("/nowhere/UVI".into());
+        b.add_root("/nowhere/More".into());
         let again = Browser::open(Some(&dir), None);
         assert_eq!(again.prefs.roots.len(), 2, "v3 keeps its own prefs");
         let v2_after = std::fs::read_to_string(v2.join("settings.json")).unwrap();
-        assert!(!v2_after.contains("UVI"), "v2's settings are never written");
+        assert!(!v2_after.contains("More"), "v2's settings are never written");
         b.remove_root(0);
         let roots = Browser::open(Some(&dir), None).prefs.roots;
         assert_eq!(roots.len(), 1, "a removed folder stays removed");
-        assert_eq!(roots[0].path, Path::new("/nowhere/UVI"));
+        assert_eq!(roots[0].path, Path::new("/nowhere/More"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

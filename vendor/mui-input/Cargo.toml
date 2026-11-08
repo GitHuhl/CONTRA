@@ -1,0 +1,16 @@
+[package]
+name = "mui-input"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[dependencies]
+# Hot maps keyed by addresses and hashes, not attacker input.
+mui-geometry = {path = "../mui-geometry"}
+mui-layout = {path = "../mui-layout"}
+rustc-hash = {version = "2"}
+
+[dev-dependencies]
+mui-scene = {path = "../mui-scene"}
+

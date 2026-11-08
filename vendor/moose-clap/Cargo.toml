@@ -15,8 +15,8 @@ description = "CLAP format wrapper for moose"
 mpe-input = []
 
 [dependencies]
-moose-core = { git = "https://github.com/Matari-Audio/moose", rev = "bffa4677d0b82119d38566ce7e932dc5c463d497" }
-moose-params = { git = "https://github.com/Matari-Audio/moose", rev = "bffa4677d0b82119d38566ce7e932dc5c463d497" }
+moose-core = {path = "../moose-core"}
+moose-params = {path = "../moose-params"}
 clap-sys = "0.5"
 log = "0.4"
 # Wait-free bounded MPMC queue. Used for the GUI → audio param change
@@ -28,6 +28,3 @@ crossbeam-queue = "0.3"
 # top in unflipped Cocoa coordinates so the editor doesn't render
 # in the bottom-left of any extra plugin-window space Reaper
 # leaves around it. Pure `msg_send!` against AppKit.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2"
-

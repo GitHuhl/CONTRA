@@ -1,0 +1,56 @@
+[package]
+name = "moose-gui"
+description = "Built-in GUI for moose plugins"
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+# `moose-cpu` (tiny-skia + skrifa) and `moose-gpu` (wgpu) are the
+# two `RenderBackend` impls. Both optional, gated by the `cpu`
+# (default) / `gpu` features so plugins that opt into one don't
+# pull the other's compile.
+moose-cpu = {version = "7.0.0", optional = true, path = "../moose-cpu"}
+moose-gpu = {version = "7.0.0", optional = true, path = "../moose-gpu"}
+moose-gui-types = {version = "7.0.0", path = "../moose-gui-types"}
+moose-gui-utils = {version = "7.0.0", path = "../moose-gui-utils"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+moose-plugin = {version = "7.0.0", path = "../moose-plugin"}
+raw-window-handle = "0.6"
+wgpu = {version = "29", default-features = false, features = ["wgsl"]}
+pollster = "0.4"
+log = "0.4"
+
+# baseview hosts the editor on macOS / Windows / Linux. iOS embeds
+# a UIView directly into the AUv3 view controller - no baseview.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+baseview = {package = "moose-baseview", version = "0.3.4-moose.1", path = "../moose-baseview"}
+
+# wgpu backend features, per OS. moose-gui's blit pipeline (cpu
+# mode) and `GpuEditor` (gpu mode) both need a usable wgpu backend
+# regardless of which feature is on. moose-gpu used to provide
+# these transitively; now that moose-gpu is optional, moose-gui
+# declares them itself so wgpu always has a backend available.
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = {version = "29", default-features = false, features = ["wgsl", "vulkan", "gles"]}
+
+# iOS UIKit + CoreGraphics bridging for the UIView host.
+[target.'cfg(not(target_os = "ios"))'.dev-dependencies]
+keyboard-types = "0.8"
+
+[features]
+# `cpu` is the default - tiny-skia software rasterizer with a wgpu
+# blit pipeline for surface presentation. `gpu` swaps in direct wgpu
+# rendering through `moose_gpu::WgpuBackend`; opting in via
+# `default-features = false, features = ["gpu"]` keeps moose-cpu
+# (and tiny-skia + skrifa) out of the dep tree.
+default = ["cpu"]
+# Both features need moose-gpu: `gpu` for `WgpuBackend`, `cpu` for the
+# surface pump (`moose_gpu::pump`) its blit presentation runs through.
+cpu = ["dep:moose-cpu", "dep:moose-gpu"]
+gpu = ["dep:moose-gpu"]
+

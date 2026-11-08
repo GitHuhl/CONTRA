@@ -5,7 +5,6 @@
 
 pub mod common;
 pub mod kontakt;
-pub mod uvi;
 
 mod catalog;
 mod file;

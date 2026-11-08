@@ -112,7 +112,7 @@ fn specimen() -> App {
             "Areia 16 Violins: the convolution reverb's impulse is not in the library\nThe library names Hall.wav in its reverb, and no file of that name ships with it; the dry signal plays.".into(),
             "2 Horns KS: script line 912 asks for an unknown effect's display\nget_engine_par_disp on slot 3 names no effect; Kontakt answers an empty text and so does KONTRA.".into(),
         ],
-        folders: vec!["/data/main/Libraries/Kontakt".into(), "/data/main/Libraries/UVI".into()],
+        folders: vec!["/data/main/Libraries/Kontakt".into()],
         ..App::default()
     }
 }

@@ -1,7 +1,7 @@
 //! Format-neutral description of a library's instrument interface.
 //!
-//! Source frontends (KSP `on init`, Creator Tools performance views, Falcon
-//! Lua) emit an [`Interface`]; the product UI renders it with either the
+//! Source frontends (KSP `on init`, Creator Tools performance views) emit an
+//! [`Interface`]; the product UI renders it with either the
 //! library's own bitmaps or its own vector controls ([`Presentation`]).
 //!
 //! Plain data: no I/O, no decoded pixels, no runtime handles, no dependencies.

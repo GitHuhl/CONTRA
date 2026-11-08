@@ -1,0 +1,136 @@
+//! Nesting is a geometric relationship, not an inherited CSS-like radius.
+use crate::{Arc, Error, Path, PathCommand, Point, Rect, Vec2};
+use std::f64::consts::FRAC_PI_2;
+
+/// Validated circular-corner rectangle. Fields cannot be changed independently.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundedRect {
+    bounds: Rect,
+    radius: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InsetRect {
+    pub shape: Option<RoundedRect>,
+    /// At inset >= radius, convex arc correspondence collapses to a vertex.
+    pub corner_collapsed: bool,
+}
+
+fn nonnegative(x: f64) -> Result<(), Error> {
+    if !x.is_finite() {
+        return Err(Error::NonFinite);
+    }
+    if x < 0.0 {
+        return Err(Error::InvalidOptions("expected a nonnegative length"));
+    }
+    Ok(())
+}
+
+impl RoundedRect {
+    /// The same rectangle moved by `d`; a translation keeps it valid.
+    pub fn translated(self, d: Vec2) -> Self {
+        Self {
+            bounds: self.bounds + d,
+            ..self
+        }
+    }
+    pub fn new(bounds: Rect, requested_radius: f64) -> Result<Self, Error> {
+        nonnegative(requested_radius)?;
+        if !bounds.is_finite() {
+            return Err(Error::NonFinite);
+        }
+        let w = bounds.width();
+        let h = bounds.height();
+        if !w.is_finite() || !h.is_finite() {
+            return Err(Error::CoordinateLimit);
+        }
+        if w <= 0.0 || h <= 0.0 {
+            return Err(Error::DegenerateRing);
+        }
+        Ok(Self {
+            bounds,
+            radius: requested_radius.min(0.5 * w.min(h)),
+        })
+    }
+    pub fn bounds(self) -> Rect {
+        self.bounds
+    }
+    pub fn radius(self) -> f64 {
+        self.radius
+    }
+
+    /// Analytic Euclidean erosion of a rounded rectangle. It is permitted to
+    /// disappear. We do not silently shrink `inset` just to preserve the child.
+    pub fn inset(self, inset: f64) -> Result<InsetRect, Error> {
+        nonnegative(inset)?;
+        let collapsed = inset >= self.radius && inset > 0.0;
+        if inset >= 0.5 * self.bounds.width().min(self.bounds.height()) {
+            return Ok(InsetRect {
+                shape: None,
+                corner_collapsed: collapsed,
+            });
+        }
+        let bounds = self.bounds.inset(-inset);
+        Ok(InsetRect {
+            shape: Some(Self::new(bounds, (self.radius - inset).max(0.0))?),
+            corner_collapsed: collapsed,
+        })
+    }
+
+    /// Analytic Euclidean dilation of a rounded rectangle. The corresponding
+    /// convex arc radius grows by exactly `outset`, preserving a uniform shell.
+    pub fn outset(self, outset: f64) -> Result<Self, Error> {
+        nonnegative(outset)?;
+        let bounds = self.bounds.inset(outset);
+        Self::new(bounds, self.radius + outset)
+    }
+
+    /// All arcs are exact circles. Pixel approximation belongs to flattening.
+    pub fn path(self) -> Path {
+        let b = self.bounds;
+        let r = self.radius;
+        if r == 0.0 {
+            return Path {
+                commands: vec![
+                    PathCommand::MoveTo(b.origin()),
+                    PathCommand::LineTo(Point::new(b.x1, b.y0)),
+                    PathCommand::LineTo(Point::new(b.x1, b.y1)),
+                    PathCommand::LineTo(Point::new(b.x0, b.y1)),
+                    PathCommand::Close,
+                ],
+            };
+        }
+        let centers = [
+            Point::new(b.x1 - r, b.y0 + r),
+            Point::new(b.x1 - r, b.y1 - r),
+            Point::new(b.x0 + r, b.y1 - r),
+            Point::new(b.x0 + r, b.y0 + r),
+        ];
+        let starts = [-FRAC_PI_2, 0.0, FRAC_PI_2, 2.0 * FRAC_PI_2];
+        let ends = [
+            Point::new(b.x1, b.y0 + r),
+            Point::new(b.x1 - r, b.y1),
+            Point::new(b.x0, b.y1 - r),
+            Point::new(b.x0 + r, b.y0),
+        ];
+        let tangent_starts = [
+            Point::new(b.x1 - r, b.y0),
+            Point::new(b.x1, b.y1 - r),
+            Point::new(b.x0 + r, b.y1),
+            Point::new(b.x0, b.y0 + r),
+        ];
+        let mut commands = vec![PathCommand::MoveTo(Point::new(b.x0 + r, b.y0))];
+        for i in 0..4 {
+            commands.push(PathCommand::LineTo(tangent_starts[i]));
+            commands.push(PathCommand::ArcTo(Arc {
+                center: centers[i],
+                radius: r,
+                start_angle: starts[i],
+                sweep: FRAC_PI_2,
+                to: ends[i],
+            }));
+        }
+        commands.push(PathCommand::Close);
+        Path { commands }
+    }
+}

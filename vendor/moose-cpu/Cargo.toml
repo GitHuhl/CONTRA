@@ -1,0 +1,16 @@
+[package]
+name = "moose-cpu"
+description = "CPU rendering backend (tiny-skia + skrifa) for moose plugins"
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-font = {version = "7.0.0", features = ["raster"], path = "../moose-font"}
+moose-gui-types = {version = "7.0.0", path = "../moose-gui-types"}
+tiny-skia = "0.12"
+

@@ -1,0 +1,24 @@
+[package]
+name = "mui-scene"
+description = "A styled element tree lowered to a resolved, paint-ordered scene: MUI's El DSL, theme resolution and scene walk."
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[dependencies]
+# `sym`, in the prelude for `icon(sym::HOME)`.
+mui-weld = {path = "../mui-weld"}
+mui-geometry = {path = "../mui-geometry"}
+mui-style = {path = "../mui-style"}
+mui-motion = {path = "../mui-motion"}
+mui-layout = {path = "../mui-layout"}
+mui-text = {path = "../mui-text"}
+mui-symbols = {path = "../mui-symbols"}
+rustc-hash = {version = "2"}
+
+[dev-dependencies]
+mui-material = {path = "../mui-material"}
+epaint_default_fonts = {version = "0.36"}
+ttf-inter = {version = "0.1", default-features = false, features = ["v"]}
+

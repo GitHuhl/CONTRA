@@ -17,7 +17,7 @@ pub struct Folder {
 
 impl Folder {
     /// The folders of `presets` under `dir`; a preset outside it sits at the
-    /// top. A UVI bank is a folder like any other.
+    /// top.
     pub fn tree<'a>(dir: &Path, presets: impl IntoIterator<Item = &'a Path>) -> Self {
         let mut root = Folder {
             path: dir.to_path_buf(),

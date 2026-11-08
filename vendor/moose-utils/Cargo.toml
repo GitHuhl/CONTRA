@@ -1,0 +1,10 @@
+[package]
+name = "moose-utils"
+description = "Lightweight, dependency-free utilities shared across the moose workspace (numeric-cast helpers, slug)"
+version = "7.0.0"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+

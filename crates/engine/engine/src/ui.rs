@@ -89,7 +89,7 @@ impl Engine {
         Some(index.map_or(value, |i| i as i64))
     }
 
-    /// Script `slot`'s machine: a Lua page's widgets, the state it saves.
+    /// Script `slot`'s machine.
     pub fn vm(&self, slot: u8) -> Option<&kontra_vm::Vm> {
         self.vms.get(usize::from(slot))?.as_ref()
     }

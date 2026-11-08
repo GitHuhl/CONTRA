@@ -2,7 +2,7 @@
 //! a WAV file, for listening and A/B against other samplers. Prints load time,
 //! gaps and the script actions the engine does not answer yet.
 //! `cargo run --release -p kontra-host --example render -- <file> <key> <out.wav>`
-//! `<file>` is a Kontakt instrument, or a UVI program as `bank.ufs/Name.uvip`.
+//! `<file>` is a Kontakt instrument.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             for (name, bytes) in &s.data {
                 std::fs::write(
-                    // A UVI module's name is a path in its bank.
                     std::path::Path::new(&dir).join(format!("{n}-{}.nka", name.replace('/', "_"))),
                     bytes,
                 )?;
@@ -295,14 +294,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     // A quarter second after load before the first note, as a player gives
-    // a program: a script may wait while it loads (UVI `onLoad`).
+    // a program: a script may wait while it loads.
     let mut silent = vec![[0.0f32; 2]; 512];
     for _ in 0..RATE as usize / 4 / 512 {
         engine.process(&mut silent, &[]);
         install_requests(&mut engine, &plan);
     }
     // KONTRA_CONTROL=name=value,...: each script control (a KSP one named
-    // without its type prefix, a UVI widget or macro by its name) moves there
+    // without its type prefix) moves there
     // in turn and its callbacks run, as a user's edit would; its effect loads
     // install over a quarter second. "name=value@1.5" moves it 1.5 s into
     // the render instead, at the start of that block.

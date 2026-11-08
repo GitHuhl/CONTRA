@@ -1,0 +1,15 @@
+[package]
+name = "moose-plugin"
+description = "User-facing PluginLogic traits for moose - the plugin author's entry point."
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-gui-types = {version = "7.0.0", path = "../moose-gui-types"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+

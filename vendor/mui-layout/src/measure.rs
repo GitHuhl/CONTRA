@@ -1,0 +1,1103 @@
+//! The measure pass: intrinsic sizes, wrapping, grid rows and `fits`.
+//!
+//! One walk down the tree turning a [`Node`] into a `Measured` tree of
+//! sizes. It decides nothing about position -- that is `arrange` -- but it
+//! does pick which `fits` candidate survives.
+
+use super::*;
+
+pub(crate) struct Measured<'a, P> {
+    pub(crate) node: &'a Node<P>,
+    /// What the layout cache holds for this subtree; `None` without one.
+    pub(crate) frozen: Option<std::sync::Arc<crate::incremental::Frozen>>,
+    /// Slot among the parent's children, so a reordered placement can be
+    /// written back to the declaration order the frames keep.
+    pub(crate) index: usize,
+    pub(crate) gap: f64,
+    /// `line_gap` resolved: the gap between wrapped lines and grid rows.
+    pub(crate) line_gap: f64,
+    pub(crate) padding: Insets,
+    pub(crate) size: Size,
+    /// Effective local ceiling, retained by cached measurements for arrange.
+    pub(crate) extent_limit: f64,
+    /// The smallest this subtree may be squeezed to: every minimum in it,
+    /// summed along the axis they sit on.
+    pub(crate) floor: Size,
+    /// The children's extent inside the padding, before any definite size
+    /// overrides it: what a scroll node lays its children into.
+    pub(crate) content: Size,
+    /// Dependencies on the final flex share, separately for width and height:
+    /// wrapped content, percentage descendants, aspect ratios or grid tracks.
+    pub(crate) fluid: [bool; 2],
+    /// Whether descendants were measured with a definite height.
+    pub(crate) definite_height: bool,
+    /// A grid's resolved column count, after `min_col`; 0 for anything else.
+    /// Measured once so arrange cannot re-derive a different one.
+    pub(crate) cols: usize,
+    /// Explicit column widths settled during measure and reused by arrange.
+    pub(crate) columns: Vec<f64>,
+    pub(crate) rows: Vec<f64>,
+    /// A `Fits` node's chosen candidate; 0 for anything else. Picked once, at
+    /// measure, for the same reason as `cols`.
+    pub(crate) pick: usize,
+    /// The nearest definite ancestor extent per axis: what a
+    /// [`Len::Container`] on *this* node is a share of.
+    pub(crate) container: [Option<f64>; 2],
+    pub(crate) children: Vec<Measured<'a, P>>,
+}
+
+/// The in-flow children -- everything but the floats -- in placement order.
+/// The sort is stable, so `order` only moves what asked to be moved.
+pub(crate) fn flow_of<'a, 'm, P>(children: &'m [Measured<'a, P>]) -> Vec<&'m Measured<'a, P>> {
+    let mut flow: Vec<_> = children.iter().filter(|c| !c.node.float).collect();
+    if !flow.is_sorted_by_key(|c| c.node.order) {
+        flow.sort_by_key(|c| c.node.order);
+    }
+    flow
+}
+
+/// The smaller of two optional extents; `None` is unbounded.
+fn narrower(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Greedy line breaking: ranges into `flow`, each as long as it fits `avail`.
+/// A child wider than the line gets a line of its own.
+pub(crate) fn wrap_lines<P>(
+    flow: &[&Measured<'_, P>],
+    gap: f64,
+    vertical: bool,
+    avail: f64,
+) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let (mut start, mut used) = (0, 0.0);
+    for (i, c) in flow.iter().enumerate() {
+        let w = c.base(vertical, None);
+        if i > start && used + gap + w > avail + 1e-9 {
+            lines.push((start, i));
+            (start, used) = (i, w);
+        } else {
+            used += if i > start { gap + w } else { w };
+        }
+    }
+    lines.push((start, flow.len()));
+    lines
+}
+
+impl<'a, P> Measured<'a, P> {
+    pub(crate) fn flow(&self) -> Vec<&Measured<'a, P>> {
+        flow_of(&self.children)
+    }
+    /// Where this child starts before growth or shrink: a percentage of the
+    /// parent, a height derived from its aspect, its declared `basis`, or what
+    /// it measured. `inner` is `None` while the parent is still hugging.
+    pub(crate) fn base(&self, vertical: bool, inner: Option<Size>) -> f64 {
+        let value = self.flex_basis(vertical, inner);
+        self.node
+            .rare()
+            .maximum
+            .map_or(value, |m| value.min(m.main(vertical)))
+            .max(self.floor.main(vertical))
+    }
+    /// Unclamped basis: shrink weights use this, before min/max constraints.
+    pub(crate) fn flex_basis(&self, vertical: bool, inner: Option<Size>) -> f64 {
+        if let Some(basis) = self.node.basis {
+            return basis;
+        }
+        let fallback = || {
+            self.node
+                .len(vertical)
+                .px()
+                .unwrap_or(self.size.main(vertical))
+        };
+        let Some(inner) = inner else {
+            return fallback();
+        };
+        if self.node.rare().aspect_fit
+            && let Some((width, ratio)) = self.aspect_width(inner)
+        {
+            return if vertical { width / ratio } else { width };
+        }
+        match (self.node.len(vertical), self.aspect_width(inner)) {
+            (l @ (Len::Pct(_) | Len::Clamp { .. } | Len::Container(_)), _) => l
+                .fixed(inner.main(vertical), self.container[vertical as usize])
+                .unwrap_or_else(fallback),
+            (_, Some((w, a))) if vertical => w / a,
+            _ => fallback(),
+        }
+    }
+    /// Aspect is width-first, like CSS: when the height is `Auto`, the width
+    /// is whatever the node would have -- fixed, a share, or the parent's inner
+    /// width -- and the height follows.
+    pub(crate) fn aspect_width(&self, inner: Size) -> Option<(f64, f64)> {
+        let n = self.node;
+        let a = n.rare().aspect?;
+        if n.rare().aspect_fit {
+            let offered = Size::new(
+                n.width
+                    .fixed(inner.width, self.container[0])
+                    .unwrap_or(inner.width),
+                n.height
+                    .fixed(inner.height, self.container[1])
+                    .unwrap_or(inner.height),
+            );
+            return n.rare().fitted_aspect(offered).map(|size| (size.width, a));
+        }
+        if !matches!(n.height, Len::Auto) {
+            return None;
+        }
+        let cap = |v: f64| {
+            n.rare()
+                .maximum
+                .map_or(v, |m| v.min(m.width))
+                .max(n.minimum.width)
+        };
+        Some((
+            cap(n
+                .width
+                .fixed(inner.width, self.container[0])
+                .unwrap_or(inner.width)),
+            a,
+        ))
+    }
+    /// Size on one axis inside `avail`, given how it is aligned there.
+    pub(crate) fn extent(&self, vertical: bool, avail: f64, align: Align) -> f64 {
+        let n = self.node;
+        // A share of the parent is still never less than this subtree's floor:
+        // `height: 50%` on a padded node is a squeeze, not an error.
+        let cap = |v: f64| {
+            n.rare()
+                .maximum
+                .map_or(v, |m| v.min(m.cross(!vertical)))
+                .max(self.floor.main(vertical))
+        };
+        match n
+            .len(vertical)
+            .fixed(avail, self.container[vertical as usize])
+        {
+            Some(v) => cap(v),
+            None if align == Align::Stretch && n.is_container() => cap(avail),
+            // Content never keeps a cross extent wider than the room it was
+            // given: it would be centred half outside its own parent.
+            None => cap(self.size.main(vertical).min(avail)),
+        }
+    }
+}
+
+/// In a cell, `align` governs both axes until `justify` is actually set.
+pub(crate) fn cell_default<P>(n: &Node<P>) -> (Align, Align) {
+    let y = if n.justify == Justify::Start {
+        n.align
+    } else {
+        n.justify.as_align()
+    };
+    (n.align, y)
+}
+
+pub(crate) fn place(avail: f64, extent: f64, align: Align) -> f64 {
+    match align {
+        Align::Start => 0.0,
+        // Stretched past the room by its floor, it overflows the far edge
+        // like CSS: centred, its top would leave the window.
+        Align::Stretch if extent > avail => 0.0,
+        Align::End => avail - extent,
+        _ => (avail - extent) * 0.5,
+    }
+}
+
+pub(crate) fn effective_limits<P>(node: &Node<P>, mut limits: Limits) -> Result<Limits, Error> {
+    if let Some(extent) = node.rare().layout_extent_limit {
+        if !extent.is_finite() || extent <= 0.0 {
+            return Err(Error::InvalidValue);
+        }
+        limits.extent = limits.extent.min(extent);
+    }
+    Ok(limits)
+}
+
+pub(crate) fn validate_node<P>(node: &Node<P>, l: Limits) -> Result<(), Error> {
+    let l = effective_limits(node, l)?;
+    let finite = |v: f64| v.is_finite() && (0.0..=l.extent).contains(&v);
+    if node.id.as_deref().is_some_and(str::is_empty)
+        || !node.minimum.valid(l.extent)
+        || node.rare().maximum.is_some_and(|s| !s.valid(l.extent))
+        || !node.padding.valid(l.extent)
+        || ![node.grow, node.shrink].iter().all(|v| finite(*v))
+        || node.basis.is_some_and(|b| !finite(b))
+        || !node.width.valid(l.extent)
+        || !node.height.valid(l.extent)
+        || node
+            .rare()
+            .aspect
+            .is_some_and(|a| !(a.is_finite() && a > 0.0))
+        || !node
+            .offset
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= l.extent)
+        || matches!(node.kind, Kind::Grid { cols, .. } if cols == 0 || cols > l.nodes.min(isize::MAX as usize / size_of::<crate::GridTrack>()))
+        || node.rare().min_col.is_some_and(|v| !finite(v))
+        || node.rare().grid_tracks.as_ref().is_some_and(|tracks| {
+            !matches!(node.kind, Kind::Grid { .. })
+                || tracks.is_empty()
+                || tracks.len() > l.nodes
+                || tracks.iter().any(|t| !t.valid(l))
+                || node.rare().min_col.is_some()
+        })
+        || node.rare().grid_rows.as_ref().is_some_and(|tracks| {
+            !matches!(node.kind, Kind::Grid { .. })
+                || tracks.len() > l.nodes
+                || tracks.iter().any(|t| !t.valid(l))
+        })
+        || node.rare().grid_row_span
+            > l.nodes
+                .min(isize::MAX as usize / size_of::<crate::GridTrack>())
+        || node
+            .rare()
+            .grid_position
+            .is_some_and(|p| p.iter().any(|&v| v >= l.nodes))
+    {
+        return Err(Error::InvalidValue);
+    }
+    if let Some(max) = node.rare().maximum
+        && (max.width + 1e-9 < node.minimum.width || max.height + 1e-9 < node.minimum.height)
+    {
+        return Err(Error::InvalidValue);
+    }
+    Ok(())
+}
+
+/// Rows of a grid, splitting where the spans fill the column count. A cell
+/// wider than the grid takes a row alone.
+pub(crate) fn grid_rows<'a, 'm, P>(
+    children: &'m [&'m Measured<'a, P>],
+    cols: usize,
+) -> Vec<&'m [&'m Measured<'a, P>]> {
+    let mut rows = Vec::new();
+    let (mut start, mut used) = (0, 0);
+    for (i, c) in children.iter().enumerate() {
+        let span = c.node.span.clamp(1, cols.max(1));
+        if i > start && used + span > cols.max(1) {
+            rows.push(&children[start..i]);
+            (start, used) = (i, span);
+        } else {
+            used += span;
+        }
+    }
+    if start < children.len() {
+        rows.push(&children[start..]);
+    }
+    rows
+}
+
+/// What a parent can promise a child about its outer size before layout runs:
+/// a fixed length, a share of a definite inner extent, or -- for a container
+/// (or an aspect-ratio node) that will be stretched -- that extent itself.
+/// `None` is "measure yourself".
+pub(crate) fn offer<P>(
+    c: &Node<P>,
+    vertical: bool,
+    inner: Option<f64>,
+    container: Option<f64>,
+    stretch: bool,
+) -> Option<f64> {
+    match c.len(vertical) {
+        Len::Px(v) => Some(v),
+        Len::Auto => inner.filter(|_| stretch && (c.is_container() || c.rare().aspect.is_some())),
+        // A container share needs no definite parent: that is the point of it.
+        Len::Container(p) => container.map(|cq| cq * p / 100.0),
+        l => inner.and_then(|i| l.fixed(i, container)),
+    }
+}
+
+/// `measurer` answering [`Intrinsic`], as [`Pass`] holds it.
+pub(crate) fn intrinsic<P, M: Into<Intrinsic>>(
+    mut measurer: impl FnMut(&P, Option<f64>) -> M,
+) -> impl FnMut(&P, Option<f64>) -> Intrinsic {
+    move |p, room| measurer(p, room).into()
+}
+
+/// One measure pass: the budget, the id set and the content measurer.
+pub(crate) struct Pass<'a, 'f, P> {
+    pub(crate) left: usize,
+    pub(crate) limits: Limits,
+    pub(crate) scale: SpacingScale,
+    pub(crate) keys: rustc_hash::FxHashSet<&'a str>,
+    /// Inside a re-measure: ids are already checked and the subtree is being
+    /// measured a second time at its final main size.
+    pub(crate) redo: bool,
+    /// Any node carries a [`Pin`], so arrange runs a second pass with the
+    /// anchor frames the first one found.
+    pub(crate) pinned: bool,
+    pub(crate) measurer: &'f mut dyn FnMut(&P, Option<f64>) -> Intrinsic,
+    pub(crate) cache: Option<&'f mut LayoutCache>,
+    /// The root's padding when its box is given rather than declared; see
+    /// [`resolve_boxed_with`]. Taken by the first node measured, the root.
+    pub(crate) boxed: Option<Insets>,
+}
+
+/// `room` is the narrowest definite inner width above this node (a grid
+/// column counts; a scroll node stops it), handed to content so a paragraph
+/// can wrap in the first and only pass. It is the room, not the flex share:
+/// a row still squeezes its content after measuring.
+pub(crate) use crate::incremental::measure_cached as measure;
+pub(crate) fn measure_uncached<'a, P>(
+    node: &'a Node<P>,
+    ancestor: &str,
+    definite: [Option<f64>; 2],
+    room: Option<f64>,
+    container: [Option<f64>; 2],
+    depth: usize,
+    pass: &mut Pass<'a, '_, P>,
+) -> Result<Measured<'a, P>, Error> {
+    let l = effective_limits(node, pass.limits)?;
+    if depth > l.depth || (!pass.redo && pass.left == 0) {
+        return Err(Error::BudgetExceeded);
+    }
+    pass.pinned |= node.rare().pin.is_some();
+    let boxed = pass.boxed.take();
+    // The node budget counts nodes: a re-measure at the final share visits a
+    // subtree again but adds nothing to the tree.
+    if !pass.redo {
+        pass.left -= 1;
+    }
+    // The cache's prepass has already validated every node.
+    if pass.cache.is_none() {
+        validate_node(node, l)?;
+    }
+    let padding = boxed.unwrap_or_else(|| node.padding(pass.scale));
+    let gap = node.gap.resolve(pass.scale);
+    let line_gap = node.rare().line_gap.map_or(gap, |g| g.resolve(pass.scale));
+    if !([gap, line_gap]
+        .iter()
+        .all(|g| g.is_finite() && (0.0..=l.extent).contains(g))
+        && padding.valid(l.extent))
+    {
+        return Err(Error::InvalidValue);
+    }
+    if let Some(id) = node
+        .id
+        .as_deref()
+        .filter(|_| !pass.redo && pass.cache.is_none())
+        && !pass.keys.insert(id)
+    {
+        return Err(Error::DuplicateKey(id.to_string()));
+    }
+    let here = node.id.as_deref().unwrap_or(ancestor);
+    // Aspect is width-first, like CSS: a definite width settles the height,
+    // and only a definite height with no width settles the width.
+    // A flex item may use an explicit extent as its intrinsic basis while its
+    // parent is still measuring the branch. Once remeasured at the final flex
+    // share, that share is authoritative for dependent descendants. Keep the
+    // declared extent for the first pass and for nodes that opted out of both growth and shrink;
+    // those are genuinely fixed even when a parent has spare room.
+    let flex_width = node.width.px().filter(|_| {
+        !(pass.redo && definite[0].is_some() && (node.grow > 0.0 || node.shrink > 0.0))
+    });
+    // A given box is the offered size on both axes, whatever the node says.
+    let mut definite = match boxed {
+        Some(_) => definite,
+        None => [
+            flex_width.or(definite[0]),
+            node.height
+                .px()
+                .filter(|_| {
+                    !(pass.redo && definite[1].is_some() && (node.grow > 0.0 || node.shrink > 0.0))
+                })
+                .or(definite[1]),
+        ],
+    };
+    if boxed.is_none() {
+        for (axis, value) in definite.iter_mut().enumerate() {
+            *value = value.map(|v| {
+                node.rare()
+                    .maximum
+                    .map_or(v, |m| v.min(m.main(axis == 1)))
+                    .max(node.minimum.main(axis == 1))
+            });
+        }
+    }
+    if let Some(a) = node.rare().aspect.filter(|_| boxed.is_none()) {
+        if node.rare().aspect_fit {
+            if definite.iter().any(Option::is_some) {
+                let fitted = node
+                    .rare()
+                    .fitted_aspect(Size::new(
+                        definite[0].unwrap_or(f64::INFINITY),
+                        definite[1].unwrap_or(f64::INFINITY),
+                    ))
+                    .unwrap();
+                definite = [Some(fitted.width), Some(fitted.height)];
+            }
+        } else {
+            match (definite, node.height, node.width) {
+                ([Some(w), _], Len::Auto, _) => definite[1] = Some(w / a),
+                ([None, Some(h)], _, Len::Auto) => definite[0] = Some(h * a),
+                _ => {}
+            }
+        }
+    }
+    let inner = [
+        definite[0].map(|w| (w - padding.horizontal()).max(0.0)),
+        definite[1].map(|h| (h - padding.vertical()).max(0.0)),
+    ];
+    let room = narrower(room.map(|r| (r - padding.horizontal()).max(0.0)), inner[0]);
+    // A grid's column count is settled once, before anything is offered a
+    // column's worth of room: `min_col` makes the declared count a ceiling and
+    // drops columns until each one clears it. Everything downstream reads
+    // `Measured::cols`.
+    // ponytail: a hugging grid, with no offered width at all, keeps its
+    // declared count. Put a knob bank where its width is definite (a flex
+    // share now counts: the flex pass re-measures its items) until a hugging
+    // grid learns a width to drop columns against.
+    let cols = match node.kind {
+        Kind::Grid { cols, ref children } => match (node.rare().min_col, inner[0]) {
+            (Some(min), Some(w)) if min > 0.0 => {
+                let fit = (((w + gap) / (min + gap)).floor() as usize).clamp(1, cols);
+                // A dropped column count evens its rows out: six cells that
+                // fit four across wrap 3+3, not 4+2.
+                let slots: usize = children
+                    .iter()
+                    .filter(|c| !c.float)
+                    .map(|c| c.span.clamp(1, fit))
+                    .sum();
+                if fit < cols && slots > fit {
+                    slots.div_ceil(slots.div_ceil(fit))
+                } else {
+                    fit
+                }
+            }
+            _ => cols,
+        },
+        _ => 0,
+    };
+    let explicit_tracks = node.rare().grid_tracks.clone().or_else(|| {
+        if matches!(node.kind, Kind::Grid { .. })
+            && (node.rare().grid_rows.is_some()
+                || node
+                    .children()
+                    .iter()
+                    .any(|c| c.rare().grid_position.is_some() || c.rare().grid_row_span > 1))
+        {
+            Some(vec![crate::GridTrack::MinFr { min: 0.0, fr: 1.0 }; cols])
+        } else {
+            None
+        }
+    });
+    // A box with a definite inner extent is the container everything under it
+    // takes a `Len::Container` share of, until a nearer one says otherwise.
+    // ponytail: a grid column is room, not a container; make it one if a
+    // `cq()` inside a cell ever needs the cell rather than the grid.
+    let sub = [inner[0].or(container[0]), inner[1].or(container[1])];
+    let mut children = Vec::with_capacity(node.children().len());
+    for (index, c) in node.children().iter().enumerate() {
+        let align = c.align_self.unwrap_or(node.align);
+        let mut child_room = room.filter(|_| !node.scroll);
+        let promise = match &node.kind {
+            // Candidates are measured at what they would like to be: a
+            // stretched one would fit every time and pick itself.
+            Kind::Fits(_) if !c.float => [
+                offer(c, false, inner[0], sub[0], false),
+                offer(c, true, inner[1], sub[1], false),
+            ],
+            _ if c.float => {
+                let (ax, ay) = c.anchor.unwrap_or(cell_default(node));
+                [
+                    offer(c, false, inner[0], sub[0], ax == Align::Stretch),
+                    offer(c, true, inner[1], sub[1], ay == Align::Stretch),
+                ]
+            }
+            Kind::Branch { vertical, .. } => {
+                let v = *vertical;
+                let cross = offer(
+                    c,
+                    !v,
+                    inner[!v as usize],
+                    sub[!v as usize],
+                    align == Align::Stretch,
+                );
+                let main = offer(c, v, inner[v as usize], sub[v as usize], false);
+                if v { [cross, main] } else { [main, cross] }
+            }
+            Kind::Overlay(_) | Kind::Content(_) => {
+                let (ax, ay) = c.anchor.unwrap_or(cell_default(node));
+                [
+                    offer(c, false, inner[0], sub[0], ax == Align::Stretch),
+                    offer(c, true, inner[1], sub[1], ay == Align::Stretch),
+                ]
+            }
+            Kind::Grid { .. } if explicit_tracks.is_none() => {
+                let (ax, _) = c.anchor.unwrap_or(cell_default(node));
+                let span = c.span.clamp(1, cols) as f64;
+                let col = inner[0].map(|w| {
+                    ((w - gap * (cols - 1) as f64).max(0.0) / cols as f64) * span
+                        + gap * (span - 1.0)
+                });
+                child_room = narrower(child_room, col);
+                [offer(c, false, col, sub[0], ax == Align::Stretch), None]
+            }
+            Kind::Grid { .. } => {
+                child_room = None;
+                [None; 2]
+            }
+            _ => [None; 2],
+        };
+        let mut m = measure(c, here, promise, child_room, sub, depth + 1, pass)?;
+        m.index = index;
+        children.push(m);
+    }
+    let mut grid_placements = Vec::new();
+    let columns = if let Some(tracks) = &explicit_tracks {
+        grid_placements = crate::grid::placements(&flow_of(&children), cols, l.nodes)?;
+        let widths = crate::grid::tracks(
+            tracks,
+            &flow_of(&children),
+            &grid_placements,
+            gap,
+            inner[0],
+            false,
+            false,
+        );
+        for p in &grid_placements {
+            let width = widths[p.column..p.column + p.column_span]
+                .iter()
+                .sum::<f64>()
+                + gap * (p.column_span - 1) as f64;
+            let child = &node.children()[p.index];
+            let (ax, _) = child.anchor.unwrap_or(cell_default(node));
+            let promise = [
+                offer(child, false, Some(width), sub[0], ax == Align::Stretch),
+                None,
+            ];
+            let was = std::mem::replace(&mut pass.redo, true);
+            let measured = measure(child, here, promise, Some(width), sub, depth + 1, pass);
+            pass.redo = was;
+            children[p.index] = measured?;
+            children[p.index].index = p.index;
+        }
+        widths
+    } else {
+        Vec::new()
+    };
+    let row_tracks = if explicit_tracks.is_some() {
+        let mut tracks = node.rare().grid_rows.clone().unwrap_or_default();
+        let count = grid_placements
+            .iter()
+            .map(|p| p.row + p.row_span)
+            .max()
+            .unwrap_or(0);
+        tracks.resize(tracks.len().max(count), crate::GridTrack::Auto);
+        tracks
+    } else {
+        Vec::new()
+    };
+    let rows = if explicit_tracks.is_some() {
+        crate::grid::tracks(
+            &row_tracks,
+            &flow_of(&children),
+            &grid_placements,
+            line_gap,
+            inner[1],
+            false,
+            true,
+        )
+    } else {
+        Vec::new()
+    };
+    // A stretched grid child must learn both axes before arranging its own
+    // descendants (percentage heights and nested row tracks depend on this).
+    for p in &grid_placements {
+        let width = columns[p.column..p.column + p.column_span]
+            .iter()
+            .sum::<f64>()
+            + gap * (p.column_span - 1) as f64;
+        let height = rows[p.row..p.row + p.row_span].iter().sum::<f64>()
+            + line_gap * (p.row_span - 1) as f64;
+        let child = &node.children()[p.index];
+        let (ax, ay) = child.anchor.unwrap_or(cell_default(node));
+        let promise = [
+            offer(child, false, Some(width), sub[0], ax == Align::Stretch),
+            offer(child, true, Some(height), sub[1], ay == Align::Stretch),
+        ];
+        let was = std::mem::replace(&mut pass.redo, true);
+        let measured = measure(child, here, promise, Some(width), sub, depth + 1, pass);
+        pass.redo = was;
+        children[p.index] = measured?;
+        children[p.index].index = p.index;
+    }
+    // Largest first, so the first candidate that clears both offered axes is
+    // the richest one that fits. An axis with no offer never rejects. A float
+    // is no candidate: it floats over whichever one wins.
+    let pick = match &node.kind {
+        Kind::Fits(_) => {
+            let fits = |m: &Measured<'_, P>| {
+                inner[0].is_none_or(|w| m.size.width <= w + 1e-8)
+                    && inner[1].is_none_or(|h| m.size.height <= h + 1e-8)
+            };
+            let mut candidates = children.iter().enumerate().filter(|(_, c)| !c.node.float);
+            let last = candidates.clone().next_back().map_or(0, |(i, _)| i);
+            candidates.find(|(_, c)| fits(c)).map_or(last, |(i, _)| i)
+        }
+        _ => 0,
+    };
+    // A flex item only learns its final main size once the branch's surplus
+    // or deficit is dealt. Subtrees that depend on that axis (wrapped text,
+    // percentage descendants, or explicit grid tracks) must be measured at
+    // the share they actually got. This settles the branch's cross size and
+    // cached descendant tracks in the same pass. Wrapped branches distribute
+    // each line independently before remeasuring that line's fluid children.
+    if let Kind::Branch { vertical, .. } = node.kind
+        && let Some(avail) = inner[usize::from(vertical)]
+        && children
+            .iter()
+            .any(|c| c.fluid[usize::from(vertical)] && !c.node.float)
+    {
+        let axis = usize::from(vertical);
+        // Per child: the main extent it was last remeasured at.
+        let mut at: Vec<Option<f64>> = vec![None; children.len()];
+        // A re-measure can change what a child may be squeezed to -- a
+        // `min_col` grid drops columns and its floor with them -- so the row
+        // is dealt again until no share moves: arrange deals it once more
+        // from the same bases and floors and must land where measure did.
+        // ponytail: bounded at three rounds; a row still moving after that
+        // arranges within a round's drift of what it measured.
+        for _ in 0..3 {
+            let shares: Vec<(usize, f64)> = {
+                let flow = flow_of(&children);
+                if flow.iter().any(|c| c.fluid[axis]) {
+                    // A scrolling branch deals what arrange will lay it into: its
+                    // content where that overflows, so nothing is squeezed to
+                    // the viewport and wrapped a letter a line.
+                    let avail = if node.scroll {
+                        let bases = flow.iter().map(|c| c.base(vertical, None)).sum::<f64>();
+                        avail.max(bases + gap * flow.len().saturating_sub(1) as f64)
+                    } else {
+                        avail
+                    };
+                    let inner = Size::axes(avail, inner[1 - axis].unwrap_or(0.0), vertical);
+                    let lines = if node.wrap {
+                        wrap_lines(&flow, gap, vertical, avail)
+                    } else {
+                        vec![(0, flow.len())]
+                    };
+                    lines
+                        .into_iter()
+                        .flat_map(|(start, end)| {
+                            let line = &flow[start..end];
+                            let main = distribute(line, gap, vertical, inner);
+                            line.iter().map(|c| c.index).zip(main).collect::<Vec<_>>()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            let mut moved = false;
+            for (index, main) in shares {
+                let c = &node.children()[index];
+                let main = c
+                    .rare()
+                    .maximum
+                    .map_or(main, |m| main.min(m.main(vertical)));
+                // Width reflow keeps its half-pixel growth tolerance. Explicit
+                // row tracks depend on every change of the final height.
+                let basis = children[index].size.main(vertical);
+                let was_at = at[index].unwrap_or(basis);
+                // An intrinsic basis (including a capped one) can equal the
+                // final share while descendants still have no definite height.
+                let unsettled_height =
+                    vertical && at[index].is_none() && !children[index].definite_height;
+                let unchanged = if vertical {
+                    (main - was_at).abs() < 1e-8
+                } else {
+                    (0.0..=0.5).contains(&(main - was_at))
+                };
+                if !children[index].fluid[axis] || unchanged && !unsettled_height {
+                    continue;
+                }
+                let align = c.align_self.unwrap_or(node.align);
+                let cross = offer(
+                    c,
+                    !vertical,
+                    inner[1 - axis],
+                    sub[1 - axis],
+                    align == Align::Stretch,
+                );
+                let promise = if vertical {
+                    [cross, Some(main)]
+                } else {
+                    [Some(main), cross]
+                };
+                let was = std::mem::replace(&mut pass.redo, true);
+                let child_room = if vertical {
+                    narrower(room.filter(|_| !node.scroll), cross)
+                } else {
+                    Some(main)
+                };
+                let m = measure(c, here, promise, child_room, sub, depth + 1, pass);
+                pass.redo = was;
+                // The re-measure settles what is inside, the cross size and
+                // the floor; the basis stays the first pass's. Dealt from the
+                // share instead, a shrinking row squeezes the item a second
+                // time, narrower than anything under it was measured at.
+                let slot = &mut children[index];
+                *slot = m?;
+                let m = slot;
+                (m.size, m.index) = (Size::axes(basis, m.size.cross(vertical), vertical), index);
+                // The cached snapshot is the re-measure's own; this one differs.
+                m.frozen = None;
+                at[index] = Some(main);
+                moved = true;
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+    let flow = flow_of(&children);
+    let max_of =
+        |g: &dyn Fn(&Measured<'_, P>) -> f64| flow.iter().map(|c| g(c)).fold(0.0, f64::max);
+    let (content, sunk) = match &node.kind {
+        Kind::Leaf => (Size::ZERO, Size::ZERO),
+        Kind::Content(_) => {
+            let Intrinsic { size, min_width } = (pass.measurer)(&node.payload, room);
+            if !size.valid(l.extent) || !(0.0..=l.extent).contains(&min_width) {
+                return Err(Error::InvalidValue);
+            }
+            // Never narrower than it may be squeezed to: a word wider than the
+            // room overflows it. In-flow children overlay it, as on a stack.
+            let content = Size::new(
+                size.width.max(min_width).max(max_of(&|c| c.size.width)),
+                size.height.max(max_of(&|c| c.size.height)),
+            );
+            // Nor shorter than it measured: its height is the lines it breaks
+            // into at this width, and a column squeezed past that overflows
+            // instead of painting each paragraph over the one below it.
+            (
+                content,
+                Size::new(min_width.max(max_of(&|c| c.floor.width)), content.height),
+            )
+        }
+        Kind::Branch { vertical: v, .. } => {
+            let v = *v;
+            let gaps = flow.len().saturating_sub(1) as f64 * gap;
+            // Intrinsic main is not the sum of the children: a child with a
+            // `basis` contributes that instead, and then the row has to be
+            // wide enough that its *share* of the surplus still clears its
+            // content. This is the flex fraction. Without it a hugging row
+            // collapses to its non-flexible children and squashes the rest.
+            let base = flow.iter().map(|c| c.base(v, None)).sum::<f64>();
+            let total_grow = flow.iter().map(|c| c.node.grow).sum::<f64>();
+            let surplus = flow
+                .iter()
+                .filter(|c| c.node.grow > 0.0)
+                .map(|c| (c.size.main(v) - c.base(v, None)) * total_grow / c.node.grow)
+                .fold(0.0, f64::max);
+            let floor_main = flow.iter().map(|c| c.floor.main(v)).sum::<f64>() + gaps;
+            // A wrapping row measured under an offered main axis (or, across,
+            // the room) is as tall as its lines. With neither there is
+            // nothing to break against, so it stays one line.
+            // ponytail: the cross floor stays the single-line one, so a squeeze
+            // past the measured width overflows instead of erroring.
+            // A row with no width of its own breaks against the room, as a
+            // paragraph does, and is as wide as its longest line: that is its
+            // flex basis, so a hugging ancestor never takes it as one line.
+            let offered = inner[v as usize];
+            if let Some(avail) = node
+                .wrap
+                .then_some(offered.or(room.filter(|_| !v)))
+                .flatten()
+            {
+                let lines = wrap_lines(&flow, gap, v, avail);
+                let main = offered.unwrap_or_else(|| {
+                    lines
+                        .iter()
+                        .map(|(a, b)| {
+                            flow[*a..*b].iter().map(|c| c.base(v, None)).sum::<f64>()
+                                + gap * (b - a - 1) as f64
+                        })
+                        .fold(0.0, f64::max)
+                });
+                let cross = lines
+                    .iter()
+                    .map(|(a, b)| {
+                        flow[*a..*b]
+                            .iter()
+                            .map(|c| c.size.cross(v))
+                            .fold(0.0, f64::max)
+                    })
+                    .sum::<f64>()
+                    + line_gap * lines.len().saturating_sub(1) as f64;
+                let sunk_main = if node.scroll {
+                    0.0
+                } else {
+                    max_of(&|c| c.floor.main(v))
+                };
+                (
+                    Size::axes(main, cross, v),
+                    Size::axes(sunk_main, max_of(&|c| c.floor.cross(v)), v),
+                )
+            } else {
+                (
+                    Size::axes(base + surplus + gaps, max_of(&|c| c.size.cross(v)), v),
+                    // A scroll node can always be squeezed on its main axis.
+                    Size::axes(
+                        if node.scroll { 0.0 } else { floor_main },
+                        max_of(&|c| c.floor.cross(v)),
+                        v,
+                    ),
+                )
+            }
+        }
+        Kind::Overlay(_) => (
+            Size::new(max_of(&|c| c.size.width), max_of(&|c| c.size.height)),
+            Size::new(max_of(&|c| c.floor.width), max_of(&|c| c.floor.height)),
+        ),
+        // The chosen candidate is the whole content; the rest were measured
+        // and dropped, and cost nothing but their measure.
+        Kind::Fits(_) => children
+            .get(pick)
+            .map_or((Size::ZERO, Size::ZERO), |c| (c.size, c.floor)),
+        Kind::Grid { .. } if explicit_tracks.is_some() => {
+            let floor_columns = crate::grid::tracks(
+                explicit_tracks.as_ref().unwrap(),
+                &flow,
+                &grid_placements,
+                gap,
+                inner[0],
+                true,
+                false,
+            );
+            let floor_rows = crate::grid::tracks(
+                &row_tracks,
+                &flow,
+                &grid_placements,
+                line_gap,
+                inner[1],
+                true,
+                true,
+            );
+            let width = |tracks: &[f64]| {
+                tracks.iter().sum::<f64>() + gap * tracks.len().saturating_sub(1) as f64
+            };
+            let height = |tracks: &[f64]| {
+                tracks.iter().sum::<f64>() + line_gap * tracks.len().saturating_sub(1) as f64
+            };
+            (
+                Size::new(width(&columns), height(&rows)),
+                Size::new(width(&floor_columns), height(&floor_rows)),
+            )
+        }
+        Kind::Grid { .. } => {
+            let rows = grid_rows(&flow, cols);
+            let gaps = |n: f64| (n - 1.0).max(0.0) * gap;
+            // With no width offered there is nothing to drop columns against,
+            // so the declared count stands -- but `min_col` is still a column
+            // minimum, and a hugging parent (a modal, a popover) must widen to
+            // it instead of squeezing its cells below it. It widens the hug
+            // only: the floor stays the cells' own, so a flex ancestor can
+            // still squeeze the grid and have it drop columns.
+            let col_min = node
+                .rare()
+                .min_col
+                .filter(|_| inner[0].is_none())
+                .unwrap_or(0.0);
+            let hug = |g: fn(&Measured<'_, P>) -> Size, col_min: f64| {
+                // A spanning cell pays for its span, so its share of one
+                // column is what sets the column width.
+                let widest = flow
+                    .iter()
+                    .map(|c| g(c).width / c.node.span.clamp(1, cols) as f64)
+                    .fold(col_min, f64::max);
+                let tall: f64 = rows
+                    .iter()
+                    .map(|r| r.iter().map(|c| g(c).height).fold(0.0, f64::max))
+                    .sum();
+                Size::new(
+                    widest * cols as f64 + gaps(cols as f64),
+                    tall + (rows.len() as f64 - 1.0).max(0.0) * line_gap,
+                )
+            };
+            // A `min_col` grid drops columns as it is squeezed, down to one:
+            // its widest cell is how narrow it gets, whatever it has now.
+            let mut floor = hug(|c| c.floor, 0.0);
+            if node.rare().min_col.is_some() {
+                floor.width = max_of(&|c| c.floor.width);
+            }
+            (hug(|c| c.size, col_min), floor)
+        }
+    };
+    if node.rare().layout_extent_limit.is_some() {
+        // A small viewport may contain explicitly raised virtual spacers.
+        // Ordinary scrolls keep the normal ceiling even if another subtree
+        // raised this solve's global ceiling.
+        let content_limit = if node.scroll {
+            flow.iter().map(|c| c.extent_limit).fold(l.extent, f64::max)
+        } else {
+            l.extent
+        };
+        if !content.valid(content_limit) {
+            return Err(Error::BudgetExceeded);
+        }
+    }
+    let pad = |s: Size| {
+        Size::new(
+            (s.width + padding.horizontal()).max(node.minimum.width),
+            (s.height + padding.vertical()).max(node.minimum.height),
+        )
+    };
+    let hug = pad(content);
+    let size = Size::new(
+        definite[0].unwrap_or(hug.width).max(node.minimum.width),
+        definite[1].unwrap_or(hug.height).max(node.minimum.height),
+    );
+    let floor = match node.vertical() {
+        Some(v) if node.scroll => Size::axes(
+            if v {
+                padding.vertical()
+            } else {
+                padding.horizontal()
+            }
+            .max(node.minimum.main(v)),
+            pad(sunk).cross(v),
+            v,
+        ),
+        // A scrolling stack has no main axis, so it scrolls on both and
+        // neither floor holds. Its content floor would otherwise pin it open
+        // and squeeze its siblings instead: `stack![body].scroll()` beside a
+        // header shrank the header and never overflowed at all.
+        None if node.scroll && matches!(node.kind, Kind::Overlay(_)) => Size::new(
+            padding.horizontal().max(node.minimum.width),
+            padding.vertical().max(node.minimum.height),
+        ),
+        _ => pad(sunk),
+    };
+    // A size the node declares itself is also its floor: `.size(10., 10.).pad(6.)`
+    // is a 10x10 box with no room inside, not a layout error.
+    let cap = |f: f64, l: Len, given: Option<f64>| {
+        let own = if boxed.is_some() { given } else { l.px() };
+        own.map_or(f, |v| f.min(v))
+    };
+    let floor = Size::new(
+        cap(floor.width, node.width, definite[0]).max(node.minimum.width),
+        cap(floor.height, node.height, definite[1]).max(node.minimum.height),
+    );
+    if !size.valid(l.extent) {
+        return Err(Error::BudgetExceeded);
+    }
+    // A maximum wins over content and floor alike: what does not fit
+    // overflows the box.
+    let (size, floor) = match node.rare().maximum {
+        Some(max) => (
+            Size::new(size.width.min(max.width), size.height.min(max.height)),
+            Size::new(floor.width.min(max.width), floor.height.min(max.height)),
+        ),
+        None => (size, floor),
+    };
+    let (size, floor) = match node.rare().fitted_aspect(size) {
+        Some(fitted) => (
+            fitted,
+            Size::new(
+                floor.width.min(fitted.width),
+                floor.height.min(fitted.height),
+            ),
+        ),
+        None => (size, floor),
+    };
+    // Decorations receive the real foreground-derived box, never an
+    // intrinsic offer that could make them size their own foreground.
+    let decoration_box = [
+        Some((size.width - padding.horizontal()).max(0.0)),
+        Some((size.height - padding.vertical()).max(0.0)),
+    ];
+    for (index, child) in node.children().iter().enumerate() {
+        if !child.is_underlay() && !child.is_overlay() {
+            continue;
+        }
+        let (ax, ay) = child.anchor.unwrap_or(cell_default(node));
+        let promise = [
+            offer(
+                child,
+                false,
+                decoration_box[0],
+                decoration_box[0],
+                ax == Align::Stretch,
+            ),
+            offer(
+                child,
+                true,
+                decoration_box[1],
+                decoration_box[1],
+                ay == Align::Stretch,
+            ),
+        ];
+        let was = std::mem::replace(&mut pass.redo, true);
+        let measured = measure(
+            child,
+            here,
+            promise,
+            decoration_box[0],
+            decoration_box,
+            depth + 1,
+            pass,
+        );
+        pass.redo = was;
+        children[index] = measured?;
+        children[index].index = index;
+    }
+    // A squeezed flex row re-measures its fluid items, which is the one
+    // chance a `fits` inside one gets to pick against its real share.
+    // Percentage-like widths and aspect ratios resolve from a flex ancestor's
+    // final share. Carry that local dependency through the measured child bit;
+    // the existing child propagation handles overlays and scroll wrappers
+    // without rescanning their descendants or pulling floats into the chain.
+    let width_fluid = matches!(
+        node.width,
+        Len::Pct(_) | Len::Clamp { .. } | Len::Container(_)
+    ) || node.rare().aspect.is_some();
+    let wrap_fluid = matches!(
+        node.kind,
+        Kind::Branch {
+            vertical: false,
+            ..
+        }
+    ) && node.wrap;
+    let fluid = matches!(node.kind, Kind::Content(_) | Kind::Fits(_))
+        || (node.rare().min_col.is_some()
+            && inner[0].is_none()
+            && matches!(node.kind, Kind::Grid { .. }))
+        || children.iter().any(|c| c.fluid[0] && !c.node.float)
+        || width_fluid
+        || explicit_tracks.is_some()
+        || wrap_fluid;
+    let height_fluid = matches!(
+        node.height,
+        Len::Pct(_) | Len::Clamp { .. } | Len::Container(_)
+    ) || node.rare().aspect.is_some()
+        || node.rare().grid_rows.is_some()
+        || matches!(node.kind, Kind::Fits(_))
+        || matches!(node.kind, Kind::Branch { vertical: true, .. }) && node.wrap
+        || children.iter().any(|c| c.fluid[1] && !c.node.float);
+    Ok(Measured {
+        node,
+        frozen: None,
+        index: 0,
+        fluid: [fluid, height_fluid],
+        definite_height: definite[1].is_some(),
+        gap,
+        line_gap,
+        padding,
+        size,
+        extent_limit: l.extent,
+        floor,
+        content,
+        cols,
+        columns,
+        rows,
+        pick,
+        container,
+        children,
+    })
+}

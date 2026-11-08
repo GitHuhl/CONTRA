@@ -1,0 +1,25 @@
+[package]
+name = "moose-driver"
+description = "Headless driver for moose plugins - instantiate, feed scripted audio + events, capture output"
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+hound = {version = "3", optional = true}
+
+[features]
+default = []
+# Adds `DriverResult::write_wav(path)` via hound. Used by the
+# standalone host's offline-render path and by plugin authors who
+# pipe captured audio out to disk from `main.rs`. Test-only
+# consumers leave it off.
+wav = ["dep:hound"]
+
+[dev-dependencies]
+moose = {version = "7.0.0", default-features = false, path = "../moose"}

@@ -1,0 +1,534 @@
+//! What a resolve hands back: the paint list and the surfaces.
+use rustc_hash::FxHashMap as HashMap;
+use std::sync::Arc;
+
+use mui_geometry::kurbo::Affine;
+use mui_geometry::{Path, Point, Rect, RoundedRect};
+use mui_layout::{Frame, Id, Layout, Size};
+use mui_text::{Axes, Font};
+
+use super::SceneError;
+use super::text::CachedRun;
+use crate::{Cursor, Mix, Paint, Semantics, ShadowKind};
+
+/// Which layer of a node's style a [`Painted`] entry is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Layer {
+    /// One shadow of the node's list; an inset one paints clipped to the
+    /// node's own outline.
+    Shadow(ShadowKind),
+    Fill,
+    Shell(usize),
+    Stroke,
+    Text,
+    /// A canvas's `k`th draw.
+    Draw(usize),
+    /// Everything up to the matching `Unclip` is clipped to `path`; the
+    /// paint is meaningless.
+    Clip,
+    Unclip,
+    /// Everything up to the matching `Unblend` composites as one layer; the
+    /// path and paint are meaningless. Wraps the node's own `Clip`, so a
+    /// blended subtree's clip is inside its layer -- but a float declared in
+    /// that subtree paints after the root, hence outside it.
+    Blend {
+        mix: Mix,
+        opacity: f32,
+    },
+    /// Painted source-atop the node's own blend layer, in `path`: it lands
+    /// only where the node and its children already painted. Always inside
+    /// a `Blend`/`Unblend` pair. See [`Paints::mask`](crate::Paints::mask).
+    Mask,
+    Unblend,
+    /// External GPU material, sampled in paint order through the effect renderer.
+    External,
+    /// Everything painted before this entry, again, blurred by `blur` and
+    /// clipped to `path`; the paint is meaningless. The first entry of a
+    /// node with [`Style::backdrop_blur`](crate::Style::backdrop_blur), inside
+    /// its own blend layer, so a fading modal fades its blur with it.
+    Backdrop,
+}
+
+/// One shaped glyph in a text layer.
+///
+/// `x` and `y` are offsets from the run baseline origin in scene pixels. The
+/// y offset matters for combining marks and OpenType GPOS; carrying it here
+/// keeps the glyph cache renderer in agreement with the outline path. `font`
+/// indexes [`Text::fonts`], so a fallback glyph can never accidentally be
+/// looked up in the primary face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub font: usize,
+}
+
+/// A text layer's glyphs, for a renderer that hints and caches its own.
+#[derive(Clone, Debug)]
+pub struct Text {
+    /// Primary face followed by any fallback faces used by this run; never
+    /// empty.
+    pub fonts: Arc<[Font]>,
+    pub size: f32,
+    /// Baseline origin.
+    pub origin: Point,
+    /// Shaped glyph id, x/y offset and face index from the origin.
+    pub glyphs: Arc<[TextGlyph]>,
+    /// The axis settings the run was shaped at; `font_coords` is the same
+    /// thing in the form a glyph cache wants, and
+    /// [`ResolvedScene::set_text`] re-shapes from this one.
+    pub axes: Axes,
+    /// Each face's normalized axis coordinates this run was measured at,
+    /// indexed like [`Self::fonts`], from [`mui_text::normalized_coords`].
+    /// Empty for a static face. A renderer with its own glyph cache has to
+    /// pass these on, or it paints the default instance under a bold run's
+    /// advances.
+    pub font_coords: Arc<[Arc<[i16]>]>,
+    /// Whether a renderer should hint this run. Off for the frame after its
+    /// axes moved: a glyph mid-morph gains nothing from stem snapping and
+    /// would cost a fresh hinting instance per frame.
+    pub hint: bool,
+}
+
+/// One thing to draw. `key` is the node's id, or its tree path (`/0/2`)
+/// when it has none: hit-testing and state keep working without names.
+#[derive(Clone, Debug)]
+pub struct Painted {
+    pub key: Id,
+    pub layer: Layer,
+    /// Shared with the node's surface and every other layer drawn along the
+    /// same outline, so a filled, clipped node holds one path. In the
+    /// entry's own space: [`Self::offset`] puts it in the scene, so a node
+    /// that only moved keeps its path, and same-sized nodes share one.
+    pub path: Arc<Path>,
+    pub paint: Paint,
+    /// Analytic form when the path is a plain rounded rectangle: a renderer
+    /// with a fast path (blurred rects, say) can take it. Local, like `path`.
+    pub rect: Option<RoundedRect>,
+    /// Where `path` and `rect` stand in the scene: added to every point. A
+    /// renderer paints the entry under this translation; gradients and
+    /// images are fitted to the local path, so they travel with it. Text
+    /// keeps its [`Text::origin`] in scene space and this at zero.
+    pub offset: Point,
+    /// Paint-only subtree transform in scene coordinates, applied before
+    /// the entry's local offset. Identity for ordinary layout-only paint.
+    pub transform: Affine,
+    /// Stroke width; `0` fills.
+    pub width: f64,
+    /// Gaussian blur radius: a shadow's, or a [`Layer::Backdrop`]'s.
+    pub blur: f64,
+    /// Present on `Layer::Text` whenever [`SceneSpec::font`](crate::SceneSpec::font) is set: the
+    /// layer's ink, as glyphs. `path` is then empty -- a renderer that draws
+    /// glyphs never looks at it, and translating every run's outline into a
+    /// fresh path is the most expensive thing the walk can do.
+    pub text: Option<Text>,
+}
+
+/// The same `Arc` is the same value: a still scene hands its paths and
+/// glyph runs back by pointer, and comparing them command by command is
+/// what a renderer's "did anything change" would otherwise spend its frame on.
+fn same<T: PartialEq + ?Sized>(a: &Arc<T>, b: &Arc<T>) -> bool {
+    Arc::ptr_eq(a, b) || a == b
+}
+// By hand for `same`; destructured without `..` so a new field cannot be
+// left out of the comparison.
+impl PartialEq for Text {
+    fn eq(&self, o: &Self) -> bool {
+        let Self {
+            fonts,
+            size,
+            origin,
+            glyphs,
+            axes,
+            font_coords,
+            hint,
+        } = self;
+        same(fonts, &o.fonts)
+            && *size == o.size
+            && *origin == o.origin
+            && same(glyphs, &o.glyphs)
+            && *axes == o.axes
+            && same(font_coords, &o.font_coords)
+            && *hint == o.hint
+    }
+}
+impl PartialEq for Painted {
+    fn eq(&self, o: &Self) -> bool {
+        let Self {
+            key,
+            layer,
+            path,
+            paint,
+            rect,
+            offset,
+            transform,
+            width,
+            blur,
+            text,
+        } = self;
+        *key == o.key
+            && *layer == o.layer
+            && same(path, &o.path)
+            && *paint == o.paint
+            && *rect == o.rect
+            && *offset == o.offset
+            && *transform == o.transform
+            && *width == o.width
+            && *blur == o.blur
+            && *text == o.text
+    }
+}
+
+impl Painted {
+    /// `path` where it stands in the scene: a translated copy.
+    pub fn placed(&self) -> Path {
+        if self.transform == Affine::IDENTITY {
+            return placed(&self.path, self.offset);
+        }
+        rigid_path(
+            &self.path,
+            self.transform * Affine::translate(self.offset.to_vec2()),
+        )
+        .expect("resolved rigid transform is valid")
+    }
+}
+
+fn placed(p: &Path, d: Point) -> Path {
+    let mut p = p.clone();
+    if d != Point::ZERO {
+        p.translate(d.to_vec2());
+    }
+    p
+}
+
+/// A local path and the offset that places it in the scene.
+pub type PlacedPath = (Arc<Path>, Point);
+
+/// A captured pointer coordinate space. Retain this at press time when a
+/// drag must keep its initial frame even as reactive layout changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalPose {
+    inverse: Affine,
+}
+impl LocalPose {
+    pub fn local(self, point: Point) -> Point {
+        self.inverse * point
+    }
+    /// Pointer travel in the captured coordinate axes; translation is ignored.
+    pub fn delta(self, delta: mui_geometry::Vec2) -> mui_geometry::Vec2 {
+        let [a, b, c, d, _, _] = self.inverse.as_coeffs();
+        mui_geometry::Vec2::new(a * delta.x + c * delta.y, b * delta.x + d * delta.y)
+    }
+}
+
+/// Scene rotations compose into a rigid affine; circular arcs stay circular.
+pub(super) fn rigid_path(path: &Path, transform: Affine) -> Result<Path, mui_geometry::Error> {
+    if transform == Affine::IDENTITY {
+        return Ok(path.clone());
+    }
+    let [a, b, _, _, x, y] = transform.as_coeffs();
+    path.rigid_transform(mui_geometry::Vec2::new(x, y), b.atan2(a))
+}
+
+/// A node's outline, for hit-testing and for anything that derives from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedSurface {
+    pub key: Id,
+    pub frame: Frame,
+    /// Paint-only scene transform. `frame` remains the layout box; hit
+    /// paths are already transformed and pointer positions invert this.
+    pub transform: Affine,
+    /// The outline in the surface's own space; [`Self::offset`] places it,
+    /// as it does a [`Painted::path`].
+    pub path: Arc<Path>,
+    /// The outline's bounds, in scene space.
+    pub bounds: Option<Rect>,
+    /// Exact rounded rectangle when the outline is one (not welded). Local.
+    pub rect: Option<RoundedRect>,
+    /// Where `path`, `rect` and `hits` stand in the scene.
+    pub offset: Point,
+    /// A shell collapsed or a merge changed ring counts.
+    pub topology_changed: bool,
+    pub cursor: Option<Cursor>,
+    pub tip: Option<Arc<str>>,
+    pub focusable: bool,
+    /// Keeps the wheel from the scrollers around it.
+    pub captures_wheel: bool,
+    /// Reads the raw pointer: a move over it is never inert.
+    pub tracks_pointer: bool,
+    /// Declares a [`State::Hover`](crate::State::Hover) or
+    /// [`State::Press`](crate::State::Press) look, so the runtime makes it a
+    /// pointer target even without an id.
+    pub pointer_states: bool,
+    /// Switched off by itself or by an ancestor: not a hit target, not a Tab
+    /// stop, and reported disabled to a screen reader. See
+    /// [`Styled::disabled`](crate::Styled::disabled).
+    pub disabled: bool,
+    /// The role and name this surface reports to a screen reader.
+    pub semantics: Option<Semantics>,
+    /// The name came from this node's text because no explicit `.named(..)`
+    /// was supplied. Live text swaps update this name; an explicit label does
+    /// not move with the paint.
+    pub(super) semantic_label_implicit: bool,
+    /// Current authored text, used as the accessible name unless explicitly
+    /// overridden by semantics. Live readout updates change this too.
+    pub text_value: Option<Arc<str>>,
+    /// Final-frame editable layout, including composition and scroll.
+    pub text_geometry: Option<Arc<crate::TextGeometry>>,
+    /// The nearest clipping ancestor's frame, for hit-testing.
+    ///
+    /// This is kept as a rectangle for compatibility with the input adapter.
+    /// [`Self::clip_path`] carries the same ancestor's actual outline for
+    /// adapters that need corner-accurate filtering.
+    pub clip: Option<Rect>,
+    /// The clipping ancestors' outlines, cached during scene resolution from
+    /// outermost to innermost. This is the path counterpart to [`Self::clip`];
+    /// it avoids making every pointer query tessellate a rounded or welded
+    /// clip and preserves every nested clip boundary. Each path is the
+    /// clipping ancestor's own outline, shared, not a copy, with the offset
+    /// that places it.
+    pub clip_path: Option<Arc<[PlacedPath]>>,
+    /// Nearest explicitly named ancestor in the authored tree, not a containing
+    /// rectangle. A floating node keeps this parent even when it escapes clipping.
+    pub parent: Option<Id>,
+    /// A scroll node's children extent inside its padding, unscrolled;
+    /// the frame size otherwise.
+    pub content: Size,
+    /// The tagged shapes a `canvas` drew, placed by [`Self::offset`]. Non-empty means
+    /// *these* are the surface's hit geometry, not its outline: the pointer
+    /// outside all of them is outside the node. See [`Draw::tag`](crate::Draw::tag).
+    pub hits: Vec<(Arc<str>, Arc<Path>)>,
+}
+impl ResolvedSurface {
+    /// Map a scene pointer into the unrotated layout-local frame.
+    pub fn local(&self, point: Point) -> Point {
+        self.local_pose().local(point)
+    }
+    pub fn local_pose(&self) -> LocalPose {
+        LocalPose {
+            inverse: Affine::translate((-self.frame.x, -self.frame.y)) * self.transform.inverse(),
+        }
+    }
+    /// Borrow the cached clip outlines without exposing their shared
+    /// allocation. Paths are ordered outermost to innermost, each with the
+    /// offset that places it.
+    pub fn clip_paths(&self) -> Option<&[PlacedPath]> {
+        self.clip_path.as_deref()
+    }
+    /// `path` where it stands in the scene: a translated copy.
+    pub fn placed(&self) -> Path {
+        placed(&self.path, self.offset)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedScene {
+    pub layout: Layout,
+    pub paint: Vec<Painted>,
+    /// Every surface in paint order, which is also z-order.
+    pub(super) surfaces: Vec<ResolvedSurface>,
+    pub(super) at: HashMap<Id, usize>,
+    pub(crate) external_welds: HashMap<Id, crate::ExternalWeld>,
+    /// Where each memoised subtree landed, in pre-order.
+    pub(crate) memos: Vec<super::MemoSpan>,
+}
+impl ResolvedScene {
+    /// The external material's own hit geometry in its unrotated space.
+    pub fn external_contains(&self, key: &str, point: Point) -> Option<bool> {
+        let external = self.external_weld(key)?;
+        let surface = self.surface(key)?;
+        Some(external.contains(surface.transform.inverse() * point))
+    }
+    /// The memoised subtrees `key`'s surface is in, outermost first, each
+    /// with whether this resolve reused it.
+    pub fn memos_at(&self, key: &str) -> impl Iterator<Item = (u64, bool)> + use<'_> {
+        let at = self.at.get(key).copied();
+        self.memos
+            .iter()
+            .filter(move |m| at.is_some_and(|i| m.surfaces.contains(&i)))
+            .map(|m| (m.id, m.reused))
+    }
+    /// The memoised subtrees that floated a node, whose paint and surface
+    /// land outside what the memo is known to hold.
+    pub fn memos_floating(&self) -> impl Iterator<Item = u64> + '_ {
+        self.memos.iter().filter(|m| m.floats).map(|m| m.id)
+    }
+    /// Forget which paint came from memoised subtrees. Call it after editing
+    /// `paint` by hand, so no later resolve copies the edited paint as if it
+    /// were what the tree says.
+    pub fn forget_memos(&mut self) {
+        self.memos.clear();
+    }
+    /// Swap what one text node says, keeping every frame this scene already
+    /// solved: only that node's glyph run is shaped again.
+    ///
+    /// This is the 60 Hz readout -- a modulated value, a meter, a clock --
+    /// where re-resolving the tree to move six digits is the whole frame
+    /// budget. Pair it with [`Styled::reserve`](crate::Styled::reserve): the
+    /// box was measured for the widest string the node can show, so the
+    /// shorter ones sit inside it and nothing reflows.
+    ///
+    /// ponytail: one line, painted from the old run's origin. A string wider
+    /// than the frame overhangs instead of wrapping. The accessible text is
+    /// updated, but an explicitly authored accessibility label is preserved.
+    /// The next resolve paints whatever the tree says, so update its value too.
+    ///
+    /// ```
+    /// use mui_scene::prelude::*;
+    /// # use mui_scene::{Layer, SceneSpec};
+    /// let root = row![text("0.0 dB").reserve("-88.8 dB").id("gain")];
+    /// let spec = SceneSpec::new(root).font(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+    /// let mut scene = resolve(&spec).unwrap();
+    /// let before = scene.surface("gain").unwrap().frame;
+    /// scene.set_text("gain", "-12.4 dB").unwrap();
+    /// assert_eq!(scene.surface("gain").unwrap().frame, before, "the frame is kept");
+    /// let run = scene.paint.iter().find(|p| p.layer == Layer::Text).unwrap();
+    /// assert_eq!(run.text.as_ref().unwrap().glyphs.len(), "-12.4 dB".len());
+    /// ```
+    pub fn set_text(&mut self, key: &str, s: &str) -> Result<(), SceneError> {
+        let mut at = self
+            .paint
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| &*p.key == key && p.layer == Layer::Text)
+            .map(|(i, _)| i);
+        let first = at.next().ok_or(SceneError::NoTextLayer)?;
+        // The paint no longer says what the tree does: nothing may copy it.
+        self.memos.clear();
+        // A wrapped label's later lines have no string to re-break against,
+        // so the swap collapses it to the one run it now says.
+        let rest: Vec<usize> = at.collect();
+        let mut text = self.paint[first]
+            .text
+            .clone()
+            .ok_or(SceneError::NoTextLayer)?;
+        // The faces the run was resolved with, per-node font included.
+        let run = mui_text::shape_run(&text.fonts, s, f64::from(text.size), &text.axes.to_vec())?;
+        text.glyphs = CachedRun::from_run(run).glyphs;
+        self.paint[first].text = Some(text);
+        for i in rest.into_iter().rev() {
+            self.paint.remove(i);
+        }
+        if let Some(&i) = self.at.get(key) {
+            self.surfaces[i].text_value = Some(s.into());
+        }
+        for surface in &mut self.surfaces {
+            if &*surface.key == key
+                && surface.semantic_label_implicit
+                && let Some(semantics) = surface.semantics.as_mut()
+            {
+                semantics.label = Some(s.into());
+            }
+        }
+        Ok(())
+    }
+    pub fn surface(&self, key: &str) -> Option<&ResolvedSurface> {
+        self.at.get(key).map(|&i| &self.surfaces[i])
+    }
+    /// Every surface in paint order, which is also z-order. A key is
+    /// `ResolvedSurface::key`, so nothing has to look one up to walk them.
+    pub fn surfaces(&self) -> impl DoubleEndedIterator<Item = &ResolvedSurface> {
+        self.surfaces.iter()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use crate::prelude::*;
+
+    #[test]
+    fn a_swapped_readout_keeps_the_reserved_box() {
+        let mut sp = SceneSpec::new(row![text("0.0").reserve("-88.8").id("gain")]);
+        sp.font = Some(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+        let mut s = resolve(&sp).unwrap();
+        let frame = s.surface("gain").unwrap().frame;
+        s.set_text("gain", "-88.8").unwrap();
+        assert_eq!(s.surface("gain").unwrap().frame, frame);
+        let t = s
+            .paint
+            .iter()
+            .find(|p| p.layer == Layer::Text)
+            .and_then(|p| p.text.clone())
+            .unwrap();
+        assert_eq!(t.glyphs.len(), 5);
+        // The reserved string is exactly the frame's content, so the run
+        // ends inside the box it was measured for.
+        let last = t.origin.x + f64::from(t.glyphs[4].x);
+        assert!(
+            last <= frame.x + frame.size.width + 0.5,
+            "{last} in {frame:?}"
+        );
+    }
+
+    #[test]
+    fn set_text_updates_only_an_implicit_accessibility_label() {
+        let mut implicit = SceneSpec::new(text("before").a11y(A11y::Label).id("implicit"));
+        implicit.font = Some(font());
+        let mut implicit = resolve(&implicit).unwrap();
+        assert_eq!(
+            implicit
+                .surface("implicit")
+                .unwrap()
+                .semantics
+                .as_ref()
+                .and_then(|semantics| semantics.label.as_deref()),
+            Some("before")
+        );
+        implicit.set_text("implicit", "after").unwrap();
+        assert_eq!(
+            implicit
+                .surface("implicit")
+                .unwrap()
+                .semantics
+                .as_ref()
+                .and_then(|semantics| semantics.label.as_deref()),
+            Some("after")
+        );
+
+        let mut explicit = SceneSpec::new(
+            text("before")
+                .a11y(A11y::Label)
+                .named("Stable name")
+                .id("explicit"),
+        );
+        explicit.font = Some(font());
+        let mut explicit = resolve(&explicit).unwrap();
+        explicit.set_text("explicit", "after").unwrap();
+        assert_eq!(
+            explicit
+                .surface("explicit")
+                .unwrap()
+                .semantics
+                .as_ref()
+                .and_then(|semantics| semantics.label.as_deref()),
+            Some("Stable name")
+        );
+    }
+
+    #[test]
+    fn set_text_keeps_a_wrapped_node_single_line_without_relayout() {
+        let mut spec = SceneSpec::new(text("one two three four").lines(2).id("paragraph"))
+            .offered(Size::new(72., 80.));
+        spec.font = Some(font());
+        let mut scene = resolve(&spec).unwrap();
+        let frame = scene.surface("paragraph").unwrap().frame;
+        let before = scene
+            .paint
+            .iter()
+            .filter(|paint| &*paint.key == "paragraph" && paint.layer == Layer::Text)
+            .count();
+        assert_eq!(before, 2);
+
+        scene
+            .set_text("paragraph", "a replacement that is much longer")
+            .unwrap();
+        assert_eq!(scene.surface("paragraph").unwrap().frame, frame);
+        let after = scene
+            .paint
+            .iter()
+            .filter(|paint| &*paint.key == "paragraph" && paint.layer == Layer::Text)
+            .count();
+        assert_eq!(after, 1, "set_text collapses wrapped paint by contract");
+    }
+}

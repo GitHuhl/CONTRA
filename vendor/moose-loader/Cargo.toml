@@ -1,0 +1,33 @@
+[package]
+name = "moose-loader"
+description = "Hot-reloadable plugin logic for moose (native ABI, dylib loading)"
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+
+[dependencies]
+log = "0.4"
+# Already in the workspace dep graph via image / png; pulled as a
+# direct dep so the file-fingerprint path uses the SIMD-accelerated
+# implementation (~30× faster than a hand-rolled table-free CRC32).
+crc32fast = "1.5"
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+# `moose-gui-types` is the type surface (layout / interaction /
+# render / theme / widgets) the canary fingerprint inspects across
+# the dylib boundary.
+moose-gui-types = {version = "7.0.0", path = "../moose-gui-types"}
+# `moose-plugin` carries the `PluginLogicCore` blanket and the
+# `PluginLogic` / `PluginLogic64` leaf traits the macro-generated
+# wrappers reference. Always required.
+moose-plugin = {version = "7.0.0", path = "../moose-plugin"}
+libloading = {version = "0.9", optional = true}
+parking_lot = {version = "0.12", optional = true}
+
+[features]
+default = []
+shell = ["dep:libloading", "dep:parking_lot"]
+hot-debug = []
+

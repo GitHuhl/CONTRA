@@ -1,0 +1,48 @@
+[package]
+name = "moose-standalone"
+description = "Standalone host wrapper for moose plugins"
+version = "7.0.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+rust-version = "1.92"
+
+[dependencies]
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-utils = {version = "7.0.0", path = "../moose-utils"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+moose-driver = {version = "7.0.0", optional = true, path = "../moose-driver"}
+cpal = "0.17"
+pico-args = "0.5"
+dirs = "5"
+midir = "0.10"
+crossbeam-queue = "0.3"
+hound = {version = "3", optional = true}
+# SIGINT handler for the headless runner: a clean Ctrl-C so live
+# `--output-file` capture finalizes the WAV header instead of the
+# default disposition killing the process mid-write. Only pulled in
+# with `playback`, the only build that has a capture sink to finalize.
+ctrlc = {version = "3", optional = true}
+
+moose-gui = {version = "7.0.0", default-features = false, optional = true, path = "../moose-gui"}
+moose-gpu = {version = "7.0.0", optional = true, path = "../moose-gpu"}
+baseview = {package = "moose-baseview", version = "0.3.4-moose.1", optional = true, path = "../moose-baseview"}
+raw-window-handle = {version = "0.6", optional = true}
+keyboard-types = {version = "0.8", optional = true}
+
+# Linux/X11 size-hint helper for `gui`-enabled standalone hosts.
+# Plugin editors don't expose resize yet, so we pin WM min == max
+# size on the outer baseview window. `x11-dl` is dlopen-based so
+# we don't force libX11 to link on Wayland-only systems.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = {version = "2", optional = true}
+
+# macOS native-menu bridge for `gui`-enabled standalone hosts.
+# Hand-rolled `objc` runtime calls - no `cocoa` / `cacao` dep
+# beyond what `objc` itself pulls in.
+[features]
+default = []
+gui = ["dep:moose-gui", "dep:baseview", "dep:raw-window-handle", "dep:keyboard-types", "dep:x11-dl"]
+playback = ["dep:hound", "dep:moose-driver", "moose-driver/wav", "dep:ctrlc"]
+
