@@ -87,7 +87,7 @@ screenshot of each. CI runs the same on every push to `main`.
 | `plugin` | The CLAP/VST3 plugin |
 | `vendor` | Vendored dependencies, including the plugin framework and UI toolkit |
 | `docs/re` | Kontakt reverse-engineering evidence the engine's laws cite |
-| `tools` | Inspector, screenshot tools, probe hosts, Kontakt reference scripts |
+| `tools` | Inspector, screenshot tool, the CLAP/VST3 probe hosts (all Rust) |
 
 ## License
 

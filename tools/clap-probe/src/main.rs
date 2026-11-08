@@ -1,4 +1,4 @@
-//! `clap-probe <plugin.clap> <out.png> [seconds]`: loads a CLAP plugin the
+//! `clap-probe <plugin.clap> <out.png> [max seconds]`: loads a CLAP plugin the
 //! way a DAW does (no environment help), embeds its editor in an X11 window
 //! of the size it asks for, waits, and writes what the window shows. Exits
 //! non-zero when the editor does not open or draws nothing.
@@ -20,17 +20,37 @@ unsafe extern "C" fn get_extension(_: *const clap_host, _: *const c_char) -> *co
 }
 unsafe extern "C" fn nothing(_: *const clap_host) {}
 
+/// A window showing at least this many colours has drawn the editor.
+const DRAWN: usize = 16;
+
 fn fail(why: impl std::fmt::Display) -> ! {
     eprintln!("clap-probe: {why}");
     std::process::exit(1);
 }
 
+/// The window's pixels as RGB, and how many distinct colours they hold.
+fn capture(conn: &impl Connection, window: u32, w: u16, h: u16) -> (Vec<u8>, usize) {
+    let image = conn
+        .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w, h, !0)
+        .unwrap_or_else(|e| fail(e))
+        .reply()
+        .unwrap_or_else(|e| fail(e));
+    let mut rgb = Vec::with_capacity(usize::from(w) * usize::from(h) * 3);
+    for px in image.data.chunks_exact(4) {
+        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+    }
+    let mut colors: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    colors.sort_unstable();
+    colors.dedup();
+    (rgb, colors.len())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (Some(path), Some(out)) = (args.get(1), args.get(2)) else {
-        fail("usage: clap-probe <plugin.clap> <out.png> [seconds]");
+        fail("usage: clap-probe <plugin.clap> <out.png> [max seconds]");
     };
-    let wait = args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0);
+    let wait = args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(60.0);
 
     let (conn, screen) = x11rb::connect(None).unwrap_or_else(|e| fail(format!("no X display: {e}")));
     // Leaked on purpose: the plugin stays loaded until exit, as in a host.
@@ -132,34 +152,36 @@ fn main() {
     }
     println!("editor open after {:?}", started.elapsed());
 
+    let (w, h) = (w as u16, h as u16);
+    // Until the editor has drawn (and a second more to settle), or the
+    // deadline: a software renderer under load can take many seconds.
     let deadline = Instant::now() + Duration::from_secs_f64(wait);
+    let (mut drawn, mut looked) = (None::<Instant>, Instant::now());
     while Instant::now() < deadline {
+        if drawn.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+            break;
+        }
+        if drawn.is_none() && looked.elapsed() > Duration::from_millis(250) {
+            looked = Instant::now();
+            if capture(&conn, window, w, h).1 >= DRAWN {
+                drawn = Some(looked);
+                println!("editor drew after {:?}", started.elapsed());
+            }
+        }
         while let Ok(Some(_)) = conn.poll_for_event() {}
         unsafe { (plugin.on_main_thread.unwrap())(plugin) };
         std::thread::sleep(Duration::from_millis(16));
     }
 
-    // What the screen shows inside the window: the plugin's child included.
-    let image = conn
-        .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w as u16, h as u16, !0)
-        .unwrap_or_else(|e| fail(e))
-        .reply()
-        .unwrap_or_else(|e| fail(e));
-    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for px in image.data.chunks_exact(4) {
-        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
-    }
+    let (rgb, colors) = capture(&conn, window, w, h);
     let file = std::fs::File::create(out).unwrap_or_else(|e| fail(e));
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), u32::from(w), u32::from(h));
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()
         .and_then(|mut wr| wr.write_image_data(&rgb))
         .unwrap_or_else(|e| fail(e));
-    let mut colors: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-    colors.sort_unstable();
-    colors.dedup();
-    println!("wrote {out}: {} distinct colours", colors.len());
+    println!("wrote {out}: {colors} distinct colours");
 
     unsafe {
         (gui.hide.unwrap())(plugin);
@@ -168,7 +190,7 @@ fn main() {
         (entry.deinit.unwrap())();
     }
     println!("closed cleanly");
-    if colors.len() < 16 {
+    if colors < DRAWN {
         fail("the editor drew nothing");
     }
 }

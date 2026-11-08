@@ -171,11 +171,15 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>, Error> {
                         Ok(n) => Tok::Int(u64::from(n)),
                         Err(_) => return Err(Error::new(Span::new(start, i), "invalid hex")),
                     }
+                } else if digits.bytes().all(|b| b.is_ascii_digit()) {
+                    // Kontakt clamps a decimal literal to 2147483647 rather
+                    // than wrapping it (measured: 2147483648, 4294967296 and
+                    // 3000000000 all read 2147483647; `-2147483648` reads
+                    // -2147483647). Hex keeps its 32-bit pattern.
+                    let n = digits.parse::<u64>().unwrap_or(u64::MAX);
+                    Tok::Int(n.min(i32::MAX as u64))
                 } else {
-                    match digits.parse::<u64>() {
-                        Ok(n) => Tok::Int(n),
-                        Err(_) => return Err(Error::new(Span::new(start, i), "invalid integer")),
-                    }
+                    return Err(Error::new(Span::new(start, i), "invalid integer"));
                 }
             }
             b'$' | b'%' | b'@' | b'~' | b'?' | b'!' if word_byte(at(i + 1)) => {

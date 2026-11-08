@@ -98,13 +98,13 @@
 
       # The same check for VST3 (tools/vst3-probe): a bare host that serves
       # IPlugFrame and IRunLoop and attaches the editor to an X11 window.
-      vst3-probe = pkgs.stdenv.mkDerivation {
+      vst3-probe = rustPlatform.buildRustPackage {
         pname = "vst3-probe";
         version = "0.0.0";
-        src = ./tools/vst3-probe;
-        buildInputs = with pkgs; [ libx11 libpng ];
-        buildPhase = "$CXX -std=c++17 -O2 -Wall -Wextra -o vst3-probe vst3_probe.cpp -lX11 -lpng -ldl";
-        installPhase = "install -Dm755 vst3-probe $out/bin/vst3-probe";
+        inherit (contra) src;
+        cargoLock.lockFile = ./Cargo.lock;
+        cargoBuildFlags = [ "-p" "vst3-probe" ];
+        doCheck = false;
       };
     in
     {
@@ -128,7 +128,7 @@
             export __EGL_VENDOR_LIBRARY_FILENAMES=${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json
             mkdir -p $out
             xvfb-run -s "-screen 0 1920x1200x24" \
-              ${probe}/bin/${probe.pname} ${plugin} $out/editor.png 6 2>&1 | tee $out/log
+              ${probe}/bin/${probe.pname} ${plugin} $out/editor.png 60 2>&1 | tee $out/log
             grep -q "GPU ready backend=Vulkan" $out/log
             grep -q "closed cleanly" $out/log
           '';
