@@ -396,7 +396,7 @@ fn a_note_names_value_edit_reads_its_note() {
         },
     );
     w.value = Some(model::Value::Integer(12));
-    assert_eq!(readout(&w, model::Source::Ksp { slot: 0 }), "C-1");
+    assert_eq!(readout(&w), "C-1");
 }
 
 #[test]
@@ -527,59 +527,6 @@ fn original_stock_knob_has_a_lit_upper_ring_and_shadow_below() {
 }
 
 #[test]
-fn uvi_table_draws_fractional_bars_and_repaints_after_a_script_write() {
-    let mut tree = Interface {
-        source: model::Source::FalconLua,
-        ..Default::default()
-    };
-    tree.pages.push(Page {
-        size: Size {
-            width: 20.,
-            height: 10.,
-        },
-        ..Default::default()
-    });
-    let mut w = Widget::new(
-        "curve",
-        PageRef(0),
-        Rect {
-            x: 0.,
-            y: 0.,
-            width: 20.,
-            height: 10.,
-        },
-        Kind::Table {
-            columns: 2,
-            range: Range {
-                min: 0.,
-                max: 1.,
-                default: 0.,
-                step: None,
-            },
-            bipolar: false,
-            cells: vec![0.25, 0.75],
-            steps_shown: None,
-        },
-    );
-    w.colors.background = Some(Rgba::rgb(0x000000));
-    w.colors.bar = Some(Rgba::rgb(0xff0000));
-    w.value = Some(model::Value::Reals(vec![0.25, 0.75]));
-    tree.widgets.push(w);
-    let mut ui = crate::ui();
-    let mut pictures = Pictures::new(Box::new(|_| None));
-    let (el, _) = page(&mut ui, 0, &tree, PageRef(0), &mut pictures, (1., &[]));
-    let before = paint(&mut ui, el, 20, 10);
-    assert_eq!(before.get(5 * 20 + 5), Some(&[0, 0, 0, 255]));
-    assert_eq!(before.get(5 * 20 + 15), Some(&[255, 0, 0, 255]));
-    tree.widgets[0].value = Some(model::Value::Reals(vec![0.75, 0.25]));
-    let (el, _) = page(&mut ui, 0, &tree, PageRef(0), &mut pictures, (1., &[]));
-    let after = paint(&mut ui, el, 20, 10);
-    assert_eq!(after.get(5 * 20 + 5), Some(&[255, 0, 0, 255]));
-    assert_eq!(after.get(5 * 20 + 15), Some(&[0, 0, 0, 255]));
-}
-
-/// Hovering a script control shows its `set_control_help` text.
-#[test]
 fn hovering_a_control_shows_its_help() {
     let (mut tree, wall, knob) = tree();
     if let Some(w) = tree.widgets.first_mut() {
@@ -640,9 +587,5 @@ fn kontakt_label_tabs_are_blank_advances() {
     assert_eq!(
         plan::caption(&widget, model::Source::Ksp { slot: 0 }),
         "         Marcato Short"
-    );
-    assert_eq!(
-        plan::caption(&widget, model::Source::FalconLua),
-        widget.text
     );
 }

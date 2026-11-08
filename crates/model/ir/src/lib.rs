@@ -768,22 +768,14 @@ pub struct Script {
     /// Its place among the instrument's script slots, empty slots counted:
     /// presets save their values by this place.
     pub slot: usize,
-    pub dialect: Dialect,
     pub source: String,
-    /// Saved persistent values in the dialect's own form (Lua: `widget=value`).
+    /// Saved persistent values in Kontakt's form (`"<name> <value…>"`).
     pub saved: Vec<String>,
     /// Library data files the script loads (Kontakt `load_array(%x, 2)`:
-    /// `data/x.nka`), by lowercase array name without its sigil. Lua: the
-    /// modules `require` may load, by their path in the library.
+    /// `data/x.nka`), by lowercase array name without its sigil.
     pub data: Vec<(String, Vec<u8>)>,
     /// MIDI controllers that move this script's controls.
     pub links: Vec<CcLink>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dialect {
-    Ksp,
-    Lua,
 }
 
 /// Something the translator could not carry over, and how much it matters.

@@ -113,7 +113,6 @@ pub struct SavedView {
     pub octave: i8,
     pub scale: u8,
     pub face_scale: u8,
-    pub format: u8,
     pub shelf: u8,
     pub descending: bool,
     /// The browser's library list's share of its height; 0 is the default.

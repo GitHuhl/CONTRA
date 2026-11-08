@@ -13,12 +13,8 @@ kontra-engine = { path = "../../engine/engine" }
 kontra-prepare = { path = "../../engine/prepare" }
 kontra-format = { path = "../../format/common" }
 kontra-format-kontakt = { path = "../../format/kontakt" }
-kontra-format-native = { path = "../../format/native" }
-kontra-format-sfz = { path = "../../format/sfz" }
-kontra-format-uvi = { path = "../../format/uvi" }
 kontra-ksp = { path = "../../script/ksp" }
 kontra-library = { path = "../library" }
-kontra-lua = { path = "../../script/lua" }
 kontra-protocol = { path = "../../model/protocol" }
 kontra-stream = { path = "../../engine/stream" }
 kontra-ui-model = { path = "../../model/ui-model" }

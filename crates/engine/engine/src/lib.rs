@@ -61,7 +61,7 @@ pub use kontra_plan::{EnginePar, EnginePars, Recall, Saved, files};
 pub use kontra_script_ui::FIRST_FONT;
 pub use kontra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
 pub use kontra_time::SampleTime;
-pub use kontra_vm::{Action, Faults, Foreign, Op, Program, Text, Vm, WidgetLook};
+pub use kontra_vm::{Action, Faults, Op, Program, Text, Vm};
 pub use kontra_voice::{Ahdsr, Loop, Region};
 pub use ledger::NoteRef;
 pub use pgs::PgsBudget;
@@ -287,11 +287,7 @@ impl Engine {
             .scripts
             .iter()
             .map(|s| {
-                Some(kontra_vm::Vm::new(
-                    &s.program,
-                    s.coroutines,
-                    s.foreign.as_ref(),
-                ))
+Some(kontra_vm::Vm::new(&s.program, s.coroutines))
             })
             .collect();
         let timers = vec![[None; 2]; plan.scripts.len()].into();
@@ -543,10 +539,8 @@ impl Engine {
                 // The key is up whatever the script does with its event:
                 // a `play_note(.., -1)` child still ends (KSP manual,
                 // play_note), through its own release callbacks.
-                let script = self.plan.scripts.get(usize::from(slot));
-                if script.is_some_and(|s| s.held_release_ends_children) {
-                    self.end_children(note);
-                }
+                let _ = slot;
+                self.end_children(note);
                 continue;
             }
             if self.pedal.get(usize::from(channel)) == Some(&true) {

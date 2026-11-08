@@ -125,14 +125,6 @@ pub enum Command {
         cell: u32,
         text: Box<kontra_engine::Text>,
     },
-    /// The user moved widget `n` of script `slot`'s own page to `value`.
-    Widget {
-        part: usize,
-        slot: u8,
-        n: u32,
-        value: f64,
-        cell: Option<u32>,
-    },
     /// The user edited a group's sound (the Sound tab).
     Sound {
         part: usize,
@@ -352,7 +344,7 @@ impl Rack {
         slot_types: &[(ir::RackAt, u8, u16)],
         slot_responses: &[(ir::RackAt, u8, String)],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut instrument = crate::instrument::read_saved(path, scripts)?;
+        let mut instrument = crate::instrument::read(path)?;
         for (script, saved) in instrument.scripts.iter_mut().zip(scripts) {
             script.saved.clone_from(saved);
         }
@@ -417,7 +409,7 @@ impl Rack {
             .collect();
         let plan = Arc::new(loaded.plan);
         let engine = Engine::new(Arc::clone(&plan), self.store.client(), self.rate);
-        let view = crate::view::View::of(&loaded.faces, &loaded.pages, &engine, path.as_deref());
+        let view = crate::view::View::of(&loaded.faces, &engine, path.as_deref());
         let sounds = crate::sound::Sounds::new(self.rate, engine.group_sounds());
         let part_info = Part {
             source,
@@ -516,15 +508,7 @@ impl Rack {
         let Some(view) = p.view.as_ref() else {
             return;
         };
-        if let Some((slot, n)) = view.widget(widget) {
-            self.send(Command::Widget {
-                part,
-                slot,
-                n,
-                value,
-                cell,
-            });
-        } else if let Some((slot, id, value)) = view.control(widget, value) {
+        if let Some((slot, id, value)) = view.control(widget, value) {
             self.send(Command::Control {
                 part,
                 slot,
@@ -702,8 +686,6 @@ impl Rack {
                 && p.script.generation == c.generation
             {
                 p.script.asked = false;
-                let mut c = c;
-                c.keep(p.script.latest.take());
                 p.script.latest = Some(c);
             }
         }
@@ -712,17 +694,11 @@ impl Rack {
         let ask: Vec<_> = (self.parts.iter_mut().enumerate())
             .filter_map(|(n, p)| {
                 let s = &mut p.as_mut()?.script;
-                if s.asked
-                    || s.vars
-                        .iter()
-                        .all(|v| v.vars.is_empty() && v.widgets.is_empty() && !v.state)
-                {
+                if s.asked || s.vars.iter().all(|v| v.vars.is_empty()) {
                     return None;
                 }
                 s.asked = true;
-                let mut c = Capture::new(n, s.generation, &s.vars);
-                c.after(s.latest.as_deref());
-                Some(c)
+                Some(Capture::new(n, s.generation, &s.vars))
             })
             .collect();
         for c in ask {

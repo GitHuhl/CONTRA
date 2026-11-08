@@ -3,7 +3,7 @@
 //! once motion settles the editor asks for no more frames.
 
 use kontra_ui::app::{
-    self, Action, App, Envelope, Face, Format, Library, Param, Part, PartTab, Sound,
+    self, Action, App, Envelope, Face, Library, Param, Part, PartTab, Sound,
 };
 use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
 
@@ -68,7 +68,6 @@ fn clicks_drive_the_editor_and_idle_costs_no_frames() {
     let mut app = App {
         libraries: vec![Library {
             name: "Areia".into(),
-            format: Format::Kontakt,
             presets: vec!["Violins".into()],
             starred: false,
             art: Vec::new(),
@@ -371,7 +370,6 @@ fn a_preset_dragged_onto_a_part_replaces_it_and_onto_free_space_adds_one() {
     let mut app = App {
         libraries: vec![Library {
             name: "Areia".into(),
-            format: Format::Kontakt,
             presets: vec!["Violins".into(), "Violas".into()],
             starred: false,
             art: Vec::new(),

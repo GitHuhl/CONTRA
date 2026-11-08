@@ -121,7 +121,6 @@ fn survey(path: &Path, store: &mut Store, report: &Mutex<Report>) {
     let hashes: Vec<u64> = ir
         .scripts
         .iter()
-        .filter(|s| s.dialect == ir::Dialect::Ksp)
         .map(|s| {
             let mut h = DefaultHasher::new();
             s.source.hash(&mut h);
@@ -151,9 +150,6 @@ fn survey(path: &Path, store: &mut Store, report: &Mutex<Report>) {
         }
     }
     for (slot, script) in ir.scripts.iter().enumerate() {
-        if script.dialect != ir::Dialect::Ksp {
-            continue;
-        }
         let mut h = DefaultHasher::new();
         script.source.hash(&mut h);
         let hash = h.finish();

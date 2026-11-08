@@ -91,7 +91,7 @@ pub(super) fn page<'a>(
                 tree,
                 w,
                 position,
-                readout(w, tree.source),
+                readout(w),
                 knob_name(w),
                 bare,
             );
@@ -182,7 +182,7 @@ pub(super) fn caption(w: &model::Widget, source: model::Source) -> String {
     }
     if let Kind::ValueEdit { .. } = w.kind {
         let title = if w.hide.title { "" } else { w.text.trim() };
-        return format!("{title} {}", readout(w, source)).trim().to_owned();
+        return format!("{title} {}", readout(w)).trim().to_owned();
     }
     if w.hide.title {
         return String::new();

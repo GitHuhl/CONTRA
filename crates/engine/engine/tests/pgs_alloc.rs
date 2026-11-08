@@ -176,11 +176,8 @@ fn note_controller_and_ui_callbacks_do_not_allocate_for_pgs() {
         reverb_laws: ir::ReverbControls::from_fn(|_| ir::Law::Linear { lo: 0.0, hi: 1.0 }),
         reverb_networks: vec![],
         knobs: vec![],
-        foreign: None,
         files: None,
         arrays: vec![],
-        hears_own_releases: false,
-        held_release_ends_children: false,
     });
     let mut e = Engine::new(Arc::new(plan), store.client(), 48_000);
     let budget = e.pgs_budget();

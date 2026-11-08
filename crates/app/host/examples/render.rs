@@ -102,7 +102,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ir.scripts.push(kontra_engine::ir::Script {
                 name: "append".into(),
                 slot: ir.scripts.len(),
-                dialect: kontra_engine::ir::Dialect::Ksp,
                 source,
                 saved: Vec::new(),
                 data: Vec::new(),
@@ -112,7 +111,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let scripts: Vec<String> = ir.scripts.iter().map(|s| s.source.clone()).collect();
     let loaded = kontra_host::instrument::build(ir, RATE, &mut store);
-    let pages = loaded.pages.clone();
     println!(
         "{}: {} zones, loaded in {:?}",
         loaded.name,
@@ -329,33 +327,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("control {name} (script {slot}, id {id}) := {value}");
         engine.set_control(slot, id, value);
-        for _ in 0..RATE as usize / 4 / 512 {
-            engine.process(&mut silent, &[]);
-            install_requests(&mut engine, &plan);
-        }
-    }
-    // KONTRA_WIDGET=name=value,...: a Lua script's own widget moves there,
-    // as the editor moves it, and its `changed` runs.
-    for pair in std::env::var("KONTRA_WIDGET")
-        .iter()
-        .flat_map(|s| s.split(','))
-    {
-        let Some((name, value)) = pair.split_once('=') else {
-            continue;
-        };
-        let Ok(value) = value.parse::<f64>() else {
-            continue;
-        };
-        let found = pages.iter().enumerate().find_map(|(slot, page)| {
-            let n = page.as_ref()?.widgets.iter().position(|w| w.name == name)?;
-            Some((u8::try_from(slot).ok()?, u32::try_from(n).ok()?))
-        });
-        let Some((slot, n)) = found else {
-            println!("widget {name}: no such widget");
-            continue;
-        };
-        println!("widget {name} (script {slot}, number {n}) := {value}");
-        engine.set_widget(slot, n, value, None);
         for _ in 0..RATE as usize / 4 / 512 {
             engine.process(&mut silent, &[]);
             install_requests(&mut engine, &plan);
@@ -607,11 +578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("last message: {}", engine.last_message());
     println!("calls: {:?}", engine.action_calls());
     println!("script faults: {:?}", engine.script_faults());
-    println!(
-        "script arena spills: {}, memory after render: {}",
-        kontra_lua::alloc::spills(),
-        memory()
-    );
+    println!("memory after render: {}", memory());
     write_wav(&out, &audio)?;
     println!("wrote {}", out.display());
     Ok(())
@@ -650,21 +617,15 @@ fn write_wav(path: &std::path::Path, frames: &[[f32; 2]]) -> std::io::Result<()>
 }
 
 /// Script control `name` and `value` as `Engine::set_control` takes them:
-/// a UVI script's by its name among its controls (the last of that name, a
-/// widget before a macro), its value an `f64`; a KSP one's UI id is the first
-/// one plus its variable's index (persist.rs), its value an integer.
+/// its UI id is the first one plus its variable's index (persist.rs), its
+/// value an integer.
 fn control(plan: &Plan, scripts: &[String], name: &str, value: &str) -> Option<(u8, i32, i64)> {
     plan.scripts
         .iter()
         .zip(scripts)
         .enumerate()
-        .find_map(|(n, (script, source))| {
+        .find_map(|(n, (_, source))| {
             let slot = u8::try_from(n).ok()?;
-            if let Some(foreign) = &script.foreign {
-                let id = foreign.controls().iter().rposition(|c| c == name)?;
-                let value = value.parse::<f64>().ok()?.to_bits() as i64;
-                return Some((slot, i32::try_from(id).ok()?, value));
-            }
             let compiled = kontra_ksp::compile(source, &[]).ok()?;
             let bare = |v: &str| v.trim_start_matches(['$', '%', '~', '?', '@', '!']) == name;
             let at = compiled.variables.iter().position(|v| bare(&v.name))?;

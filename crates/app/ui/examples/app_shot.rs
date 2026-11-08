@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use kontra_ui::app::{
-    self, Action, App, Envelope, Filter, Format, Library, Part, PartTab, Pass, Sound, Stats, Zone,
+    self, Action, App, Envelope, Filter, Library, Part, PartTab, Pass, Sound, Stats, Zone,
 };
 use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
 use mui::vello;
@@ -91,21 +91,19 @@ impl Shot {
 }
 
 fn specimen() -> App {
-    let library = |name: &str, format, presets: &[&str], starred| Library {
+    let library = |name: &str, presets: &[&str], starred| Library {
         name: name.into(),
-        format,
         presets: presets.iter().map(|p| (*p).to_owned()).collect(),
         starred,
         art: Vec::new(),
     };
     App {
         libraries: vec![
-            library("Afflatus Chapter II Brass", Format::Kontakt, &["Instruments/2 Horns KS", "Instruments/4 Horns KS", "Instruments/Solo Trumpet KS", "Presets/Warm/Tubas Slides"], true),
-            library("ANALOG STRINGS", Format::Kontakt, &["ANALOG STRINGS"], false),
-            library("Areia", Format::Kontakt, &["01 Areia - 16 Violins - Core Techniques", "02 Areia - 12 Violas"], false),
-            library("Conflux", Format::Kontakt, &["Conflux"], true),
-            library("Una Corda", Format::Kontakt, &["Una Corda Cotton", "Una Corda Felt"], false),
-            library("Falcon Factory", Format::Uvi, &["Analog Pad", "Glass Keys"], false),
+            library("Afflatus Chapter II Brass", &["Instruments/2 Horns KS", "Instruments/4 Horns KS", "Instruments/Solo Trumpet KS", "Presets/Warm/Tubas Slides"], true),
+            library("ANALOG STRINGS", &["ANALOG STRINGS"], false),
+            library("Areia", &["01 Areia - 16 Violins - Core Techniques", "02 Areia - 12 Violas"], false),
+            library("Conflux", &["Conflux"], true),
+            library("Una Corda", &["Una Corda Cotton", "Una Corda Felt"], false),
         ],
         recent: vec![(0, 0), (2, 0), (4, 0)],
         stats: Stats { cpu: 3., voices: 12, ram_mb: 412, samples_mb: 180, disk_mbs: 1.4, cache_mb: 128 },

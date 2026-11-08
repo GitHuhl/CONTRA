@@ -13,16 +13,14 @@ use super::{Command, Part, Rack, ScriptState};
 
 impl Rack {
     /// Recalls `preset` into `part` when the part plays the preset's base
-    /// file and only KSP scripts; false (nothing done) when it must load. A
-    /// Lua script's saved state may pick other samples, so a part with one
-    /// always loads; so does a preset with no values for a slot that keeps
-    /// some (the base's own apply, which only a load reads).
+    /// file; false (nothing done) when it must load: a preset with no values
+    /// for a slot that keeps some (the base's own apply, which only a load
+    /// reads).
     pub fn recall(&mut self, part: usize, preset: &Preset, path: Option<&Path>) -> bool {
         let Some(Some(p)) = self.parts.get_mut(part) else {
             return false;
         };
         let same = p.source.as_deref() == Some(preset.base.as_path());
-        let ksp = (p.script.vars.iter()).all(|v| v.widgets.is_empty() && !v.state);
         let s = &p.script;
         // The preset's values for instrument script `n`, by its slot.
         let of = |n: usize| {
@@ -30,7 +28,7 @@ impl Rack {
             preset.saved.get(*slot).filter(|v| !v.is_empty())
         };
         let complete = (s.vars.iter()).all(|v| v.vars.is_empty() || of(v.script).is_some());
-        let Some(plan) = p.plan.clone().filter(|_| same && ksp && complete) else {
+        let Some(plan) = p.plan.clone().filter(|_| same && complete) else {
             return false;
         };
         let saved: Vec<Saved> = (s.vars.iter())
@@ -72,8 +70,7 @@ impl Rack {
         }
         let plan = Arc::new(plan);
         let engine = Engine::new(Arc::clone(&plan), self.store.client(), self.rate);
-        let pages: Vec<Option<kontra_lua::Ui>> = old.faces.iter().map(|_| None).collect();
-        let view = crate::view::View::of(&old.faces, &pages, &engine, old.path.as_deref());
+        let view = crate::view::View::of(&old.faces, &engine, old.path.as_deref());
         let info = Part {
             recall: engine.recall_law(),
             sounds: crate::sound::Sounds::new(self.rate, engine.group_sounds()),

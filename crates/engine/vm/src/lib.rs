@@ -62,74 +62,6 @@ pub trait HostApi {
     fn call(&mut self, call: HostCall<'_>) -> HostValue;
 }
 
-/// A front end that runs its own language (Lua) on the engine: the same
-/// [`HostApi`], coroutine handles and [`Step`]s as [`Instance`].
-pub trait Machine: Send {
-    /// Takes a coroutine for the callback at `entry`, as [`Instance::start`].
-    fn start(&mut self, entry: u32, context: u64) -> Option<CoId>;
-    /// Runs it until it ends or waits, as [`Instance::run`].
-    fn run(&mut self, co: CoId, host: &mut dyn HostApi) -> Step;
-    fn cancel(&mut self, co: CoId);
-    fn context(&self, co: CoId) -> Option<u64>;
-    /// A callback the last run started beside itself (a front end's
-    /// `spawn`), now waiting this many microseconds: the host schedules it
-    /// like a wait. In the order they were started.
-    fn spawned(&mut self) -> Option<(CoId, u64)>;
-    fn faults(&self) -> Faults;
-    /// A coroutine that moves control `id` ([`Foreign::controls`]) to
-    /// `value` and runs its callback, as [`Machine::start`].
-    fn control(&mut self, id: i32, value: f64, context: u64) -> Option<CoId>;
-    /// The editor moved widget `n` of the front end's own interface (one it
-    /// builds itself, not from controls) to `value`: the next start of its
-    /// widget entry applies it.
-    fn stage_widget(&mut self, _n: u32, _value: f64, _cell: Option<u32>) {}
-    /// Widget `n` of the front end's own interface as it stands now.
-    fn widget(&self, _n: u32) -> Option<WidgetLook> {
-        None
-    }
-    /// Copy widget `n`'s array cells into preallocated storage.
-    fn widget_cells(&self, _n: u32, _out: &mut [f64]) -> bool {
-        false
-    }
-    /// Widget `n`'s text into `out`; false when it has none.
-    fn widget_text(&self, _n: u32, _out: &mut Text) -> bool {
-        false
-    }
-    /// The state the script saves for a project, written into `out` in the
-    /// front end's own form; its length, or `None` when it saves none or
-    /// it does not fit.
-    fn save_state(&mut self, _out: &mut [u8]) -> Option<usize> {
-        None
-    }
-    /// The interface the front end builds itself, as it stands now, in its
-    /// own type; not real-time (the editor reads it once, after init).
-    fn own_page(&self) -> Option<Box<dyn std::any::Any + Send>> {
-        None
-    }
-    /// How many times it ran a callback, each resume of one counted,
-    /// wrapping: unchanged, its state is as it was.
-    fn runs(&self) -> u32 {
-        0
-    }
-}
-
-/// What the editor redraws of a front end's own widget.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WidgetLook {
-    pub value: f64,
-    pub visible: bool,
-    pub enabled: bool,
-}
-
-/// Compiled code a [`Machine`] runs; each engine makes its own machine.
-pub trait Foreign: Send + Sync + std::fmt::Debug {
-    /// Not real-time: builds the language state.
-    fn machine(&self) -> Box<dyn Machine>;
-    /// What a user can move ([`Machine::control`]), by name; its index is
-    /// the control's id.
-    fn controls(&self) -> &[String];
-}
-
 /// How a run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -167,7 +99,7 @@ pub struct CoId {
 }
 
 impl CoId {
-    /// A handle for a [`Machine`]'s own coroutine slots.
+    /// A handle for a machine's own coroutine slots.
     #[must_use]
     pub fn new(index: u16, generation: u16) -> Self {
         Self { index, generation }

@@ -61,7 +61,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         })
         .collect();
     let mut scripts: Vec<_> = instrument.scripts.iter().enumerate().map(|(slot, s)| json!({
-        "original_slot": slot, "name": s.name, "dialect": format!("{:?}", s.dialect),
+        "original_slot": slot, "name": s.name,
         "data": s.data.iter().map(|(name, bytes)| json!({"name": name, "bytes": bytes.len()})).collect::<Vec<_>>(),
         "runtime_slot": null, "compile_status": "unknown", "callbacks": null,
     })).collect();
@@ -123,11 +123,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                 );
                 fields.insert(
                     "callback_entry_kind".into(),
-                    json!(if script.foreign.is_some() {
-                        "foreign_dispatch"
-                    } else {
-                        "bytecode_offset"
-                    }),
+                    json!("bytecode_offset"),
                 );
             }
         }
@@ -189,7 +185,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         asset_cache.borrow_mut().insert(name.to_owned(), size);
         size
     };
-    let ui: Vec<_> = loaded.faces.iter().zip(&loaded.pages).enumerate().map(|(slot, (face, page))| {
+    let ui: Vec<_> = loaded.faces.iter().enumerate().map(|(slot, face)| {
         if let (Some(face), Ok(slot_id)) = (face, u8::try_from(slot)) {
             match kontra_host::ui::interface(face, slot_id, &engine, &metadata) {
                 Ok(tree) => json!({"runtime_slot": slot, "original_slot": mapping.as_ref().and_then(|_| loaded.persist.get(slot)).map(|p| p.script), "widgets": tree.widgets.iter().map(|w| json!({"name": w.name, "source_id": w.source_id, "kind": format!("{:?}", w.kind), "hidden": w.hidden, "enabled": w.enabled, "text": w.text, "details": format!("{w:?}")})).collect::<Vec<_>>(), "assets": tree.assets.iter().map(|a| {
@@ -200,14 +196,6 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                 }).collect::<Vec<_>>(), "unsupported": tree.unsupported.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>()}),
                 Err(e) => json!({"runtime_slot": slot, "error": e.to_string()}),
             }
-        } else if let Some(page) = page {
-            let tree = kontra_host::ui::lua::tree(page, &metadata);
-            json!({"runtime_slot": slot, "original_slot": mapping.as_ref().and_then(|_| loaded.persist.get(slot)).map(|p| p.script), "widgets": tree.widgets.iter().map(|w| json!({"name": w.name, "source_id": w.source_id, "kind": format!("{:?}", w.kind), "hidden": w.hidden, "enabled": w.enabled, "text": w.text, "details": format!("{w:?}")})).collect::<Vec<_>>(), "assets": tree.assets.iter().map(|a| {
-                    let size = asset_size(&a.path);
-                    json!({"path": a.path, "kind": format!("{:?}", a.kind),
-                        "found": size.map(|_| true), "bytes": size,
-                        "read_status": if size.is_some() { "resolved" } else { "not_resolved" }})
-                }).collect::<Vec<_>>(), "unsupported": tree.unsupported.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>()})
         } else { json!({"runtime_slot": slot, "error": "no UI model"}) }
     }).collect();
     let (resolved_assets, unresolved_assets) = ui
@@ -338,14 +326,13 @@ fn callbacks(c: &Callbacks) -> (Value, usize) {
         c.pgs_changed,
         c.ui_controls,
         c.async_complete,
-        c.widget,
     ];
     let count = entries.iter().filter(|e| e.is_some()).count()
         + c.ui_control.iter().filter(|(_, e)| e.is_some()).count();
     (
         json!({"init":c.init,"note":c.note,"release":c.release,"controller":c.controller,
         "persistence_changed":c.persistence_changed,"listener":c.listener,"pgs_changed":c.pgs_changed,
-        "ui_controls":c.ui_controls,"async_complete":c.async_complete,"widget_dispatch":c.widget,
+        "ui_controls":c.ui_controls,"async_complete":c.async_complete,
         "ui_control":c.ui_control.iter().map(|(id,entry)| json!({"control_id":id,"entry":entry})).collect::<Vec<_>>()}),
         count,
     )

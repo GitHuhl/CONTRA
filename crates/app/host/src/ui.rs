@@ -12,7 +12,6 @@ use crate::perf_view::{View, ViewControl};
 
 mod keybed;
 mod looks;
-pub mod lua;
 mod picture;
 mod widget;
 use kontra_ui_model as ui;

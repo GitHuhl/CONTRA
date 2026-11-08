@@ -85,8 +85,6 @@ pub enum Source {
     Ksp { slot: u8 },
     /// A Creator Tools GUI Designer performance view (`.nckp`).
     PerformanceView,
-    /// A Falcon / UVI Lua script.
-    FalconLua,
 }
 
 /// One screen of the interface. KSP declares one; Falcon may declare several.
@@ -234,12 +232,7 @@ pub struct Widget {
     /// Current source value for typed widgets; numeric controls use their service.
     pub value: Option<Value>,
     pub waveform: Option<Waveform>,
-    /// Unresolved Falcon display request; independent of a Kontakt zone descriptor.
-    pub uvi_wave_view_request: Option<UviWaveViewRequest>,
     pub meter: Option<MeterAddress>,
-    /// Exact Falcon element request. It requires its own resolved tap and must
-    /// never fall back to an unrelated Kontakt/output meter address.
-    pub uvi_meter_request: Option<UviMeterRequest>,
     /// Source display endpoints, including an inverted meter scale.
     pub meter_range: Option<[i32; 2]>,
 }
@@ -291,9 +284,7 @@ impl Widget {
             active_index: None,
             value: None,
             waveform: None,
-            uvi_wave_view_request: None,
             meter: None,
-            uvi_meter_request: None,
             meter_range: None,
         }
     }
@@ -378,28 +369,6 @@ pub struct MeterAddress {
     pub bus: Option<i32>,
 }
 
-/// Authored Falcon element identity, independent of DSP packing or UI order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum UviMeterScope {
-    Program,
-    Layer { ordinal: u32 },
-    Keygroup,
-    Oscillator,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct UviMeterRequest {
-    /// Canonical promoted-element ordinal exposed by Lua `__id`.
-    pub element_id: u32,
-    /// Actual XML NodeId from the same promoted element's retained source map.
-    pub element_node: u32,
-    pub scope: UviMeterScope,
-    pub bus_id: u32,
-    pub use_output: bool,
-    /// Authored mono-sum request; no channel averaging law is implied here.
-    pub display_as_mono: bool,
-}
-
 /// Attached source zone and waveform properties. Zone is the native ID, not
 /// an index into a translated sample list; the importer resolves that identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,58 +379,6 @@ pub struct Waveform {
     pub table: Vec<i32>,
     pub highlighted: Option<u32>,
     pub midi_start_note: u8,
-}
-
-/// Exact authored WaveView display request. This does not assert that a
-/// sample provider, oscillator binding or native paint law is available.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct UviWaveViewRequest {
-    pub sample: UviWaveViewSample,
-    /// Assignment-time module context; never substitute a host CWD/search root.
-    pub script_directory: Option<String>,
-    pub binding: UviWaveViewBinding,
-    pub colors: UviWaveViewColors,
-}
-
-/// Manual display sample, independent of the bound oscillator's own sample.
-/// Unspecified leaves the native default unknown. Empty strings remain authored.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum UviWaveViewSample {
-    #[default]
-    Unspecified,
-    /// An explicit sample=nil assignment, independent of an unset constructor.
-    Cleared,
-    /// Original authored path; resolve with its authenticated source context.
-    Manual(String),
-    /// The Lua source remains intact; do not invent a usable sample request.
-    Unsupported { type_name: String },
-}
-
-/// A retained oscillator request, never a Kontakt zone ID or sample edit.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum UviWaveViewBinding {
-    #[default]
-    Unspecified,
-    Oscillator {
-        element_id: u32,
-        element_node: u32,
-    },
-    Unsupported {
-        type_name: String,
-    },
-}
-
-/// Each unset color leaves that native default unknown. Invalid authored values
-/// also retain a per-property finding; these are requests, not painted colors.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UviWaveViewColors {
-    pub playback_cursor: Option<Rgba>,
-    pub high_wave: Option<Rgba>,
-    pub low_wave: Option<Rgba>,
-    pub axis: Option<Rgba>,
-    pub channel_separator: Option<Rgba>,
-    pub sample_name: Option<Rgba>,
-    pub sample_name_background: Option<Rgba>,
 }
 
 /// The drag gesture of a continuous control: which way it moves, and how
@@ -640,41 +557,7 @@ impl Default for Display {
 
 impl Display {
     /// Formats a readout only; the raw value and edit conversion remain unchanged.
-    pub fn format_value(&self, value: f64, integer: bool, source: Source) -> String {
-        if source == Source::FalconLua {
-            // Port v1 4bffbb18:src/ui/uvi_instrument.rs::unit_text/number_text.
-            let number = |value: f64, integer: bool| {
-                if integer {
-                    format!("{value:.0}")
-                } else {
-                    format!("{value:.3}")
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_owned()
-                }
-            };
-            let (value, suffix) = match self.unit.as_str() {
-                "Percent" => (value, "%"),
-                "PercentNormalized" => (value * 100., "%"),
-                "Seconds" if value.abs() < 1. => (value * 1000., "ms"),
-                "Seconds" => (value, "s"),
-                "MilliSeconds" if value.abs() > 1000. => (value / 1000., "s"),
-                "MilliSeconds" => (value, "ms"),
-                "Hertz" if value.abs() > 1000. => (value / 1000., "kHz"),
-                "Hertz" => (value, "Hz"),
-                "Decibels" => (value, "dB"),
-                "LinearGain" if value <= 0. => return "-inf dB".into(),
-                "LinearGain" => (20. * value.log10(), "dB"),
-                "Pan" if value == 0. => return "Center".into(),
-                "SemiTones" => (value, "st"),
-                // shortcut: v1 leaves these units numeric; calibrate with native readouts before extending.
-                "" | "Generic" | "UviFilter" | "Pan" | "Megabyte" | "Cents" | "MidiKey" => {
-                    return number(value, integer);
-                }
-                suffix => (value, suffix),
-            };
-            return format!("{} {suffix}", number(value + 0., false));
-        }
+    pub fn format_value(&self, value: f64) -> String {
         let value = value / if self.ratio == 0. { 1. } else { self.ratio };
         let number = if value.fract() == 0. {
             format!("{value}")
@@ -1371,11 +1254,11 @@ mod tests {
             unit: "dB".into(),
         };
         assert_eq!(
-            display.format_value(123., true, Source::Ksp { slot: 2 }),
+            display.format_value(123.),
             "1.23 dB"
         );
         assert_eq!(
-            display.format_value(123., false, Source::Generated),
+            display.format_value(123.),
             "1.23 dB"
         );
         assert_eq!(
@@ -1383,16 +1266,8 @@ mod tests {
                 ratio: 0.,
                 unit: String::new()
             }
-            .format_value(1.125, false, Source::Ksp { slot: 0 }),
+            .format_value(1.125),
             "1.12"
-        );
-        assert_eq!(
-            Display::default().format_value(1.125, false, Source::FalconLua),
-            "1.125"
-        );
-        assert_eq!(
-            Display::default().format_value(1.6, true, Source::FalconLua),
-            "2"
         );
     }
 
@@ -1561,18 +1436,6 @@ mod tests {
                 WidgetRef(4)
             ]
         );
-    }
-
-    #[test]
-    fn lua_panels_draw_before_children_and_by_z() {
-        let mut ui = sample();
-        ui.source = Source::FalconLua;
-        // Label (z 0) before the panel (z 1); the knob straight after its panel.
-        assert_eq!(
-            ui.draw_order(PageRef(0)),
-            [WidgetRef(2), WidgetRef(0), WidgetRef(1)]
-        );
-        assert_eq!(ui.page_rect(WidgetRef(1)), Rect::new(15, 26, 40, 40));
     }
 
     #[test]

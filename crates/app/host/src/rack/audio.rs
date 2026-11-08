@@ -512,17 +512,6 @@ impl RackAudio {
                         self.dropped += 1;
                     }
                 }
-                Command::Widget {
-                    part,
-                    slot,
-                    n,
-                    value,
-                    cell,
-                } => {
-                    if let Some(Some(p)) = self.parts.get_mut(part) {
-                        p.engine.set_widget(slot, n, value, cell);
-                    }
-                }
             }
         }
     }

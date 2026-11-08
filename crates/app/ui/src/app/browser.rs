@@ -1,5 +1,5 @@
 //! The browser, as v2 laid it out: the libraries above (search, order,
-//! filter, format, favorites, recent), the chosen library's instruments
+//! filter, favorites, recent), the chosen library's instruments
 //! below as a folder tree. Its one action is to pick an instrument.
 
 use mui::prelude::*;
@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use kontra_ui_model::{AssetRef, ImageMeta};
 
-use super::{Action, App, Format, Shelf};
+use super::{Action, App, Shelf};
 use crate::Pictures;
-use crate::kit::{self, Icon, field, glyph, icon_button, interactive, list_row, rule, tab};
+use crate::kit::{self, Icon, field, glyph, icon_button, interactive, list_row, rule};
 use crate::theme::{CONTROL, SIDEBAR, SMALL, SPACE, TEXT, TIGHT, accent, secondary};
 
 pub(super) fn view(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
@@ -120,18 +120,12 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     if hide.changed {
         v.browser_hidden = true;
     }
-    let mut formats = Vec::new();
-    for (format, label) in [(Format::Kontakt, "Kontakt"), (Format::Uvi, "Falcon / UVI")] {
-        let t = tab(ui, format!("format-{label}"), label, v.format == format);
-        if t.changed && v.format != format {
-            (v.format, v.library) = (format, None);
-            v.search.clear();
-        }
-        formats.push(t.el);
-    }
-    let format = v.format;
-    let count = app.libraries.iter().filter(|l| l.format == format).count();
-    formats.extend([spacer(), caption(count.to_string()).fill(secondary())]);
+    let count = app.libraries.len();
+    let header = vec![
+        caption("Kontakt".to_owned()),
+        spacer(),
+        caption(count.to_string()).fill(secondary()),
+    ];
     let starred = app.libraries.iter().filter(|l| l.starred).count();
     let mut shelf_rows = Vec::new();
     for (shelf, icon, label, n) in [
@@ -180,7 +174,7 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         .gap(TIGHT)
         .align(Align::Center)
         .pad(kit::edges(SPACE, SPACE, 0., SPACE)),
-        row(formats)
+        row(header)
             .align(Align::Center)
             .pad(kit::edges(0., SPACE, 0., 0.)),
         rule(),
@@ -197,8 +191,7 @@ fn library_list(ui: &mut Ui, app: &mut App) -> El {
         .iter()
         .enumerate()
         .filter(|(_, l)| {
-            l.format == v.format
-                && (l.starred || v.shelf != Shelf::Favorites)
+            (l.starred || v.shelf != Shelf::Favorites)
                 && matches(&l.name, &v.search)
         })
         .collect();

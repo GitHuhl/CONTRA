@@ -14,14 +14,10 @@ fn main() {
             single: false,
         })
         .collect();
-    let programs =
-        |bank: &std::path::Path| kontra_format_uvi::programs(bank).map_err(|e| e.to_string());
     let mut cache = Cache::default();
     for pass in ["cold", "cached"] {
         let start = Instant::now();
-        let Some(catalog) =
-            kontra_library::scan(&roots, &Progress::default(), &mut cache, &programs)
-        else {
+        let Some(catalog) = kontra_library::scan(&roots, &Progress::default(), &mut cache) else {
             return;
         };
         let ms = start.elapsed().as_secs_f64() * 1e3;
@@ -33,10 +29,9 @@ fn main() {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 println!(
-                    "{:40} {:24} {:?} {:5} presets {:3} multis  {art}",
+                    "{:40} {:24} {:5} presets {:3} multis  {art}",
                     l.name,
                     l.vendor,
-                    l.format,
                     l.presets.len(),
                     l.multis
                 );

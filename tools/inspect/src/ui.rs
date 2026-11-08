@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use kontra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, Text, Timed};
-use kontra_host::ui::lua::Page as _;
+use kontra_engine::{Engine, Event, HostNote, HostPattern, Plan, Prepared, Timed};
 use kontra_stream::{Store, StoreConfig};
 use kontra_ui_model::{Interface, Kind, Value, Widget};
 use serde_json::{Value as Json, json};
@@ -43,30 +42,7 @@ fn tree(
             .map(Some)
             .map_err(|e| anyhow::anyhow!("building UI model for slot {slot}: {e}"));
     }
-    let current = engine
-        .vm(slot_id)
-        .and_then(kontra_engine::Vm::own_page)
-        .and_then(|p| p.downcast::<kontra_lua::Ui>().ok());
-    let Some(page) = current
-        .as_deref()
-        .or_else(|| loaded.pages.get(slot).and_then(Option::as_ref))
-    else {
-        return Ok(None);
-    };
-    let mut tree = kontra_host::ui::lua::tree(page, &|_| None);
-    let mut text = Text::EMPTY;
-    for (index, _) in (0u32..).zip(0..tree.widgets.len()) {
-        if let Some(look) = engine.widget(slot_id, index) {
-            let words = engine.widget_text(slot_id, index, &mut text);
-            kontra_host::ui::lua::apply(
-                &mut tree,
-                index as usize,
-                look,
-                words.then(|| text.as_str()),
-            );
-        }
-    }
-    Ok(Some(tree))
+    Ok(None)
 }
 
 type Cells = (u8, Vec<Option<i64>>, Vec<Option<String>>);
@@ -197,7 +173,7 @@ pub fn run(path: &Path) -> Result<(Json, String)> {
     let mut controls = Vec::new();
     let mut models = Vec::new();
     let mut model_errors = Vec::new();
-    for slot in 0..loaded.faces.len().max(loaded.pages.len()) {
+    for slot in 0..loaded.faces.len() {
         let model = match tree(&loaded, &engine, slot) {
             Ok(Some(model)) => model,
             Ok(None) => continue,
@@ -207,7 +183,6 @@ pub fn run(path: &Path) -> Result<(Json, String)> {
             }
         };
         models.push(json!({"slot":slot, "widgets":model.widgets.iter().map(|w| format!("{w:?}")).collect::<Vec<_>>(), "assets":format!("{:?}",model.assets), "unsupported":format!("{:?}",model.unsupported)}));
-        let lua = loaded.pages.get(slot).is_some_and(Option::is_some);
         let slot_id = u8::try_from(slot).context("too many script slots")?;
         let mut seen = HashSet::new();
         loop {
@@ -281,21 +256,12 @@ pub fn run(path: &Path) -> Result<(Json, String)> {
                 let before_unhandled = format!("{:?}", engine.unhandled_actions());
                 let before_missing = engine.stats().missing_frames;
                 engine.clear_trace();
-                if lua {
-                    if let Ok(id) = u32::try_from(id) {
-                        engine.set_widget(slot_id, id, value, None);
-                    } else {
-                        moves.push(json!({"value":value,"error":"negative widget id"}));
-                        continue;
-                    }
+                let v = if matches!(widget.value, Some(Value::Real(_))) {
+                    value.to_bits() as i64
                 } else {
-                    let v = if matches!(widget.value, Some(Value::Real(_))) {
-                        value.to_bits() as i64
-                    } else {
-                        value.round() as i64
-                    };
-                    engine.set_control(slot_id, id, v);
-                }
+                    value.round() as i64
+                };
+                engine.set_control(slot_id, id, v);
                 let mut events: Vec<_> = engine
                     .trace_events()
                     .iter()

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kontra_library::{Cache, Folder, Format, Prefs, Progress, Root, clean_name, natural, scan};
+use kontra_library::{Cache, Folder, Prefs, Progress, Root, clean_name, natural, scan};
 
 /// A fresh folder holding `files` (path, contents).
 fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -17,15 +17,8 @@ fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
-fn programs(bank: &Path) -> Result<Vec<String>, String> {
-    match std::fs::read_to_string(bank).unwrap().as_str() {
-        "bad" => Err("bank: no header".into()),
-        text => Ok(text.lines().map(String::from).collect()),
-    }
-}
-
 fn run(roots: &[Root], cache: &mut Cache) -> kontra_library::Catalog {
-    scan(roots, &Progress::default(), cache, &programs).unwrap()
+    scan(roots, &Progress::default(), cache).unwrap()
 }
 
 fn root(dir: &Path) -> Root {
@@ -52,10 +45,6 @@ fn libraries_are_found_named_and_shelved() {
         // Unregistered, under a vendor folder: presets beside samples.
         ("Vendor X/Piano_v1.2 [Kontakt]/Piano.nki", ""),
         ("Vendor X/Piano_v1.2 [Kontakt]/Samples/a.wav", ""),
-        // A loose bank at the root is a library of its own.
-        ("Winds.ufs", "Flute.uvip\nOboe/Oboe.uvip"),
-        ("Winds.png", ""),
-        ("Broken.ufs", "bad"),
         // A folder with no presets is no library.
         ("Docs/readme.txt", ""),
     ];
@@ -76,13 +65,11 @@ fn libraries_are_found_named_and_shelved() {
         [
             ("Areia", "Audio Imperia"),
             ("Piano", "Vendor X"),
-            ("Winds", "")
         ]
     );
 
     let areia = &catalog.libraries[0];
     assert!(areia.registered);
-    assert_eq!(areia.format, Format::Kontakt);
     assert_eq!(areia.multis, 1);
     let inside: Vec<_> = areia
         .presets
@@ -123,23 +110,11 @@ fn libraries_are_found_named_and_shelved() {
         .collect();
     assert_eq!(sub, ["2 Shorts", "10 Longs"]);
 
-    let winds = &catalog.libraries[2];
-    assert_eq!(winds.format, Format::Uvi);
     assert_eq!(
-        winds.presets,
-        [
-            dir.join("Winds.ufs/Flute.uvip"),
-            dir.join("Winds.ufs/Oboe/Oboe.uvip")
-        ]
+        catalog.of(&areia.presets[0]).map(|l| l.name.as_str()),
+        Some("Areia")
     );
-    assert_eq!(winds.art, [dir.join("Winds.png")]);
-    assert_eq!(
-        catalog.of(&winds.presets[1]).map(|l| l.name.as_str()),
-        Some("Winds")
-    );
-
-    assert_eq!(catalog.issues.len(), 1);
-    assert_eq!(catalog.issues[0].path, dir.join("Broken.ufs"));
+    assert!(catalog.issues.is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -184,35 +159,27 @@ fn the_cache_reads_a_file_once_and_again_when_it_changes() {
         &[
             ("Lib/Lib.nicnt", NICNT),
             ("Lib/Lib.nki", ""),
-            ("Bank.ufs", "One.uvip"),
         ],
     );
     let file = dir.join("cache.json");
     let mut cache = Cache::default();
     run(&[root(&dir)], &mut cache);
-    assert_eq!(cache.reads, 2);
+    assert_eq!(cache.reads, 1);
     cache.save(&file).unwrap();
 
     let mut warm = Cache::load(&file);
     let catalog = run(&[root(&dir)], &mut warm);
-    assert_eq!((warm.reads, catalog.libraries.len()), (0, 2));
+    assert_eq!((warm.reads, catalog.libraries.len()), (0, 1));
 
-    // A changed bank is read again; a removed one is forgotten.
-    std::fs::write(dir.join("Bank.ufs"), "One.uvip\nTwo.uvip").unwrap();
+    // A changed product file is read again; a removed one is forgotten.
+    std::fs::write(dir.join("Lib/Lib.nicnt"), NICNT.replace("Areia", "Other")).unwrap();
     let catalog = run(&[root(&dir)], &mut warm);
     assert_eq!(warm.reads, 1);
-    assert_eq!(
-        catalog
-            .libraries
-            .iter()
-            .map(|l| l.presets.len())
-            .sum::<usize>(),
-        3
-    );
-    std::fs::remove_file(dir.join("Bank.ufs")).unwrap();
+    assert_eq!(catalog.libraries[0].name, "Other");
+    std::fs::remove_file(dir.join("Lib/Lib.nicnt")).unwrap();
     run(&[root(&dir)], &mut warm);
     warm.save(&file).unwrap();
-    assert!(!std::fs::read_to_string(&file).unwrap().contains("Bank.ufs"));
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("Lib.nicnt"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

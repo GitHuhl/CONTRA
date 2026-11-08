@@ -7,18 +7,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Programs;
 
 /// Bumped when what is kept, or how it is read, changes; an older file is
 /// dropped whole.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum Metadata {
     Product(String, String),
     NoProduct,
-    Programs(Vec<String>),
-    Failed(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,21 +118,7 @@ impl Cache {
             crate::product(nicnt).map_or(Metadata::NoProduct, |(n, c)| Metadata::Product(n, c))
         }) {
             Metadata::Product(name, company) => Some((name, company)),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn programs(
-        &mut self,
-        bank: &Path,
-        list: Programs<'_>,
-    ) -> Result<Vec<String>, String> {
-        match self.memo(bank, || {
-            list(bank).map_or_else(Metadata::Failed, Metadata::Programs)
-        }) {
-            Metadata::Programs(members) => Ok(members),
-            Metadata::Failed(reason) => Err(reason),
-            Metadata::Product(..) | Metadata::NoProduct => Err("not a bank".to_owned()),
+            Metadata::NoProduct => None,
         }
     }
 }

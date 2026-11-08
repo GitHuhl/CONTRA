@@ -98,14 +98,10 @@ pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> Sc
                     (id, script.callback(CallbackKind::UiControl, Some(n)))
                 })
                 .collect(),
-            widget: None,
         },
         coroutines: COROUTINES,
-        foreign: None,
         files: None,
         arrays: arrays(script),
-        hears_own_releases: true,
-        held_release_ends_children: true,
         links: Vec::new(),
         controls: controls(script),
         engine_pars: EnginePars {
@@ -368,62 +364,6 @@ fn symbol(script: &Script, name: &str) -> i32 {
         .position(|s| s.eq_ignore_ascii_case(name))
         .and_then(|n| i32::try_from(n).ok())
         .map_or(i32::MIN, |n| SYMBOL_BASE + n)
-}
-
-/// The engine's view of a UVI (Lua) script: its own machine runs it, so the
-/// bytecode program stays empty.
-#[must_use]
-pub fn lua_plan(compiled: kontra_lua::Compiled) -> ScriptPlan {
-    let defined = compiled.callbacks;
-    let entry = |on: bool, n: u32| on.then_some(n);
-    ScriptPlan {
-        program: kontra_engine::Program::default(),
-        callbacks: Callbacks {
-            init: entry(defined.init, kontra_lua::Callbacks::INIT),
-            note: entry(defined.note, kontra_lua::Callbacks::NOTE),
-            release: entry(defined.release, kontra_lua::Callbacks::RELEASE),
-            controller: entry(defined.controller, kontra_lua::Callbacks::CONTROLLER),
-            persistence_changed: None,
-            listener: None,
-            pgs_changed: None,
-            ui_controls: None,
-            async_complete: None,
-            ui_control: Vec::new(),
-            widget: Some(kontra_lua::Callbacks::WIDGET),
-        },
-        coroutines: COROUTINES,
-        controls: Controls::default(),
-        engine_pars: EnginePars::default(),
-        // No reverb parameter ids are bound, so these are never read.
-        reverb_laws: ir::ReverbControls::from_fn(|_| kontra_engine::ir::Law::Linear {
-            lo: 0.0,
-            hi: 1.0,
-        }),
-        reverb_networks: Vec::new(),
-        knobs: Vec::new(),
-        data: Vec::new(),
-        text_data: Vec::new(),
-        source_folder: None,
-        library_folder: None,
-        factory_folder: None,
-        restore: Vec::new(),
-        restore_texts: Vec::new(),
-        foreign: Some(std::sync::Arc::new(compiled)),
-        files: None,
-        arrays: Vec::new(),
-        // A UVI script never sees the notes it plays. In UVIWorkstation's
-        // built-in Lua (0x1425676a0) `releaseVoice` and a `playNote` duration
-        // post a NoteOff with `postEvent`, which only appends to the
-        // manager's outgoing events (0x141397330 → 0x1413889b0), and a
-        // script without `onRelease` forwards each NoteOff by `postEvent`
-        // (`_onRelease`): fed back, every pass-through script would loop. A
-        // host note-off still reaches it. (Augmented Orchestra's arpeggiator
-        // releases the held key's notes from `onRelease`.)
-        hears_own_releases: false,
-        // A held-back NoteOff keeps the posted note (`_onRelease` posts it).
-        held_release_ends_children: false,
-        links: Vec::new(),
-    }
 }
 
 #[cfg(test)]

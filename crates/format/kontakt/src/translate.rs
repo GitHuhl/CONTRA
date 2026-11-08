@@ -87,7 +87,6 @@ pub(crate) fn instrument(
             Some(text) if !text.trim().is_empty() => out.scripts.push(ir::Script {
                 name: script.description.unwrap_or_default(),
                 slot,
-                dialect: ir::Dialect::Ksp,
                 data: data_files(&text, path, &mut resources),
                 source: text,
                 saved: (saved.get(slot).filter(|s| !s.is_empty()).cloned())

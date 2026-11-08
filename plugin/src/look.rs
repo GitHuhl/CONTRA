@@ -2,7 +2,7 @@
 //! back when the editor opens, saved again whenever it changes.
 
 use kontra_host::state::{SavedPartView, SavedView};
-use kontra_ui::app::{App, FaceLook, Format, PartTab, Shelf, Tab, View};
+use kontra_ui::app::{App, FaceLook, PartTab, Shelf, Tab, View};
 
 const TABS: [Tab; 3] = [Tab::Rack, Tab::Mixer, Tab::Report];
 const PART_TABS: [PartTab; 6] = [
@@ -13,7 +13,6 @@ const PART_TABS: [PartTab; 6] = [
     PartTab::Info,
     PartTab::Scripts,
 ];
-const FORMATS: [Format; 2] = [Format::Kontakt, Format::Uvi];
 const SHELVES: [Shelf; 3] = [Shelf::All, Shelf::Favorites, Shelf::Recent];
 
 fn index<T: PartialEq>(all: &[T], x: &T) -> u8 {
@@ -39,7 +38,6 @@ pub fn saved(app: &App, slots: &[usize]) -> SavedView {
         octave: v.octave,
         scale: u8::try_from(v.scale).unwrap_or(0),
         face_scale: u8::try_from(v.face_scale).unwrap_or(0),
-        format: index(&FORMATS, &v.format),
         shelf: index(&SHELVES, &v.shelf),
         descending: v.descending,
         split: v.split as f32,
@@ -67,7 +65,6 @@ pub fn apply(app: &mut App, s: &SavedView) {
         octave: s.octave,
         scale: usize::from(s.scale),
         face_scale: usize::from(s.face_scale),
-        format: pick(&FORMATS, s.format),
         shelf: pick(&SHELVES, s.shelf),
         descending: s.descending,
         split: f64::from(s.split),

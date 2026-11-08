@@ -298,14 +298,7 @@ fn drawn_page(
                 });
             } else if stock {
                 parts.push(
-                    stock::face(
-                        wd,
-                        t,
-                        (w, h),
-                        bare,
-                        matches!(tree.source, model::Source::FalconLua),
-                    )
-                    .at(0., 0.),
+                    stock::face(wd, t, (w, h), bare).at(0., 0.),
                 );
             }
             if let Some(glyphs) = &glyphs {
@@ -459,7 +452,7 @@ fn value(w: &model::Widget) -> f64 {
 
 /// `w`'s value as its source shows it: the script's label, else the value
 /// over the display ratio with its unit.
-pub(crate) fn readout(w: &model::Widget, source: model::Source) -> String {
+pub(crate) fn readout(w: &model::Widget) -> String {
     if w.hide.value {
         return String::new();
     }
@@ -472,7 +465,7 @@ pub(crate) fn readout(w: &model::Widget, source: model::Source) -> String {
             crate::keyboard::note_name(value(w).clamp(0., 127.) as u8)
         }
         Kind::Knob { display, .. } | Kind::ValueEdit { display, .. } => {
-            display.format_value(value(w), true, source)
+            display.format_value(value(w))
         }
         _ => String::new(),
     }

@@ -63,34 +63,15 @@ impl Engine {
         ran
     }
 
-    /// The editor moved widget `n` of script `slot`'s own (Lua) page to `value`.
-    pub fn set_widget(&mut self, slot: u8, n: u32, value: f64, cell: Option<u32>) {
-        let entry = (self.plan.scripts.get(usize::from(slot))).and_then(|s| s.callbacks.widget);
-        if let (Some(entry), Some(vm)) = (entry, self.vm_mut(slot)) {
-            vm.stage_widget(n, value, cell);
-            let mut running = Running::new(Kind::UiControl, None);
-            running.ui = i32::try_from(n).unwrap_or(i32::MAX);
-            self.run_callback(slot, entry, running);
-        }
-    }
-
     /// The UI or the host moved control `id` (its UI id) of script `slot` to
     /// `value`: it is stored, then `on ui_controls` runs and then the
     /// control's own `on ui_control`, as in Kontakt; a control without one
     /// still stores and runs `on ui_controls`.
-    /// A foreign script's control (`Foreign::controls`) takes `value` as
-    /// the bits of an `f64` and runs its own callback.
     pub fn set_control(&mut self, slot: u8, id: i32, value: i64) {
         let plan = Arc::clone(&self.plan);
         let Some(script) = plan.scripts.get(usize::from(slot)) else {
             return;
         };
-        if script.foreign.is_some() {
-            let value = f64::from_bits(value as u64);
-            let running = Running::new(Kind::UiControl, None);
-            self.run_with(slot, running, |vm, context| vm.control(id, value, context));
-            return;
-        }
         let own = script.callbacks.ui_control.iter().find(|(i, _)| *i == id);
         let own = own.and_then(|&(_, own)| own);
         let controls = &script.controls;
@@ -247,9 +228,6 @@ impl Engine {
         if let Step::Wait(micros) = vm.run(&script.program, co, self) {
             self.wake(slot, vm, co, micros);
         }
-        while let Some((spawned, micros)) = vm.spawned() {
-            self.wake(slot, vm, spawned, micros);
-        }
     }
 
     /// Queues `co`'s resume `micros` from now; a full queue ends it.
@@ -305,18 +283,14 @@ impl Engine {
         true
     }
 
-    /// Runs the release callbacks of the slots after `note`'s player (from
-    /// it when it [hears its own](crate::ScriptPlan::hears_own_releases) and
-    /// did not `note_off` it); the slot that ignored it, if one did.
+    /// Runs the release callbacks from `note`'s player on (KSP: `note_off`
+    /// triggers `on release`; from the slot after it when it did `note_off`
+    /// it); the slot that ignored it, if one did.
     pub(crate) fn release_callbacks(&mut self, note: NoteRef) -> Option<u8> {
         let plan = Arc::clone(&self.plan);
         let first = self.notes.get(note).map_or(0, |n| {
             let player = n.first.checked_sub(1);
-            let hears = !n.noted_off
-                && player
-                    .and_then(|p| plan.scripts.get(usize::from(p)))
-                    .is_none_or(|s| s.hears_own_releases);
-            usize::from(if hears { player.unwrap_or(0) } else { n.first })
+            usize::from(if n.noted_off { n.first } else { player.unwrap_or(0) })
         });
         for (slot, script) in (0u8..).zip(&plan.scripts).skip(first) {
             if let Some(entry) = script.callbacks.release

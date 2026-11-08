@@ -286,10 +286,6 @@ fn libraries(browser: &Browser) -> Vec<app::Library> {
     (browser.catalog.libraries.iter())
         .map(|l| app::Library {
             name: l.name.clone(),
-            format: match l.format {
-                kontra_library::Format::Kontakt => app::Format::Kontakt,
-                kontra_library::Format::Uvi => app::Format::Uvi,
-            },
             presets: (l.presets.iter())
                 .map(|p| {
                     let p = p.strip_prefix(&l.dir).unwrap_or(p).with_extension("");
