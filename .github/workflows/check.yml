@@ -1,0 +1,22 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      # Builds the plugin and opens its CLAP and VST3 editors headless.
+      - run: nix flake check -L
+      - run: |
+          mkdir -p gpu-receipts
+          nix develop --command bash -c \
+            'VK_DRIVER_FILES=$KONTRA_SOFTWARE_VULKAN KONTRA_GPU_RECEIPT_DIR=$PWD/gpu-receipts cargo test --workspace'

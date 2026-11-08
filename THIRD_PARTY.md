@@ -78,8 +78,6 @@ question, not a conclusion that matching format facts require GPL.
 | vello 0.10.0 | `vendor/vello` | Apache-2.0 OR MIT | linebender/vello; patches in `vendor/vello/PATCHES.md`. |
 | ncw 0.4.0 | `vendor/ncw` | MIT OR Apache-2.0 | monomadic/ncw `75af0c0`. Test data in `vendor/ncw/tests/data` is part of that crate. |
 | Noto Sans | `assets/NotoSans.ttf` | SIL Open Font License 1.1 | Full text in `assets/OFL.txt`. |
-| Retired v2 BUFFR support integration | `v2-final` tag | ISC | Adapted from owner-maintained BUFFR commit `fd2fdba92f3f71cee24c0c72a39aa190fc9ee414`; retained notice and integration scope in `licenses/BUFFR/LICENSE` and `licenses/BUFFR/SOURCE.md`. |
-| buffr-durable-file, derpcat-flight-recorder | `vendor/buffr-durable-file`, `vendor/derpcat-flight-recorder` | ISC | Same BUFFR source checkpoint; each crate retains its own license. |
 
 ### The Truce License rider
 
@@ -122,8 +120,7 @@ separate entries. Source-specific components are described above.
 | BSD-3-Clause | tiny-skia, tiny-skia-path |
 | BSL-1.0 | clipboard-win, error-code |
 | BSD-2-Clause | arrayref |
-| ISC | libloading, buffr-durable-file, derpcat-flight-recorder, rustls-webpki, untrusted |
-| CDLA-Permissive-2.0 | webpki-roots 1.0.9 trust-anchor data; complete agreement is included in generated dependency notices |
+| ISC | libloading |
 | CC0-1.0 | hexf-parse |
 
 The discovery table groups license IDs and overlaps; it does **not**
@@ -163,7 +160,7 @@ Regenerate this list with
 Keep LICENSE, NOTICE, this file and the applicable third-party copyright
 and license texts with redistributed material. Linux and Windows nightlies
 consolidate the complete root notices, legal review, dependency notices, MOOSE
-rider and NOTICE, MUI and BUFFR texts, and font licenses in `LICENSES.txt`.
+rider and NOTICE, MUI text, and font licenses in `LICENSES.txt`.
 The original paths identify sections of this file rather than separate files.
 The release asset `KONTRA-nightly-covered-source.zip` supplies the MPL dependency
 source archives; `release-manifest.json` records their checksums. macOS retains

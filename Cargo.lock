@@ -556,6 +556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-probe"
+version = "0.0.0"
+dependencies = [
+ "clap-sys",
+ "libloading",
+ "png",
+ "x11rb",
+]
+
+[[package]]
 name = "clap-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

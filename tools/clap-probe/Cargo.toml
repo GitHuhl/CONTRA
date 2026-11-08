@@ -1,0 +1,13 @@
+[package]
+name = "clap-probe"
+version = "0.0.0"
+edition.workspace = true
+license = "Apache-2.0"
+publish = false
+description = "Opens a CLAP plugin's editor in a bare X11 host and screenshots it: the UI check that needs no DAW"
+
+[dependencies]
+clap-sys = "0.5"
+libloading = "0.8"
+x11rb = "0.13"
+png = "0.18"

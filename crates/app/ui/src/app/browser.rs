@@ -122,7 +122,7 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     }
     let count = app.libraries.len();
     let header = vec![
-        caption("Kontakt".to_owned()),
+        caption("Libraries".to_owned()).fill(secondary()),
         spacer(),
         caption(count.to_string()).fill(secondary()),
     ];
@@ -176,7 +176,7 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         .pad(kit::edges(SPACE, SPACE, 0., SPACE)),
         row(header)
             .align(Align::Center)
-            .pad(kit::edges(0., SPACE, 0., 0.)),
+            .pad(kit::edges(TIGHT, SPACE, TIGHT, SPACE)),
         rule(),
         col(shelf_rows).pad((TIGHT, 0.)),
         rule(),
