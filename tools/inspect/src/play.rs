@@ -13,16 +13,16 @@ use super::{RATE, scenario};
 const BLOCK: usize = 128;
 const TAIL_SECONDS: u64 = 20;
 
-pub fn run(path: &Path, scenario_name: &str, oracle: bool) -> Result<(Value, String)> {
+pub fn run(path: &Path, scenario_name: &str) -> Result<(Value, String)> {
     let events = if scenario_name == "user" {
         scenario::user()
     } else {
         scenario::file(Path::new(scenario_name))?
     };
-    run_events(path, scenario_name, events, oracle, false)
+    run_events(path, scenario_name, events)
 }
 
-pub fn segment(path: &Path, part: u64, oracle: bool) -> Result<(Value, String)> {
+pub fn segment(path: &Path, part: u64) -> Result<(Value, String)> {
     let names = [
         "legato slow",
         "legato fast",
@@ -34,15 +34,13 @@ pub fn segment(path: &Path, part: u64, oracle: bool) -> Result<(Value, String)> 
     let name = names
         .get(usize::try_from(part)?)
         .context("invalid segment")?;
-    run_events(path, name, scenario::user_segment(part), oracle, true)
+    run_events(path, name, scenario::user_segment(part))
 }
 
 fn run_events(
     path: &Path,
     scenario_name: &str,
     events: Vec<scenario::Input>,
-    oracle: bool,
-    first_onset: bool,
 ) -> Result<(Value, String)> {
     let end = events.last().map_or(0, |e| e.frame);
     ensure!(end <= u64::from(RATE) * 3600, "scenario exceeds one hour");
@@ -262,22 +260,6 @@ fn run_events(
         && wait_timeouts == 0
         && stream_stats.read_errors == 0
         && stream_stats.requests_refused == 0;
-    let reference = if oracle {
-        if complete {
-            Some(
-                match super::oracle::run(path, &events, &rendered, first_onset) {
-                    Ok(value) => value,
-                    Err(error) => json!({"status":"error", "reason":format!("{error:#}")}),
-                },
-            )
-        } else {
-            Some(
-                json!({"status":"error", "reason":"v3 render incomplete; oracle comparison skipped"}),
-            )
-        }
-    } else {
-        None
-    };
     let mut summary = format!(
         "{}: scenario {scenario_name}, {} input events\n  peak {peak:.6}, clipped samples {clipped}, max sample jump {jump:.6}\n  {} voices active {:.3} s after last note-off (per-voice last-render peak before group FX in JSON)\n  loudest remaining voice peak {loudest_remaining:.8}; EQ route snapshots: {}; max CC-window HF energy {burst_peak:.8}\n  missing sample frames: {}; offline wait timeouts: {wait_timeouts}; render complete: {complete}; audio FNV-1a: {fingerprint}\n",
         loaded.name,
@@ -288,40 +270,11 @@ fn run_events(
         stats.missing_frames
     );
     summary.push_str(&super::routes::summary(&route_events));
-    if let Some(reference) = &reference {
-        let status = reference
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("error");
-        let detail = reference
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let difference = reference
-            .get("comparison")
-            .and_then(|r| r.get("level_diff_db"))
-            .and_then(Value::as_f64);
-        let peak_difference = reference
-            .get("comparison")
-            .and_then(|r| r.get("peak_diff_db"))
-            .and_then(Value::as_f64);
-        let native_jump = reference
-            .get("native_metrics")
-            .and_then(|r| r.get("max_sample_jump"))
-            .and_then(Value::as_f64);
-        let db =
-            |v: Option<f64>| v.map_or_else(|| "unavailable".to_owned(), |x| format!("{x:+.2} dB"));
-        let jump = native_jump.map_or_else(|| "unavailable".to_owned(), |x| format!("{x:.6}"));
-        summary.push_str(&format!(
-            "  oracle: {status}; native minus v3 RMS {}, peak {}; native max jump {jump} {detail}\n",
-            db(difference), db(peak_difference)
-        ));
-    }
     Ok((
         json!({"schema_version":1,"command":"play","instrument":path,"engine":"v3",
         "result":{"scenario":scenario_name,"rate":RATE,"events":events.iter().map(|e|json!({"frame":e.frame,"event":e.description})).collect::<Vec<_>>(),
         "trace":trace,"stage_events":stage_events,"route_events":route_events,"route_event_semantics":"values evaluated during CC or note-on processing before smoothing, combining and clamping; dependency flags are structural","trace_events_dropped":dropped,"remaining_voices":left,"metrics":{"peak":peak,"clipped_samples":clipped,"max_sample_jump":jump,"cc_hf_bursts":bursts,"octave_bands":octave_bands,"octave_time":octave_time},
-        "oracle":reference,"diagnostics":diagnostics,"engine_stats":format!("{stats:?}"), "stream_stats":format!("{stream_stats:?}"), "missing_blocks":missing_blocks, "settle_timeouts":wait_timeouts, "render_complete":complete,"audio_fnv1a64":fingerprint,"unavailable":["instantaneous per-route smoothed values", "controller dependencies hidden inside arbitrary script state"]}}),
+        "diagnostics":diagnostics,"engine_stats":format!("{stats:?}"), "stream_stats":format!("{stream_stats:?}"), "missing_blocks":missing_blocks, "settle_timeouts":wait_timeouts, "render_complete":complete,"audio_fnv1a64":fingerprint,"unavailable":["instantaneous per-route smoothed values", "controller dependencies hidden inside arbitrary script state"]}}),
         summary,
     ))
 }

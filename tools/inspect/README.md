@@ -1,8 +1,7 @@
 # contra-inspect
 
 `contra-inspect load <instrument> --json <report.json>` reads and prepares a
-Kontakt instrument or a UVI program (`bank.ufs/path/program.uvip`, or the bank
-for its first program) using the v3 host. It prints a concise summary and writes
+Kontakt instrument using the host. It prints a concise summary and writes
 a versioned JSON inventory when `--json` is supplied. Exit 2 means a usage,
 read, store or output error.
 
@@ -17,12 +16,7 @@ unavailable data. The `law_applications` list records IDs, locations, inputs and
 Kontakt group envelopes, release counters, timed envelopes and LFOs, EQ routes,
 volume source curves, route lag, LFO-rate routes, modulation shapers, saved
 filter/EQ, compressors/limiters, route time floor, streaming and group/zone
-gain, pan and tuning at translation time.
-For UVI it records keygroup/zone gain, pan and tuning, amplitude and AHD
-envelopes, LFO shapes, matrix cells, filters and key/velocity fades, identified
-by XML byte offset and tag.
-UVI records include the source node attributes and context; cross-node mapper
-inputs are not fully captured. Coverage is
+gain, pan and tuning at translation time. Coverage is
 partial: all other translator law applications are explicitly unavailable. Referenced UI assets are read through the host
 resource resolver: `resolved` includes their byte length; `not_resolved` does
 not distinguish missing, inaccessible, or unsupported resources. This inventory
@@ -100,36 +94,21 @@ selectable menu values is reported with an error.
 Each move records callbacks and actions observed after the move, changed
 script cells, group envelope/effect settings, group and bus levels, shared
 rack effects, and modulation settings. It also records newly counted faults or
-unhandled actions. Foreign VM internal variables and the complete engine
+unhandled actions. Script-internal variables and the complete engine
 parameter state are unavailable, rather than reported as unchanged. The audio
 comparison retriggers C4 and measures successive 80 ms stereo RMS windows;
 natural time evolution and other callbacks can change the output, so a change
 is evidence for follow-up rather than proof that the moved control caused it.
 
-`contra-inspect play INSTRUMENT --scenario user --oracle --json report.json`
-writes the same input events as MIDI at one tick per 48 kHz frame, renders v3,
-and captures a Kontakt `.nki` through `oracle-slot` using its isolated Wine
-prefix. It never uses the live Wine prefix. The comparison reuses
-`tools/oracle/compare.py`, records RMS and peak differences, octave-band levels,
-maximum sample jumps, clipping, and per-CC second-difference energy. Native
-capture timing has millisecond uncertainty; envelope alignment is in 10 ms
-steps, so the narrow CC windows are indicative rather than sample-aligned.
-Native script/voice/route/FX internal values are explicitly unavailable.
+`contra-inspect play INSTRUMENT --scenario user --json report.json` renders
+the user scenario and records levels, octave bands, maximum sample jumps,
+clipping and per-CC second-difference energy.
 
 Add `--fresh-state` to run each of the six user-scenario segments in its own
-new engine and oracle session. Reports contain six nested `play` results. The
-oracle detects each first onset from 10 ms envelope bins and compares two
-seconds after each onset; detected onset times and unavailable or silent captures
-are reported explicitly. Segment input events are rebased exactly; fast sweeps
-therefore begin 0.5 seconds after their first notes. Separate starts change
-round-robin and script state relative to the continuous scenario.
-A native UVI capture path is not implemented. A failed or silent oracle writes
-an error/uncomparable status and exits nonzero after writing JSON.
-
-Artifacts (MIDI, v3 and native WAVs, logs) are written under
-`/data/dev/workspace/PluginArtifacts/inspect-oracle`; override the root with
-`CONTRA_INSPECT_ORACLE_DIR`. To locate the existing oracle scripts outside a
-checkout, set `CONTRA_ORACLE_DIR`.
+new engine. Reports contain six nested `play` results. Segment input events are
+rebased exactly; fast sweeps therefore begin 0.5 seconds after their first
+notes. Separate starts change round-robin and script state relative to the
+continuous scenario.
 
 `route_events` records the actual contribution evaluated by the engine at a
 note onset, a controller-triggered voice update, or the first timed span after
@@ -148,15 +127,3 @@ For a timed update the controller identifies one received since the previous
 span; multiple CCs may therefore appear for the same evaluated value. Buffer
 capacity is fixed before processing; any dropped record makes the report
 incomplete. With the trace feature off these hooks and their state are absent.
-
-## Seven-library oracle report
-
-From any directory, `tools/inspect/oracle-diff.sh` builds the current checkout
-with `build-slot`, runs continuous and fresh-state user scenarios on the seven
-registered Kontakt programs with up to three isolated `oracle-slot` sessions,
-and regenerates `/data/dev/workspace/scratch/laneG/ORACLE-DIFF.md`. Each run
-uses a timestamped artifact directory and records the source revision. RMS and
-band flags are separate; unavailable comparisons stay unknown and make the
-command fail after the report is written. `--jobs 1..3`, `--output PATH`, and
-`--library-root PATH` override defaults. `--reuse RUN_DIR` regenerates a report
-from a prior run without launching Wine or rebuilding.

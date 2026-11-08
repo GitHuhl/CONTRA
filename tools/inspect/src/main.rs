@@ -18,8 +18,6 @@ use anyhow::{Context, Result, bail, ensure};
 mod bands;
 mod laws;
 mod load;
-mod midi;
-mod oracle;
 mod play;
 mod routes;
 mod scenario;
@@ -29,7 +27,7 @@ mod ui;
 /// The engine's sample rate for every subcommand.
 const RATE: u32 = 48_000;
 
-const USAGE: &str = "usage: contra-inspect law [NAME] | load <instrument> [--json FILE] | ui <instrument> [--json FILE] | play <instrument> [--scenario user|FILE] [--fresh-state] [--oracle] [--json FILE]";
+const USAGE: &str = "usage: contra-inspect law [NAME] | load <instrument> [--json FILE] | ui <instrument> [--json FILE] | play <instrument> [--scenario user|FILE] [--fresh-state] [--json FILE]";
 
 fn main() -> ExitCode {
     match run() {
@@ -65,11 +63,9 @@ fn run() -> Result<()> {
     let mut path = None;
     let mut json = None;
     let mut scenario = String::from("user");
-    let mut oracle = false;
     let mut fresh = false;
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--oracle" => oracle = true,
             "--fresh-state" => fresh = true,
             "--scenario" => scenario = args.next().context("--scenario needs a value")?,
             "--json" => json = Some(PathBuf::from(args.next().context("--json needs a file")?)),
@@ -84,17 +80,13 @@ fn run() -> Result<()> {
     }
     let path = path.context(USAGE)?;
     ensure!(
-        !oracle || command == "play",
-        "--oracle is only available for play"
-    );
-    ensure!(
         !fresh || (command == "play" && scenario == "user"),
         "--fresh-state requires play --scenario user"
     );
     let (report, summary) = match command.as_str() {
         "load" => load::run(&path)?,
-        "play" if fresh => fresh_play(&path, oracle)?,
-        "play" => play::run(&path, &scenario, oracle)?,
+        "play" if fresh => fresh_play(&path)?,
+        "play" => play::run(&path, &scenario)?,
         "ui" => ui::run(&path)?,
         "--help" | "-h" => {
             println!("{USAGE}");
@@ -115,54 +107,26 @@ fn run() -> Result<()> {
             != Some(false),
         "inspection incomplete: see report for UI, trace, or render errors"
     );
-    if oracle && fresh {
-        ensure!(
-            report
-                .get("result")
-                .and_then(|r| r.get("oracle_complete"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true),
-            "oracle comparison unavailable: see segment reports"
-        );
-    }
-    if oracle && !fresh {
-        let status = report
-            .get("result")
-            .and_then(|r| r.get("oracle"))
-            .and_then(|r| r.get("status"))
-            .and_then(serde_json::Value::as_str);
-        ensure!(
-            status == Some("ok"),
-            "oracle comparison unavailable: see report for the reason"
-        );
-    }
     Ok(())
 }
 
-fn fresh_play(path: &std::path::Path, oracle: bool) -> Result<(serde_json::Value, String)> {
+fn fresh_play(path: &std::path::Path) -> Result<(serde_json::Value, String)> {
     let mut segments = Vec::new();
     let mut summary = String::from("Fresh-state segments (first-onset alignment):\n");
     let mut complete = true;
-    let mut oracle_complete = true;
     for part in 0..6 {
-        let (report, text) = play::segment(path, part, oracle)?;
+        let (report, text) = play::segment(path, part)?;
         let result = report.get("result");
         complete &= result
             .and_then(|v| v.get("render_complete"))
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        oracle_complete &= !oracle
-            || result
-                .and_then(|v| v.get("oracle"))
-                .and_then(|v| v.get("status"))
-                .and_then(serde_json::Value::as_str)
-                == Some("ok");
         summary.push_str(&text);
         segments.push(report);
     }
     Ok((
         serde_json::json!({"schema_version":1, "command":"play", "engine":"v3", "instrument":path,
-        "result":{"scenario":"user", "fresh_state":true, "segments":segments, "render_complete":complete, "oracle_complete":oracle_complete}}),
+        "result":{"scenario":"user", "fresh_state":true, "segments":segments, "render_complete":complete}}),
         summary,
     ))
 }
