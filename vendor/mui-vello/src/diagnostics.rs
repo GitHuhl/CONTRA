@@ -2,7 +2,7 @@
 //!
 //! Native hosts record startup stages before calling a driver. Files rotate at
 //! 1 MiB, retaining one previous file. [`log_path`] locates the current session.
-//! With the `reporting` feature, `Reporter` also queues errors for MUI support.
+//! Local only: nothing is ever sent over the network.
 //! This is a UI-thread API; do not call it from an audio callback.
 
 use std::{any::Any, path::PathBuf};
@@ -15,23 +15,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-mod reporting;
-#[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-pub use reporting::{Config, Reporter};
-
-/// Retains reporting through native resource teardown; empty without reporting.
-pub struct ReportingGuard {
-    #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-    _reporter: Option<Reporter>,
-}
+/// Kept for host API compatibility; holds nothing.
+pub struct ReportingGuard;
 
 /// Window hosts keep this as their last field, after native resources.
 pub fn retain_reporter() -> ReportingGuard {
-    ReportingGuard {
-        #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-        _reporter: reporting::active_reporter(),
-    }
+    ReportingGuard
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -118,17 +107,6 @@ pub(super) fn bounded(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-#[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-pub(super) fn private_file(path: &std::path::Path) -> io::Result<std::fs::File> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Journal {
@@ -188,7 +166,7 @@ pub fn breadcrumb(component: &str, stage: &str, message: &str) {
     record(component, stage, message, false, None);
 }
 
-/// Persist a MUI error and, when a `Reporter` is retained, enqueue it for support.
+/// Persist a MUI error to the local journal.
 /// Pass MUI-owned errors, not arbitrary host crashes or user content.
 /// Use component `mui`, `mui-vello`, `mui-baseview` or `mui-winit` and a short
 /// snake_case stage matching the support protocol.
@@ -207,10 +185,7 @@ pub fn gpu_error(stage: &str, message: &str, adapter: &wgpu::AdapterInfo) {
 /// report for the next load. This installs no process-wide panic/signal hooks.
 /// Use for startup/resize, not each animation frame or the audio thread.
 #[must_use]
-pub struct Operation {
-    #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-    _pending: Option<reporting::Operation>,
-}
+pub struct Operation;
 
 pub fn operation(
     component: &str,
@@ -219,14 +194,8 @@ pub fn operation(
     adapter: Option<&wgpu::AdapterInfo>,
 ) -> Operation {
     breadcrumb(component, stage, message);
-    #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-    let pending = reporting::operation(component, stage, message, adapter);
-    #[cfg(not(all(feature = "reporting", not(target_arch = "wasm32"))))]
     let _ = adapter;
-    Operation {
-        #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-        _pending: pending,
-    }
+    Operation
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -257,11 +226,6 @@ fn record(
             Vec::new()
         }
     };
-    #[cfg(all(feature = "reporting", not(target_arch = "wasm32")))]
-    if failed {
-        reporting::enqueue(component, stage, message, &history, adapter);
-    }
-    #[cfg(not(all(feature = "reporting", not(target_arch = "wasm32"))))]
     let _ = (history, adapter);
 }
 
