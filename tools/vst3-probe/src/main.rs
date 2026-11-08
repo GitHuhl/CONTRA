@@ -3,7 +3,12 @@
 //! opens its editor in an X11 window through
 //! `IPlugView::attached("X11EmbedWindowID")`, serves the host `IRunLoop`'s
 //! timers, waits, and writes what the window shows. Exits non-zero when the
-//! editor does not open or draws nothing. No VST3 SDK: the COM ABI is
+//! editor does not open or draws nothing.
+//!
+//! A fourth argument, `late` or `wm`, embeds the editor as clap-probe does
+//! with it: in a container inside a hidden top-level the host shows only
+//! after attaching, and with `wm` shows it as a reparenting window manager
+//! does (moved into a frame, mapped, frame mapped). No VST3 SDK: the COM ABI is
 //! spelled out here (vtables of function pointers, IIDs in the non-Windows
 //! byte order), as in vendor/moose-vst3/shim/vst3_shim.cpp.
 
@@ -177,6 +182,8 @@ fn main() {
         fail("usage: vst3-probe <plugin.vst3|.so> <out.png> [max seconds]");
     };
     let wait = args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(60.0);
+    let wm = args.get(4).is_some_and(|a| a == "wm");
+    let late = wm || args.get(4).is_some_and(|a| a == "late");
     let mut path = path.clone();
     if let Some(stem) = path.strip_suffix(".vst3").map(str::to_owned) {
         let name = stem.rsplit('/').next().unwrap_or(&stem).to_owned();
@@ -265,21 +272,26 @@ fn main() {
     println!("editor size {w}x{h}");
 
     let screen = &conn.setup().roots[screen];
-    let window = conn.generate_id().unwrap_or_else(|e| fail(e));
-    conn.create_window(
-        screen.root_depth,
-        window,
-        screen.root,
-        0,
-        0,
-        w,
-        h,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        screen.root_visual,
-        &CreateWindowAux::new().background_pixel(screen.black_pixel),
-    )
-    .unwrap_or_else(|e| fail(e));
+    let make = |parent: u32| {
+        let id = conn.generate_id().unwrap_or_else(|e| fail(e));
+        conn.create_window(
+            screen.root_depth,
+            id,
+            parent,
+            0,
+            0,
+            w,
+            h,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new().background_pixel(screen.black_pixel),
+        )
+        .unwrap_or_else(|e| fail(e));
+        id
+    };
+    let top = make(screen.root);
+    let window = if late { make(top) } else { top };
     conn.map_window(window).unwrap_or_else(|e| fail(e));
     conn.sync().unwrap_or_else(|e| fail(e));
     let attached = unsafe {
@@ -293,6 +305,19 @@ fn main() {
         fail("IPlugView::attached failed");
     }
     println!("editor attached after {:?}", started.elapsed());
+    if late {
+        std::thread::sleep(Duration::from_millis(500));
+        if wm {
+            let frame = make(screen.root);
+            conn.reparent_window(top, frame, 0, 0).unwrap_or_else(|e| fail(e));
+            conn.map_window(top).unwrap_or_else(|e| fail(e));
+            conn.map_window(frame).unwrap_or_else(|e| fail(e));
+        } else {
+            conn.map_window(top).unwrap_or_else(|e| fail(e));
+        }
+        conn.flush().unwrap_or_else(|e| fail(e));
+        println!("host window shown after {:?}", started.elapsed());
+    }
 
     // Until the editor has drawn (and a second more to settle), or the
     // deadline: a software renderer under load can take many seconds.

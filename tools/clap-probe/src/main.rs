@@ -1,7 +1,13 @@
-//! `clap-probe <plugin.clap> <out.png> [max seconds]`: loads a CLAP plugin the
-//! way a DAW does (no environment help), embeds its editor in an X11 window
-//! of the size it asks for, waits, and writes what the window shows. Exits
-//! non-zero when the editor does not open or draws nothing.
+//! `clap-probe <plugin.clap> <out.png> [max seconds] [late]`: loads a CLAP
+//! plugin the way a DAW does (no environment help), embeds its editor in an
+//! X11 window of the size it asks for, waits, and writes what the window
+//! shows. Exits non-zero when the editor does not open or draws nothing.
+//!
+//! With `late`, the editor is embedded the way DAWs commonly do it: in a
+//! container inside a top-level window that is still hidden, which the host
+//! shows only after the editor is attached. With `wm`, as `late`, and the
+//! top-level is then shown the way a reparenting window manager does it:
+//! moved into a frame window, mapped, and the frame mapped.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
@@ -51,6 +57,8 @@ fn main() {
         fail("usage: clap-probe <plugin.clap> <out.png> [max seconds]");
     };
     let wait = args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(60.0);
+    let wm = args.get(4).is_some_and(|a| a == "wm");
+    let late = wm || args.get(4).is_some_and(|a| a == "late");
 
     let (conn, screen) = x11rb::connect(None).unwrap_or_else(|e| fail(format!("no X display: {e}")));
     // Leaked on purpose: the plugin stays loaded until exit, as in a host.
@@ -120,21 +128,28 @@ fn main() {
     println!("editor size {w}x{h}");
 
     let screen = &conn.setup().roots[screen];
-    let window = conn.generate_id().unwrap_or_else(|e| fail(e));
-    conn.create_window(
-        screen.root_depth,
-        window,
-        screen.root,
-        0,
-        0,
-        w as u16,
-        h as u16,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        screen.root_visual,
-        &CreateWindowAux::new().background_pixel(screen.black_pixel),
-    )
-    .unwrap_or_else(|e| fail(e));
+    let make = |parent: u32| {
+        let id = conn.generate_id().unwrap_or_else(|e| fail(e));
+        conn.create_window(
+            screen.root_depth,
+            id,
+            parent,
+            0,
+            0,
+            w as u16,
+            h as u16,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new().background_pixel(screen.black_pixel),
+        )
+        .unwrap_or_else(|e| fail(e));
+        id
+    };
+    // `late`: a hidden top-level holding the (mapped) container the editor
+    // goes in; otherwise one top-level, shown first.
+    let top = make(screen.root);
+    let window = if late { make(top) } else { top };
     conn.map_window(window).unwrap_or_else(|e| fail(e));
     conn.flush().unwrap_or_else(|e| fail(e));
 
@@ -151,6 +166,19 @@ fn main() {
         }
     }
     println!("editor open after {:?}", started.elapsed());
+    if late {
+        std::thread::sleep(Duration::from_millis(500));
+        if wm {
+            let frame = make(screen.root);
+            conn.reparent_window(top, frame, 0, 0).unwrap_or_else(|e| fail(e));
+            conn.map_window(top).unwrap_or_else(|e| fail(e));
+            conn.map_window(frame).unwrap_or_else(|e| fail(e));
+        } else {
+            conn.map_window(top).unwrap_or_else(|e| fail(e));
+        }
+        conn.flush().unwrap_or_else(|e| fail(e));
+        println!("host window shown after {:?}", started.elapsed());
+    }
 
     let (w, h) = (w as u16, h as u16);
     // Until the editor has drawn (and a second more to settle), or the

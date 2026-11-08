@@ -120,7 +120,7 @@
       # the check's output.
       checks.${system} =
         let
-          uiCheck = name: probe: plugin: pkgs.runCommand "contra-ui-${name}" {
+          uiCheck = name: probe: plugin: mode: pkgs.runCommand "contra-ui-${name}" {
             nativeBuildInputs = [ pkgs.xvfb-run ];
           } ''
             export HOME=$TMPDIR
@@ -128,14 +128,21 @@
             export __EGL_VENDOR_LIBRARY_FILENAMES=${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json
             mkdir -p $out
             xvfb-run -s "-screen 0 1920x1200x24" \
-              ${probe}/bin/${probe.pname} ${plugin} $out/editor.png 60 2>&1 | tee $out/log
+              ${probe}/bin/${probe.pname} ${plugin} $out/editor.png 60 ${mode} 2>&1 | tee $out/log
             grep -q "GPU ready backend=Vulkan" $out/log
             grep -q "closed cleanly" $out/log
           '';
+          clap = "${contra}/lib/clap/CONTRA.clap";
+          vst3 = "${contra}/lib/vst3/CONTRA.vst3";
         in
         {
-          ui-clap = uiCheck "clap" clap-probe "${contra}/lib/clap/CONTRA.clap";
-          ui-vst3 = uiCheck "vst3" vst3-probe "${contra}/lib/vst3/CONTRA.vst3";
+          ui-clap = uiCheck "clap" clap-probe clap "normal";
+          ui-vst3 = uiCheck "vst3" vst3-probe vst3 "normal";
+          # The way DAWs show a plugin window: embedded while its top-level
+          # is hidden, which a window manager then frames and maps. The
+          # editor once waited for its first frame forever here.
+          ui-clap-wm = uiCheck "clap-wm" clap-probe clap "wm";
+          ui-vst3-wm = uiCheck "vst3-wm" vst3-probe vst3 "wm";
         };
 
       devShells.${system}.default = pkgs.mkShell {
