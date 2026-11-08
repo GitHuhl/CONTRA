@@ -116,13 +116,7 @@ impl X11Connection {
 
         self.conn.change_window_attributes(
             root,
-            // STRUCTURE_NOTIFY too (CONTRA): an ancestor's own map, unmap and
-            // reparent events reach only it and its parent. Without it, a
-            // window manager moving the host's top-level into a frame and
-            // mapping it (the usual way a DAW shows its plugin window) is
-            // never seen, and the editor waits for its first frame forever.
-            &ChangeWindowAttributesAux::new()
-                .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::STRUCTURE_NOTIFY),
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
         )
     }
 
