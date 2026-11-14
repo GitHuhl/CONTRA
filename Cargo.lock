@@ -992,6 +992,7 @@ dependencies = [
  "contra-format-kontakt",
  "contra-ksp",
  "contra-library",
+ "contra-lua",
  "contra-prepare",
  "contra-protocol",
  "contra-stream",

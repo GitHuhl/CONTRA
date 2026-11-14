@@ -314,15 +314,13 @@ fn mutant(original: &Original, file: &str, index: u64) -> Mutant {
 enum Kind {
     Instrument,
     Nkr,
-    Bank,
     Sample,
 }
 
 fn kind_of(path: &Path) -> Option<Kind> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "nki" | "nkm" | "sfz" => Some(Kind::Instrument),
+        "nki" | "nkm" => Some(Kind::Instrument),
         "nkr" => Some(Kind::Nkr),
-        "ufs" => Some(Kind::Bank),
         "ncw" | "wav" => Some(Kind::Sample),
         _ => None,
     }
@@ -433,14 +431,6 @@ fn run_one(kind: Kind, path: &Path, store: &mut Store) {
         Kind::Instrument => run_instrument(path, store),
         Kind::Sample => run_sample(path, store),
         Kind::Nkr => run_nkr(path),
-        Kind::Bank => {
-            let Ok(programs) = contra_format_uvi::programs(path) else {
-                return;
-            };
-            for program in programs.iter().take(2) {
-                run_instrument(&path.join(program), store);
-            }
-        }
     }
 }
 

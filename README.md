@@ -3,7 +3,8 @@
 A free, open-source sampler plugin that plays Kontakt libraries on NixOS.
 
 - **Kontakt only.** Instruments, multis, snapshots and monoliths, with their
-  KSP scripts, effects and performance views.
+  KSP scripts, effects and performance views, and Kontakt 8's `native_ui`
+  pages (which Kontakt writes in Luau; CONTRA runs them sandboxed).
 - **NixOS only.** CLAP and VST3, built entirely through Nix, graphics
   toolchain included.
 - **Offline.** No telemetry, crash reporting, update checks or accounts.
@@ -80,6 +81,7 @@ screenshot of each. CI runs the same on every push to `main`.
 | :--- | :--- |
 | `crates/format/kontakt` | Reads Kontakt files into the instrument model |
 | `crates/script/ksp` | KSP compiler |
+| `crates/script/lua` | Sandboxed Luau for Kontakt 8 `native_ui` pages only |
 | `crates/model` | Instrument model, parameters, events, UI model |
 | `crates/engine` | Voices, streaming, effects, script VM |
 | `crates/dsp` | Filters, EQ, dynamics, delay, reverb, drive, modulators |
@@ -87,7 +89,7 @@ screenshot of each. CI runs the same on every push to `main`.
 | `plugin` | The CLAP/VST3 plugin |
 | `vendor` | Vendored dependencies, including the plugin framework and UI toolkit |
 | `docs/re` | Kontakt reverse-engineering evidence the engine's laws cite |
-| `tools` | Inspector, screenshot tool, the CLAP/VST3 probe hosts (all Rust) |
+| `tools` | Inspector, screenshot tool, the CLAP/VST3 probe hosts, the KONTRA catch-up tool (all Rust) |
 
 ## License
 

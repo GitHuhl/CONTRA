@@ -16,6 +16,8 @@ contra-format-kontakt = {path = "../../format/kontakt"}
 contra-ksp = {path = "../../script/ksp"}
 contra-face = {path = "../face"}
 contra-library = {path = "../library"}
+# For its allocator switch only: the heap examples bring their own.
+contra-lua = {path = "../../script/lua"}
 contra-protocol = {path = "../../model/protocol"}
 contra-stream = {path = "../../engine/stream"}
 contra-ui-model = {path = "../../model/ui-model"}
@@ -26,7 +28,7 @@ serde = {workspace = true}
 
 [features]
 align = ["dep:contra-align"]
-heap-profile = []
+heap-profile = ["contra-lua/system-allocator"]
 
 [[example]]
 name = "align"
