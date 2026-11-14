@@ -160,7 +160,6 @@ impl RackAudio {
                 p.engine.set_click(t.slot, id, [false; 3], 0);
                 p.engine.set_control(t.slot, id, value);
             }
-            Control::Widget(n) => p.engine.set_widget(t.slot, n, plain, None),
         }
         self.ui_scripts_ns += ns_since(start);
         true
@@ -646,19 +645,6 @@ impl RackAudio {
                     if self.channels.typed.send(text).is_err() {
                         self.dropped += 1;
                     }
-                }
-                Command::Widget {
-                    part,
-                    slot,
-                    n,
-                    value,
-                    cell,
-                } => {
-                    let t = std::time::Instant::now();
-                    if let Some(Some(p)) = self.parts.get_mut(part) {
-                        p.engine.set_widget(slot, n, value, cell);
-                    }
-                    self.ui_scripts_ns += ns_since(t);
                 }
             }
         }

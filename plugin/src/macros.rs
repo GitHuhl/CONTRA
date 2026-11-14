@@ -258,15 +258,10 @@ fn target(rack: &Rack, m: &Macro) -> Option<MacroTarget> {
     // A native_ui tap area's set comes from its page, which lives on the
     // control side: it stays on the tick.
     range(w)?;
-    let (slot, control) = match view.widget(widget) {
-        Some((slot, n)) => (slot, Control::Widget(n)),
-        None => {
-            let (slot, id, _) = view.control(widget, m.min)?;
-            match w.value {
-                Some(contra_ui_model::Value::Real(_)) => (slot, Control::Real(id)),
-                _ => (slot, Control::Integer(id)),
-            }
-        }
+    let (slot, id, _) = view.control(widget, m.min)?;
+    let (slot, control) = match w.value {
+        Some(contra_ui_model::Value::Real(_)) => (slot, Control::Real(id)),
+        _ => (slot, Control::Integer(id)),
     };
     let scale = if m.steps.is_empty() {
         Scale::Range {

@@ -391,14 +391,7 @@ fn drawn_page(
                 parts.push(face);
             } else if stock {
                 parts.push(
-                    stock::face(
-                        wd,
-                        t,
-                        (w, h),
-                        bare,
-                        matches!(tree.source, model::Source::FalconLua),
-                    )
-                    .at(0., 0.),
+                    stock::face(wd, t, (w, h), bare).at(0., 0.),
                 );
             }
             // A slider's handle rides its track over its picture: bottom to
@@ -594,7 +587,7 @@ fn wallpaper(
 
 /// `w`'s value as its source shows it: the script's label, else the value
 /// over the display ratio with its unit.
-pub fn readout(w: &model::Widget, source: model::Source) -> String {
+pub fn readout(w: &model::Widget) -> String {
     if w.hide.value {
         return String::new();
     }
@@ -607,7 +600,7 @@ pub fn readout(w: &model::Widget, source: model::Source) -> String {
             note_name(w.number().clamp(0., 127.) as u8)
         }
         Kind::Knob { display, .. } | Kind::ValueEdit { display, .. } => {
-            display.format_value(w.number(), true, source)
+            display.format_value(w.number())
         }
         _ => String::new(),
     }
@@ -661,8 +654,7 @@ fn words_el(
     font: Option<&Font>,
     source: model::Source,
 ) -> El {
-    // A UVI size is the font's line height (JUCE's): its words draw at the em that fills it.
-    let lua = matches!(source, model::Source::FalconLua);
+    let lua = false;
     let em = (font.filter(|_| lua)).map_or(1., contra_ui_pictures::em_per_height);
     let native_style = style.cloned().map(|mut style| {
         if font.is_some() && style.font == model::Font::Stock(23) {

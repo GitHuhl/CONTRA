@@ -29,12 +29,7 @@ moose = {workspace = true, features = ["mui"]}
 moose-clap = {workspace = true, features = ["mpe-input"], optional = true}
 moose-vst3 = {workspace = true, optional = true}
 clap-sys = {version = "0.5", optional = true}
-
-[target.'cfg(target_os = "linux")'.dependencies]
 mui-native-dialog = {workspace = true, features = ["xdg-portal"]}
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-rfd = {version = "0.17", default-features = false}
 
 [dev-dependencies]
 moose-test = {workspace = true}

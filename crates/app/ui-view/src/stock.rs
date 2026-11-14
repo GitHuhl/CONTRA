@@ -740,9 +740,7 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> Path {
 /// script one whose background the script has not hidden.
 pub(super) fn shows(tree: &Interface, w: &Widget, bare: bool) -> bool {
     (bare || !w.hide.background)
-        && (bare
-            || unpictured(tree, w)
-            || (matches!(tree.source, Source::FalconLua) && matches!(w.kind, Kind::Table { .. })))
+        && (bare || unpictured(tree, w))
         && matches!(
             w.kind,
             Kind::Slider { .. } | Kind::TextEdit | Kind::Table { .. }
@@ -780,7 +778,7 @@ fn unpictured(tree: &Interface, w: &Widget) -> bool {
 
 /// `w`'s stock face at `t` (0..1 of its range), `width` by `height`
 /// view points.
-pub(super) fn face(w: &Widget, t: f64, (width, height): (f64, f64), bare: bool, uvi: bool) -> El {
+pub(super) fn face(w: &Widget, t: f64, (width, height): (f64, f64), bare: bool) -> El {
     let kind = w.kind.clone();
     let bars: Vec<f64> = match (&w.kind, &w.value) {
         (Kind::Table { range, .. }, Some(model::Value::Integers(v))) => {
@@ -798,14 +796,6 @@ pub(super) fn face(w: &Widget, t: f64, (width, height): (f64, f64), bare: bool, 
         _ => Vec::new(),
     };
     let (background, page_width) = (w.colors.background, w.rect.width);
-    let bar = w.colors.bar;
-    let edges = w.table_inner_edge.map(|edge| edge.visible).unwrap_or(false);
-    let zero = match &w.kind {
-        Kind::Table { range, .. } => {
-            ((0. - range.min) / (range.max - range.min).max(f64::EPSILON)).clamp(0., 1.)
-        }
-        _ => 0.,
-    };
     canvas(move |z| {
         let (w, h) = (z.width, z.height);
         let field = |d: &mut Vec<Draw>, l: f32| {
@@ -844,27 +834,6 @@ pub(super) fn face(w: &Widget, t: f64, (width, height): (f64, f64), bare: bool, 
                     place(at - thumb / 2., mid - th / 2., thumb, th),
                     grey(VALUE),
                 ));
-            }
-            Kind::Table { .. } if uvi => {
-                if let Some(c) = background {
-                    d.push(Draw::fill(rect(0., 0., w, h), Fill::from(super::color(c))));
-                }
-                let ink = bar.map_or(grey(VALUE), |c| Fill::from(super::color(c)));
-                let bw = w / bars.len().max(1) as f64;
-                let base = h * (1. - zero);
-                for (n, v) in bars.iter().enumerate() {
-                    let y = h * (1. - v);
-                    let gap = if edges { 1. } else { 0. };
-                    d.push(Draw::fill(
-                        rect(
-                            n as f64 * bw,
-                            y.min(base),
-                            (bw - gap).max(0.),
-                            (base - y).abs(),
-                        ),
-                        ink.clone(),
-                    ));
-                }
             }
             Kind::Table { .. } => {
                 field(&mut d, FIELD);

@@ -223,10 +223,10 @@ pub(super) fn text(
     style: Option<&model::TextStyle>,
     widget: &model::Widget,
     (height, scale, em): (f64, f64, f64),
-    source: model::Source,
+    _source: model::Source,
 ) -> Text {
     let multiline = words.contains('\n');
-    let lua = matches!(source, model::Source::FalconLua);
+    let lua = false;
     let menu = lua && matches!(widget.kind, model::Kind::Menu { .. });
     let size = style.and_then(|s| s.size).map_or(super::TEXT, f64::from) * scale;
     // Lines a UVI size apart (JUCE's font height, `size` at `em` per unit), Kontakt's 13/11.
@@ -445,7 +445,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_kontakt_label_starts_at_its_top_and_a_lua_one_sits_in_its_middle() {
+    fn a_kontakt_label_starts_at_its_top() {
         let label = model::Widget::new(
             "$label",
             PageRef(0),
@@ -454,8 +454,6 @@ mod tests {
         );
         let at = |source| text("Sordino", None, &label, (22., 1., 1.), source);
         assert_eq!(at(model::Source::Ksp { slot: 0 }).top, 0.);
-        let lua = at(model::Source::FalconLua);
-        assert_eq!(lua.top + lua.line / 2., 11.);
         let mut button = label.clone();
         button.kind = model::Kind::Button { momentary: false };
         assert!(
@@ -509,48 +507,9 @@ mod tests {
 
     /// A UVI label's lines are its authored size apart (JUCE's font
     /// height); a Kontakt one's keep Kontakt's measured 13/11.
-    #[test]
-    fn a_uvi_label_pitches_its_lines_at_its_size() {
-        let w = model::Widget::new(
-            "l",
-            PageRef(0),
-            model::Rect::new(0, 0, 80, 60),
-            model::Kind::Label,
-        );
-        let style = model::TextStyle {
-            font: model::Font::Default,
-            size: Some(22.),
-            color: model::Rgba::default(),
-            align: model::Align::Left,
-        };
-        // 22 at 0.8 em per unit of height: authored 27.5, as `words_el` gives it.
-        let line = |source| text("a\nb", Some(&style), &w, (60., 1., 0.8), source).line;
-        assert_eq!(line(model::Source::FalconLua), 27.5);
-        assert_eq!(line(model::Source::Ksp { slot: 0 }), 26.);
-    }
 
     /// A UVI menu's words sit in JUCE's combo label: 1 + 5 in, clear of the
     /// h − 3 arrow box; one line is never fitted down by its height.
-    #[test]
-    fn a_uvi_menu_keeps_its_words_off_the_arrow() {
-        let w = model::Widget::new(
-            "m",
-            PageRef(0),
-            model::Rect::new(0, 0, 120, 20),
-            model::Kind::Menu { items: Vec::new() },
-        );
-        let t = text("Mode", None, &w, (20., 1., 1.), model::Source::FalconLua);
-        assert_eq!(t.inset, (6., 21.));
-        assert!(t.line >= t.size * 1.25);
-        let k = text(
-            "Mode",
-            None,
-            &w,
-            (20., 1., 1.),
-            model::Source::Ksp { slot: 0 },
-        );
-        assert_eq!(k.inset, (2., 2.));
-    }
 
     /// A page that shows rows above its y 0 draws a label placed there
     /// (Pacific's headings at y -5) in that band, and grows by it.

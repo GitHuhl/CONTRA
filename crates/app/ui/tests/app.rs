@@ -451,7 +451,6 @@ fn a_double_click_names_the_focused_part() {
     let mut app = App {
         libraries: vec![Library {
             name: "Strings".into(),
-            format: Format::Kontakt,
             presets: vec!["Snapshots/Airy".into(), "Strings".into()],
             recalls: vec![0],
             starred: false,
@@ -508,7 +507,6 @@ fn the_presets_walk_and_load_by_keys() {
     let mut app = App {
         libraries: vec![Library {
             name: "Strings".into(),
-            format: Format::Kontakt,
             presets: presets.iter().map(|p| format!("Instruments/{p}")).collect(),
             recalls: Vec::new(),
             starred: false,

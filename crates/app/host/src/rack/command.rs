@@ -94,14 +94,6 @@ pub enum Command {
         cell: u32,
         text: Box<contra_engine::Text>,
     },
-    /// The user moved widget `n` of script `slot`'s own page to `value`.
-    Widget {
-        part: usize,
-        slot: u8,
-        n: u32,
-        value: f64,
-        cell: Option<u32>,
-    },
     /// The user edited a group's sound (the Sound tab): its envelope, and
     /// the insert it changed, if any. The box comes back empty, so audio
     /// frees nothing.

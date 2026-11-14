@@ -100,49 +100,6 @@ pub(crate) fn names(
     names
 }
 
-/// The files a script of the instrument at `source` saved, as the data
-/// files it reads by bank path (`__file/` and the path, lower case).
-pub(crate) fn script_files(saves: Option<&Path>, source: Option<&Path>) -> Vec<(String, Vec<u8>)> {
-    let Some(dir) = own(saves, source) else {
-        return Vec::new();
-    };
-    walk(&dir)
-        .into_iter()
-        .filter(|(path, _)| {
-            !path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("nka"))
-        })
-        .filter_map(|(path, below)| {
-            let parts: Vec<&str> = below.iter().filter_map(|p| p.to_str()).collect();
-            let name = format!("{}{}", contra_lua::FILE, parts.join("/").to_lowercase());
-            Some((name, super::files::bounded(&path)?))
-        })
-        .collect()
-}
-
-/// Writes `files` (bank path, contents) a script of the instrument at
-/// `source` saved; what could not be written is reported.
-pub(crate) fn write_script_files(
-    saves: Option<&Path>,
-    source: Option<&Path>,
-    files: Vec<(String, String)>,
-) -> Vec<String> {
-    let mut failed = Vec::new();
-    for (path, text) in files {
-        let at = own(saves, source).and_then(|dir| saved(Some(&dir), Path::new(&path)));
-        let made = at.as_ref().is_some_and(|at| {
-            at.parent()
-                .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
-                && std::fs::write(at, &text).is_ok()
-        });
-        if !made {
-            failed.push(format!("preset: could not save the script's {path}"));
-        }
-    }
-    failed
-}
-
 /// A name the player typed, as a file name: no folders, no dots first.
 fn file_name(name: &str) -> Option<String> {
     let name = Path::new(name.trim()).components().next_back()?;

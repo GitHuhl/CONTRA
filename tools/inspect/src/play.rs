@@ -11,19 +11,18 @@ use serde_json::{Value, json};
 use super::{RATE, scenario};
 
 const BLOCK: usize = 128;
-const MAX_BLOCK: usize = 4096;
 const TAIL_SECONDS: u64 = 20;
 
-pub fn run(path: &Path, scenario_name: &str, oracle: bool) -> Result<(Value, String)> {
+pub fn run(path: &Path, scenario_name: &str) -> Result<(Value, String)> {
     let events = if scenario_name == "user" {
         scenario::user()
     } else {
         scenario::file(Path::new(scenario_name))?
     };
-    run_events(path, scenario_name, events, oracle, false)
+    run_events(path, scenario_name, events)
 }
 
-pub fn segment(path: &Path, part: u64, oracle: bool) -> Result<(Value, String)> {
+pub fn segment(path: &Path, part: u64) -> Result<(Value, String)> {
     let names = [
         "legato slow",
         "legato fast",
@@ -35,15 +34,13 @@ pub fn segment(path: &Path, part: u64, oracle: bool) -> Result<(Value, String)> 
     let name = names
         .get(usize::try_from(part)?)
         .context("invalid segment")?;
-    run_events(path, name, scenario::user_segment(part), oracle, true)
+    run_events(path, name, scenario::user_segment(part))
 }
 
 fn run_events(
     path: &Path,
     scenario_name: &str,
     events: Vec<scenario::Input>,
-    oracle: bool,
-    first_onset: bool,
 ) -> Result<(Value, String)> {
     let end = events.last().map_or(0, |e| e.frame);
     ensure!(end <= u64::from(RATE) * 3600, "scenario exceeds one hour");
@@ -54,46 +51,16 @@ fn run_events(
         .max()
         .context("scenario needs a note-off")?;
     let stop = end.max(last_off + TAIL_SECONDS * u64::from(RATE));
-    let mut ir = contra_host::instrument::read(path)
+    let ir = contra_host::instrument::read(path)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-    // CONTRA_SCRIPT_SOURCE=<dir>: script n's source is <dir>/n.ksp when that file exists
-    // (the oracle capture loads the same files, so both sides run the same edited script).
-    // A file past the last script plays in the next empty slot (a probe).
-    if let Some(dir) = std::env::var_os("CONTRA_SCRIPT_SOURCE") {
-        for n in 0..5 {
-            let Ok(source) = std::fs::read_to_string(Path::new(&dir).join(format!("{n}.ksp")))
-            else {
-                continue;
-            };
-            match ir.scripts.get_mut(n) {
-                Some(script) => script.source = source,
-                None => ir.scripts.push(contra_engine::ir::Script {
-                    name: format!("probe {n}"),
-                    slot: n,
-                    dialect: contra_engine::ir::Dialect::Ksp,
-                    source,
-                    saved: Vec::new(),
-                    data: Vec::new(),
-                    links: Vec::new(),
-                }),
-            }
-        }
-    }
     let samples: Vec<_> = ir.samples.iter().map(|s| s.name.clone()).collect();
     let group_samples: Vec<Vec<usize>> = ir
         .groups
         .iter()
         .map(|g| g.zones.iter().map(|z| z.sample).collect())
         .collect();
-    // KSP sources by slot, to name the array a runtime fault hit.
-    let sources: Vec<Option<String>> = (ir.scripts.iter())
-        .map(|s| (s.dialect == contra_engine::ir::Dialect::Ksp).then(|| s.source.clone()))
-        .collect();
     let mut store = Store::new(StoreConfig::DEFAULT).context("creating sample store")?;
     let loaded = contra_host::instrument::build(ir, RATE, &mut store);
-    // Each script slot's symbol names in id order, as the engine compiled
-    // them: a traced action's argument `SYMBOL_BASE + n` is name n.
-    let script_symbols = loaded.symbols.clone();
     let diagnostics: Vec<_> = loaded
         .diagnostics
         .iter()
@@ -113,20 +80,8 @@ fn run_events(
         })
         .collect();
     let stream = store.client();
-    // CONTRA_INSPECT_LEAN=1: no trace, no per-block JSON: only the audio
-    // thread's own work, for timing and profiles.
-    let lean = std::env::var_os("CONTRA_INSPECT_LEAN").is_some();
-    let mut engine = if lean {
-        Engine::new(Arc::clone(&plan), stream.clone(), RATE)
-    } else {
-        Engine::new_traced(Arc::clone(&plan), stream.clone(), RATE, 262144)
-    };
-    // Lean timing runs as the host does: no waiting for sample data inside a block.
-    engine.set_render_mode(if lean {
-        contra_engine::RenderMode::Live
-    } else {
-        contra_engine::RenderMode::Offline
-    });
+    let mut engine = Engine::new_traced(Arc::clone(&plan), stream.clone(), RATE, 262144);
+    engine.set_render_mode(contra_engine::RenderMode::Offline);
     let mut at = 0u64;
     let mut next = 0usize;
     let mut next_tail = last_off;
@@ -144,23 +99,10 @@ fn run_events(
     let mut jump = 0f32;
     let mut clipped = 0u64;
     let mut prior = [0f32; 2];
-    // CONTRA_INSPECT_BLOCK=N: the host's block size, frames (default 128).
-    let block = std::env::var("CONTRA_INSPECT_BLOCK")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map_or(BLOCK, |n| n.clamp(1, MAX_BLOCK));
-    let mut audio = vec![[0f32; 2]; block];
-    // Each block's time in `Engine::process`, ns, with where it was.
-    let mut block_times: Vec<(u64, u64, usize, [u64; 3])> = Vec::new();
-    // Monotonic start/end (ns) of each block with input, for `perf record -k CLOCK_MONOTONIC`.
-    let mut event_blocks: Vec<[u64; 2]> = Vec::new();
+    let mut audio = [[0f32; 2]; BLOCK];
     let mut rendered = Vec::new();
-    // Per block: wall ns, minor and major page faults (CONTRA_INSPECT_DUMP).
-    let mut extras: Vec<(u64, i64, i64, u64, contra_lua::probe::Probe)> = Vec::new();
-    let (mut peak_voices, mut voice_blocks) = (0usize, 0u64);
-    let mut process_time = Duration::ZERO;
     while at < stop {
-        let frames = usize::try_from((stop - at).min(block as u64))?;
+        let frames = usize::try_from((stop - at).min(BLOCK as u64))?;
         let until = at + frames as u64;
         let mut timed = Vec::new();
         let mut cc_in_block = false;
@@ -177,45 +119,7 @@ fn run_events(
         }
         let before = engine.stats().missing_frames;
         let stream_before = stream.stats();
-        let script_before = engine.stats();
-        let mono_start = monotonic_ns();
-        let faults_before = thread_faults();
-        let _ = contra_lua::probe::take();
-        let timer = (std::time::Instant::now(), on_cpu());
         engine.process(&mut audio[..frames], &timed);
-        let spent = timer.0.elapsed();
-        process_time += spent;
-        let faults_after = thread_faults();
-        extras.push((
-            u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX),
-            faults_after.0 - faults_before.0,
-            faults_after.1 - faults_before.1,
-            mono_start,
-            contra_lua::probe::take(),
-        ));
-        peak_voices = peak_voices.max(engine.active_voices());
-        voice_blocks += u64::from(engine.active_voices() > 0);
-        // Time on the CPU when the kernel reports it: a block the machine
-        // preempted is not a spike of ours.
-        let cpu = on_cpu()
-            .zip(timer.1)
-            .map(|(end, start)| end.saturating_sub(start));
-        if !timed.is_empty() {
-            event_blocks.push([mono_start, monotonic_ns()]);
-        }
-        block_times.push((
-            cpu.unwrap_or_else(|| u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX)),
-            at,
-            timed.len(),
-            {
-                let now = engine.stats();
-                [
-                    now.script_starts - script_before.script_starts,
-                    now.script_resumes - script_before.script_resumes,
-                    now.script_turns - script_before.script_turns,
-                ]
-            },
-        ));
         stage_events.extend(
             engine
                 .trace_events()
@@ -250,7 +154,7 @@ fn run_events(
             }
         }
         at = until;
-        if !lean && (cc_in_block || (at >= next_tail && at >= last_off)) {
+        if cc_in_block || (at >= next_tail && at >= last_off) {
             let voices: Vec<_> = engine
                 .inspect_voices()
                 .map(|v| {
@@ -328,7 +232,6 @@ fn run_events(
         }
     }
     let fingerprint = format!("{fingerprint:016x}");
-    let script_faults = faults(&engine.script_faults(), &sources);
     let loudest_remaining = engine
         .inspect_voices()
         .map(|v| v.last_peak)
@@ -348,39 +251,6 @@ fn run_events(
             })
         })
         .collect();
-    if let Some(path) = std::env::var_os("CONTRA_INSPECT_DUMP") {
-        let text: String = block_times
-            .iter()
-            .zip(&extras)
-            .map(|(t, e)| {
-                format!(
-                    "{} {} {} {} {} {} {} {} {} {} {}\n",
-                    t.1,
-                    t.0,
-                    e.0,
-                    e.1,
-                    e.2,
-                    e.3,
-                    e.4.runs,
-                    e.4.run_ns,
-                    e.4.allocs,
-                    e.4.gc_steps,
-                    e.4.gc_ns
-                )
-            })
-            .collect();
-        std::fs::write(path, text)?;
-    }
-    let timing = block_timing(&block_times, block);
-    // Load window: the first second. Play: everything after it.
-    let (load_times, play_times): (Vec<_>, Vec<_>) = block_times
-        .iter()
-        .copied()
-        .partition(|t| t.1 < u64::from(RATE));
-    let (load_timing, play_timing) = (
-        block_timing(&load_times, block),
-        block_timing(&play_times, block),
-    );
     let stats = engine.stats();
     let wait_timeouts = engine.offline_wait_timeouts() + settle_timeouts;
     let stream_stats = stream.stats();
@@ -390,26 +260,6 @@ fn run_events(
         && wait_timeouts == 0
         && stream_stats.read_errors == 0
         && stream_stats.requests_refused == 0;
-    // CONTRA_INSPECT_WAV=<file>: also write what v3 rendered, for offline A/B.
-    if let Some(out) = std::env::var_os("CONTRA_INSPECT_WAV") {
-        super::oracle::wav(Path::new(&out), &rendered)?;
-    }
-    let reference = if oracle {
-        if complete {
-            Some(
-                match super::oracle::run(path, &events, &rendered, first_onset) {
-                    Ok(value) => value,
-                    Err(error) => json!({"status":"error", "reason":format!("{error:#}")}),
-                },
-            )
-        } else {
-            Some(
-                json!({"status":"error", "reason":"v3 render incomplete; oracle comparison skipped"}),
-            )
-        }
-    } else {
-        None
-    };
     let mut summary = format!(
         "{}: scenario {scenario_name}, {} input events\n  peak {peak:.6}, clipped samples {clipped}, max sample jump {jump:.6}\n  {} voices active {:.3} s after last note-off (per-voice last-render peak before group FX in JSON)\n  loudest remaining voice peak {loudest_remaining:.8}; EQ route snapshots: {}; max CC-window HF energy {burst_peak:.8}\n  missing sample frames: {}; offline wait timeouts: {wait_timeouts}; render complete: {complete}; audio FNV-1a: {fingerprint}\n",
         loaded.name,
@@ -420,162 +270,11 @@ fn run_events(
         stats.missing_frames
     );
     summary.push_str(&super::routes::summary(&route_events));
-    summary.push_str(&format!(
-        "  block timing ({} frames, budget {:.0} us): p50 {:.0} us, p99 {:.0} us, max {:.0} us\n",
-        block,
-        timing["budget_us"].as_f64().unwrap_or(0.0),
-        timing["p50_us"].as_f64().unwrap_or(0.0),
-        timing["p99_us"].as_f64().unwrap_or(0.0),
-        timing["max_us"].as_f64().unwrap_or(0.0)
-    ));
-    if let Some(reference) = &reference {
-        let status = reference
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("error");
-        let detail = reference
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let difference = reference
-            .get("comparison")
-            .and_then(|r| r.get("level_diff_db"))
-            .and_then(Value::as_f64);
-        let peak_difference = reference
-            .get("comparison")
-            .and_then(|r| r.get("peak_diff_db"))
-            .and_then(Value::as_f64);
-        let native_jump = reference
-            .get("native_metrics")
-            .and_then(|r| r.get("max_sample_jump"))
-            .and_then(Value::as_f64);
-        let db =
-            |v: Option<f64>| v.map_or_else(|| "unavailable".to_owned(), |x| format!("{x:+.2} dB"));
-        let jump = native_jump.map_or_else(|| "unavailable".to_owned(), |x| format!("{x:.6}"));
-        summary.push_str(&format!(
-            "  oracle: {status}; native minus v3 RMS {}, peak {}; native max jump {jump} {detail}\n",
-            db(difference), db(peak_difference)
-        ));
-    }
     Ok((
         json!({"schema_version":1,"command":"play","instrument":path,"engine":"v3",
         "result":{"scenario":scenario_name,"rate":RATE,"events":events.iter().map(|e|json!({"frame":e.frame,"event":e.description})).collect::<Vec<_>>(),
-        "trace":trace,"stage_events":stage_events,"script_symbols":script_symbols,"symbol_base":contra_ksp::SYMBOL_BASE,"route_events":route_events,"route_event_semantics":"values evaluated during CC or note-on processing before smoothing, combining and clamping; dependency flags are structural","trace_events_dropped":dropped,"remaining_voices":left,"metrics":{"peak":peak,"clipped_samples":clipped,"max_sample_jump":jump,"cc_hf_bursts":bursts,"octave_bands":octave_bands,"octave_time":octave_time},
-        "oracle":reference,"diagnostics":diagnostics,"engine_stats":format!("{stats:?}"), "process_ms":process_time.as_secs_f64() * 1e3, "script_faults":script_faults, "unhandled_actions":engine.unhandled_actions().iter().map(|(a, n)| json!([format!("{a:?}"), n])).collect::<Vec<_>>(), "unanswered_pars":engine.unanswered_pars().iter().take(40).map(|(p, n)| json!([p, n])).collect::<Vec<_>>(), "action_calls":engine.action_calls().iter().take(12).map(|(a, n)| json!([format!("{a:?}"), n])).collect::<Vec<_>>(), "peak_voices":peak_voices, "blocks_with_voices":voice_blocks, "block_timing":timing, "load_timing":load_timing, "play_timing":play_timing, "event_blocks_mono_ns":event_blocks, "audio_s":stop as f64 / f64::from(RATE), "stream_stats":format!("{stream_stats:?}"), "missing_blocks":missing_blocks, "settle_timeouts":wait_timeouts, "render_complete":complete,"audio_fnv1a64":fingerprint,"unavailable":["instantaneous per-route smoothed values", "controller dependencies hidden inside arbitrary script state"]}}),
+        "trace":trace,"stage_events":stage_events,"route_events":route_events,"route_event_semantics":"values evaluated during CC or note-on processing before smoothing, combining and clamping; dependency flags are structural","trace_events_dropped":dropped,"remaining_voices":left,"metrics":{"peak":peak,"clipped_samples":clipped,"max_sample_jump":jump,"cc_hf_bursts":bursts,"octave_bands":octave_bands,"octave_time":octave_time},
+        "diagnostics":diagnostics,"engine_stats":format!("{stats:?}"), "stream_stats":format!("{stream_stats:?}"), "missing_blocks":missing_blocks, "settle_timeouts":wait_timeouts, "render_complete":complete,"audio_fnv1a64":fingerprint,"unavailable":["instantaneous per-route smoothed values", "controller dependencies hidden inside arbitrary script state"]}}),
         summary,
     ))
-}
-
-/// Max, p50 and p99 of the per-block process time, and the five slowest blocks.
-fn block_timing(times: &[(u64, u64, usize, [u64; 3])], block: usize) -> Value {
-    let mut sorted: Vec<u64> = times.iter().map(|t| t.0).collect();
-    sorted.sort_unstable();
-    let at = |q: f64| {
-        let i = ((sorted.len() as f64 * q).ceil() as usize).saturating_sub(1);
-        sorted.get(i).copied().unwrap_or(0) as f64 / 1e3
-    };
-    let mut worst: Vec<_> = times.to_vec();
-    worst.sort_unstable_by_key(|t| std::cmp::Reverse(t.0));
-    let top: Vec<_> = worst
-        .iter()
-        .take(5)
-        .map(|(ns, frame, events, [starts, resumes, turns])| {
-            json!({"us":*ns as f64 / 1e3, "frame":frame, "events":events,
-                "script_starts":starts, "script_resumes":resumes, "script_loop_turns":turns})
-        })
-        .collect();
-    let budget = block as f64 / f64::from(RATE) * 1e6;
-    json!({"block_frames":block, "budget_us":budget, "blocks":times.len(),
-        "mean_us":sorted.iter().sum::<u64>() as f64 / sorted.len().max(1) as f64 / 1e3, "p50_us":at(0.5), "p99_us":at(0.99), "max_us":at(1.0), "top":top})
-}
-
-/// This thread's CPU time so far, ns (`CLOCK_THREAD_CPUTIME_ID`).
-fn on_cpu() -> Option<u64> {
-    let mut t = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `t` is a valid timespec the call fills in.
-    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) } == 0;
-    ok.then(|| {
-        u64::try_from(t.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(t.tv_nsec).unwrap_or(0)
-    })
-}
-
-/// `CLOCK_MONOTONIC`, ns: the clock `perf record -k CLOCK_MONOTONIC` stamps samples with.
-fn monotonic_ns() -> u64 {
-    let mut t = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `t` is a valid timespec the call fills in.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
-    u64::try_from(t.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(t.tv_nsec).unwrap_or(0)
-}
-
-/// This thread's (minor, major) page faults so far.
-fn thread_faults() -> (i64, i64) {
-    // SAFETY: an all-zero rusage is a valid value the call overwrites.
-    let mut r: libc::rusage = unsafe { std::mem::zeroed() };
-    // SAFETY: `r` is a valid rusage the call fills in.
-    unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut r) };
-    (r.ru_minflt, r.ru_majflt)
-}
-
-/// Each script's runtime faults; the first out-of-range array by name.
-fn faults(all: &[contra_engine::Faults], sources: &[Option<String>]) -> Vec<Value> {
-    let compiled: Vec<Option<contra_ksp::Script>> = (sources.iter())
-        .map(|s| contra_ksp::compile(s.as_deref()?, &[]).ok())
-        .collect();
-    let name = |script: &contra_ksp::Script, cell: u32, text: bool| -> Option<String> {
-        script.variables.iter().find_map(|v| {
-            let (b, len, t) = match v.cells {
-                contra_ksp::Cells::Int { base, len } | contra_ksp::Cells::Real { base, len } => {
-                    (base, len, false)
-                }
-                contra_ksp::Cells::Text { base, len } => (base, len, true),
-                _ => return None,
-            };
-            (t == text && (b..b + len.max(1)).contains(&cell)).then(|| format!("{}[{len}]", v.name))
-        })
-    };
-    let array =
-        |slot: usize, base: u32, text: bool| name(compiled.get(slot)?.as_ref()?, base, text);
-    // The ops that pushed the divisor, their cells named.
-    let divisor = |slot: usize, pc: u32| -> Option<String> {
-        let script = compiled.get(slot)?.as_ref()?;
-        let ops: Vec<String> = (pc.saturating_sub(8)..pc)
-            .filter_map(|p| script.program.code.get(p as usize))
-            .map(|op| match op {
-                contra_engine::Op::Load(n) => {
-                    name(script, *n, false).unwrap_or_else(|| format!("{op:?}"))
-                }
-                contra_engine::Op::LoadAt { base, .. } => name(script, *base, false)
-                    .map_or_else(|| format!("{op:?}"), |n| format!("{n}[]")),
-                _ => format!("{op:?}"),
-            })
-            .collect();
-        Some(ops.join(" "))
-    };
-    (all.iter().enumerate())
-        .filter(|(_, f)| {
-            f.divide_by_zero
-                + f.out_of_range
-                + f.stack_overflow
-                + f.loop_limits
-                + f.no_coroutine
-                + f.bad_code
-                > 0
-        })
-        .map(|(slot, f)| {
-            let first = f.first_out_of_range.map(
-                |(base, text, index)| json!({"array": array(slot, base, text), "index": index}),
-            );
-            json!({"slot": slot, "out_of_range": f.out_of_range, "first_out_of_range": first,
-                "divide_by_zero": f.divide_by_zero, "first_divide_by_zero": f.first_divide_by_zero,
-                "divisor": f.first_divide_by_zero.and_then(|pc| divisor(slot, pc)),
-                "stack_overflow": f.stack_overflow, "loop_limits": f.loop_limits,
-                "no_coroutine": f.no_coroutine, "bad_code": f.bad_code, "texts_cut": f.texts_cut})
-        })
-        .collect()
 }

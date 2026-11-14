@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use contra_ui_model::{AssetRef, ImageMeta};
 
 use super::find::{self, found};
-use super::{Action, App, Format, Shelf, tidy};
+use super::{Action, App, Shelf, tidy};
 use crate::Pictures;
-use crate::kit::{self, Icon, field, glyph, icon_button, interactive, list_row, rule, tab};
+use crate::kit::{self, Icon, field, glyph, icon_button, interactive, list_row, rule};
 use crate::theme::{CONTROL, SIDEBAR, SMALL, SPACE, TEXT, TIGHT, accent, secondary};
 
 pub(super) fn view(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
@@ -203,18 +203,12 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     if hide.changed {
         v.browser_hidden = true;
     }
-    let mut formats = Vec::new();
-    for (format, label) in [(Format::Kontakt, "Kontakt"), (Format::Uvi, "Falcon / UVI")] {
-        let t = tab(ui, format!("format-{label}"), label, v.format == format);
-        if t.changed && v.format != format {
-            (v.format, v.library) = (format, None);
-            v.search.clear();
-        }
-        formats.push(t.el);
-    }
-    let format = v.format;
-    let count = app.libraries.iter().filter(|l| l.format == format).count();
-    formats.extend([spacer(), caption(count.to_string()).fill(secondary())]);
+    let count = app.libraries.len();
+    let formats = vec![
+        caption("Libraries".to_owned()).fill(secondary()),
+        spacer(),
+        caption(count.to_string()).fill(secondary()),
+    ];
     let starred = app.libraries.iter().filter(|l| l.starred).count();
     let mut shelf_rows = Vec::new();
     for (shelf, icon, label, n) in [
@@ -265,7 +259,7 @@ fn libraries(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         .pad(kit::edges(SPACE, SPACE, 0., SPACE)),
         row(formats)
             .align(Align::Center)
-            .pad(kit::edges(0., SPACE, 0., 0.)),
+            .pad(kit::edges(TIGHT, SPACE, TIGHT, SPACE)),
         rule(),
         col(shelf_rows).pad((TIGHT, 0.)),
         rule(),
@@ -286,7 +280,7 @@ fn library_list(ui: &mut Ui, app: &mut App) -> El {
     // how many).
     let mut shown: Vec<(usize, &super::Library, Option<usize>)> = (app.libraries.iter())
         .enumerate()
-        .filter(|(_, l)| l.format == v.format && (l.starred || v.shelf != Shelf::Favorites))
+        .filter(|(_, l)| l.starred || v.shelf != Shelf::Favorites)
         .filter_map(|(n, l)| {
             if found(&[l.name.as_str()], &query) {
                 return Some((n, l, None));

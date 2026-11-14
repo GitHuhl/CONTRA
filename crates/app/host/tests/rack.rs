@@ -743,44 +743,6 @@ fn a_sound_tab_decay_edit_is_heard_from_the_next_note() {
     );
 }
 
-/// A Lua script's state comes back on reload even when restoring it waits:
-/// `onLoad` here, as UVI's layer loads do, finishes in a task after a
-/// `wait`. The save must hold what the task set, not what was there before.
-#[test]
-fn a_lua_state_restored_after_a_wait_saves_as_restored() {
-    use contra_engine::ir;
-    let source = r#"
-        local layer = "default"
-        function onSave() return {layer = layer} end
-        function onLoad(data) run(function() wait(50) layer = data.layer end) end
-    "#;
-    let instrument = |saved: Vec<String>| ir::Instrument {
-        scripts: vec![ir::Script {
-            name: "state".into(),
-            slot: 0,
-            dialect: ir::Dialect::Lua,
-            source: source.into(),
-            saved,
-            data: Vec::new(),
-            links: Vec::new(),
-        }],
-        ..ir::Instrument::DEFAULT
-    };
-    let state = |rack: &Rack| {
-        let saved = rack.saved_scripts(0);
-        saved[0].iter().find(|s| s.starts_with("__state=")).cloned()
-    };
-    let saved = vec![r#"__state={["layer"]="chosen",}"#.to_owned()];
-    let (mut rack, mut audio) = rack();
-    rack.load_ir(0, instrument(saved.clone()), None).unwrap();
-    // A save asked for every block, over 200 ms: the wait ends inside it.
-    for _ in 0..40 {
-        rack.tick();
-        audio.process(BLOCK, &[]);
-    }
-    rack.tick();
-    assert_eq!(state(&rack), Some(saved[0].clone()));
-}
 
 /// A million-cell persistent array is captured a budget of cells a block,
 /// never all in one; an idle script is not read again, and what a callback
@@ -800,7 +762,6 @@ fn a_big_persistent_array_is_captured_over_blocks_and_saves_what_changed() {
         scripts: vec![ir::Script {
             name: "big".into(),
             slot: 0,
-            dialect: ir::Dialect::Ksp,
             source: source.into(),
             saved: Vec::new(),
             data: Vec::new(),
@@ -869,7 +830,6 @@ fn snapshot_of(kind: u8, saved: &[&str]) -> contra_engine::ir::Instrument {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
-            dialect: ir::Dialect::Ksp,
             source,
             saved: saved.iter().map(|&s| s.to_owned()).collect(),
             data: Vec::new(),
@@ -1169,7 +1129,6 @@ fn an_array_saved_by_path_loads_back_and_a_file_of_another_array_does_not() {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
-            dialect: ir::Dialect::Ksp,
             source,
             saved: Vec::new(),
             data: Vec::new(),
@@ -1205,18 +1164,13 @@ fn run(rack: &mut Rack, audio: &mut RackAudio, blocks: usize) {
 }
 
 /// An instrument at `source` with one script.
-fn scripted(
-    source: &std::path::Path,
-    dialect: contra_engine::ir::Dialect,
-    code: &str,
-) -> contra_engine::ir::Instrument {
+fn scripted(source: &std::path::Path, code: &str) -> contra_engine::ir::Instrument {
     use contra_engine::ir;
     ir::Instrument {
         source_path: Some(source.to_owned()),
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
-            dialect,
             source: code.to_owned(),
             saved: Vec::new(),
             data: Vec::new(),
@@ -1231,7 +1185,6 @@ fn scripted(
 /// the answer goes on as a save or load by path under them.
 #[test]
 fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
-    use contra_engine::ir;
     let scratch = Scratch::new("array-dialog");
     let saves = scratch.0.join("saves");
     let source = scratch.0.join("lib/x.nki");
@@ -1256,7 +1209,7 @@ fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
         end on";
     let (mut rack, mut audio) = rack();
     rack.set_saves(saves.clone());
-    rack.load_ir(0, scripted(&source, ir::Dialect::Ksp, code), None)
+    rack.load_ir(0, scripted(&source, code), None)
         .unwrap();
     audio.process(BLOCK, &[(0, note(0))]);
     run(&mut rack, &mut audio, 4);
@@ -1274,44 +1227,6 @@ fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
     assert!(saved.contains(&"$result 145".to_owned()), "{saved:?}");
 }
 
-/// A UVI script's own presets: `browseForFile` asks the editor, `saveState`
-/// is written under the instrument's saves, and a later load of the
-/// instrument reads it back as the bank's own file.
-#[test]
-fn a_script_preset_saved_to_disk_loads_after_a_reload() {
-    use contra_engine::ir;
-    let scratch = Scratch::new("script-presets");
-    let saves = scratch.0.join("saves");
-    let source = scratch.0.join("lib/x.uvip");
-    let code = r#"
-        local air = Knob('air', 0, 0, 100)
-        function onNote(e)
-            browseForFile('save', 'Save', '', '*.VHFPreset', function(t)
-                air.value = 40
-                saveState(t.result)
-            end)
-        end"#;
-    let (mut rack, mut audio) = rack();
-    rack.set_saves(saves.clone());
-    rack.load_ir(0, scripted(&source, ir::Dialect::Lua, code), None)
-        .unwrap();
-    audio.process(BLOCK, &[(0, note(0))]);
-    run(&mut rack, &mut audio, 4);
-    let pick = rack.pick().expect("browseForFile asks for a file");
-    assert!(pick.save, "{pick:?}");
-    rack.picked(Some("Mine"));
-    run(&mut rack, &mut audio, 40);
-    let own = saves.join(source.strip_prefix("/").unwrap_or(&source));
-    let written = std::fs::read_to_string(own.join("Mine.VHFPreset")).expect("written");
-    assert!(written.contains(r#"["air"]=40"#), "{written}");
-    // Loaded again, the script opens the preset it saved.
-    let reload =
-        "local air = Knob('air', 0, 0, 100)\nfunction onInit() loadState('Mine.VHFPreset') end";
-    rack.load_ir(0, scripted(&source, ir::Dialect::Lua, reload), None)
-        .unwrap();
-    let saved = saved_now(&mut rack, &mut audio);
-    assert!(saved.iter().any(|e| e == "air=40"), "{saved:?}");
-}
 
 /// An install fades out the engine it replaces instead of cutting its
 /// sound dead, a second install before that fade ends keeps it fading, and
@@ -1360,7 +1275,6 @@ fn a_rack_without_a_save_folder_writes_nothing() {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
-            dialect: ir::Dialect::Ksp,
             source,
             saved: Vec::new(),
             data: Vec::new(),
@@ -1399,7 +1313,6 @@ fn an_array_loaded_in_init_saves_one_ended_line_per_value() {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
-            dialect: ir::Dialect::Ksp,
             source,
             saved: Vec::new(),
             data: Vec::new(),
@@ -1808,7 +1721,6 @@ fn a_purged_group_loads_when_a_script_unpurges_it_and_plays_after() {
     instrument.scripts = vec![ir::Script {
         name: "s".into(),
         slot: 0,
-        dialect: ir::Dialect::Ksp,
         source: "on init
             declare ui_button $go
         end on

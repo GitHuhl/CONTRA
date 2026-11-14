@@ -125,7 +125,6 @@ pub fn route(value: &RouteValue, plan: &Plan, samples: &[Option<String>]) -> Val
         | RouteUnit::IntensityMultiplier => "unipolar source",
         RouteUnit::EnvelopeFrames => "unipolar source after intensity polarity",
         RouteUnit::Pan
-        | RouteUnit::TableFraction
         | RouteUnit::Semitones
         | RouteUnit::CutoffDepth
         | RouteUnit::ResonanceDepth

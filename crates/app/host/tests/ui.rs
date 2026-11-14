@@ -194,7 +194,7 @@ fn a_performing_slot_that_cannot_build_does_not_end_the_search() {
         "slot 0 must be the slot whose tree is rejected"
     );
 
-    let view = contra_host::view::View::of(&faces, &[None, None, None], &engine, None)
+    let view = contra_host::view::View::of(&faces, &engine, None)
         .expect("a performance view two slots on");
     assert_eq!(
         view.slot, 2,

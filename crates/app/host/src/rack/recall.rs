@@ -38,10 +38,9 @@ fn same<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 
 impl Rack {
     /// Recalls `preset` into `part` when the part plays the preset's base
-    /// file and only KSP scripts; false (nothing done) when it must load. A
-    /// Lua script's saved state may pick other samples, so a part with one
-    /// always loads; so does a preset with no values for a slot that keeps
-    /// some (the base's own apply, which only a load reads).
+    /// file; false (nothing done) when it must load: a preset with no values
+    /// for a slot that keeps some (the base's own apply, which only a load
+    /// reads).
     pub fn recall(&mut self, part: usize, preset: &Preset, path: Option<&Path>) -> bool {
         // Every recall is newer than a snapshot's still being made: that
         // one never lands (a load moves the part's generation instead).
@@ -50,7 +49,6 @@ impl Rack {
             return false;
         };
         let same = p.source.as_deref() == Some(preset.base.as_path());
-        let ksp = (p.script.vars.iter()).all(|v| v.widgets.is_empty() && !v.state);
         let s = &p.script;
         // The preset's values for instrument script `n`, by its slot.
         let of = |n: usize| {
@@ -58,7 +56,7 @@ impl Rack {
             preset.saved.get(*slot).filter(|v| !v.is_empty())
         };
         let complete = (s.vars.iter()).all(|v| v.vars.is_empty() || of(v.script).is_some());
-        let Some(plan) = p.plan.clone().filter(|_| same && ksp && complete) else {
+        let Some(plan) = p.plan.clone().filter(|_| same && complete) else {
             return false;
         };
         let saved: Vec<Saved> = (s.vars.iter())
@@ -339,8 +337,7 @@ pub(super) fn started(
     }
     let mut engine = Box::new(Engine::new(Arc::new(plan), client.clone(), rate));
     super::requests::init_tables(&mut engine, &client);
-    let pages: Vec<Option<contra_lua::Ui>> = faces.iter().map(|_| None).collect();
-    let view = crate::view::View::of(faces, &pages, &engine, path);
+    let view = crate::view::View::of(faces, &engine, path);
     Started {
         engine,
         slots,

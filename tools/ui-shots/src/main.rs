@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use contra_engine::Engine;
-use contra_host::ui::lua::Page as _;
 use contra_host::ui::{Library, Live};
 use contra_stream::{Store, StoreConfig};
 use contra_ui::{Pictures, view};
@@ -45,11 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut engine = Engine::new(Arc::new(loaded.plan), store.client(), 48_000);
         let load = t.elapsed();
         let mut block = vec![[0f32; 2]; 512];
-        for (slot, page) in loaded.pages.iter().enumerate() {
-            if let Some(page) = page {
-                lua_page(&out, &path, &loaded.name, page, slot as u8, &mut engine)?;
-            }
-        }
         for (slot, face) in loaded.faces.iter().enumerate() {
             let Some(face) = face else { continue };
             let slot = slot as u8;
@@ -304,77 +298,6 @@ fn in_rack(
     }
     frame(&mut ui, &mut app)?;
     save(file, w, h, &paint(&ui, w, h)?)
-}
-
-/// A Lua script's page as the engine left it, `<name>-<slot>.png`; then its
-/// first shown knob (or `UI_SHOTS_KNOB`) turned to the top,
-/// `<name>-<slot>-knob.png`.
-fn lua_page(
-    out: &std::path::Path,
-    path: &std::path::Path,
-    name: &str,
-    page: &contra_lua::Ui,
-    slot: u8,
-    engine: &mut Engine,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use contra_host::ui::lua;
-    let library = RefCell::new(Library::open(path));
-    let meta = |p: &str| library.borrow_mut().meta(p);
-    // As init left it, as the editor reads it.
-    let now = (engine.vm(slot))
-        .and_then(contra_engine::Vm::own_page)
-        .and_then(|p| p.downcast::<contra_lua::Ui>().ok());
-    let mut tree = lua::tree(now.as_deref().unwrap_or(page), &meta);
-    let settle = |engine: &mut Engine, tree: &mut contra_ui_model::Interface| {
-        let mut block = vec![[0f32; 2]; 512];
-        for _ in 0..10 {
-            engine.process(&mut block, &[]);
-        }
-        let mut text = contra_engine::Text::EMPTY;
-        for n in 0..tree.widgets.len() {
-            if let Some(look) = engine.widget(slot, n as u32) {
-                let words = engine.widget_text(slot, n as u32, &mut text);
-                lua::apply(tree, n, look, words.then(|| text.as_str()));
-            }
-        }
-        contra_ui::layout::resolve(tree, 0..tree.widgets.len());
-    };
-    settle(engine, &mut tree);
-    let stem = name.replace(['/', ' '], "_");
-    shot(&tree, path, &out.join(format!("{stem}-{slot}-initial.png")))?;
-    controls(&tree, &out.join(format!("{stem}-{slot}-controls.jsonl")))?;
-    // `UI_SHOTS_KNOB=<name>` picks the knob; else the first shown one.
-    let wanted = std::env::var("UI_SHOTS_KNOB").ok();
-    // A shown knob or slider: its number, name and top.
-    let knobs: Vec<(usize, String, f64)> = (tree.widgets.iter().enumerate())
-        .filter(|&(n, _)| tree.visible(WidgetRef(n)))
-        .filter_map(|(n, w)| match w.kind {
-            Kind::Knob { range, .. } | Kind::Slider { range, .. } => {
-                Some((n, w.name.clone(), range.max))
-            }
-            _ => None,
-        })
-        .collect();
-    let names: Vec<&str> = knobs.iter().map(|k| k.1.as_str()).collect();
-    eprintln!("{name}: shown knobs {names:?}");
-    let knob = (knobs.iter()).find(|k| wanted.as_deref().is_none_or(|w| k.1 == w));
-    let mut moved = String::from("null");
-    if let Some((n, knob, top)) = knob {
-        engine.set_widget(slot, *n as u32, *top, None);
-        settle(engine, &mut tree);
-        let now = tree.widgets.get(*n).and_then(|w| w.value.clone());
-        moved = format!("{{\"knob\":{knob:?},\"to\":{top},\"now\":{now:?}}}");
-        shot(&tree, path, &out.join(format!("{stem}-{slot}-knob.png")))?;
-    }
-    let shown = (0..tree.widgets.len())
-        .filter(|&n| tree.visible(WidgetRef(n)))
-        .count();
-    println!(
-        "{{\"name\":{name:?},\"slot\":{slot},\"lua\":true,\"widgets\":{},\"shown\":{shown},\"pictures\":{},\"moved\":{moved}}}",
-        tree.widgets.len(),
-        tree.assets.len(),
-    );
-    Ok(())
 }
 
 /// Draws page 0 of `tree` once its pictures are in, and saves it.

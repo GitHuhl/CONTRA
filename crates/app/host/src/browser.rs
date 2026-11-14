@@ -71,10 +71,7 @@ impl Browser {
             .name("contra-scan".into())
             .spawn(move || {
                 let mut cache = cache_path.as_deref().map(Cache::load).unwrap_or_default();
-                let programs = |b: &Path| contra_format_uvi::programs(b).map_err(|e| e.to_string());
-                if let Some(catalog) =
-                    contra_library::scan(&roots, &scanning, &mut cache, &programs)
-                {
+                if let Some(catalog) = contra_library::scan(&roots, &scanning, &mut cache) {
                     if let Some(path) = &cache_path {
                         let _saved = path.parent().map(std::fs::create_dir_all);
                         let _saved = cache.save(path);

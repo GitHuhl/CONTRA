@@ -7,15 +7,11 @@
 //! The engine lives on the audio thread, so the rack sends a [`Capture`]
 //! there; the audio side fills its values in place and sends it back. Text
 //! variables come back the same way, as fixed-size [`Text`].
-//!
-//! A Lua script's persistent widgets are saved the same way, in UVI's form
-//! (`"<name>=<value>"`); its load restores them before `onLoad`.
 
 use std::collections::HashMap;
 
 use contra_engine::{Engine, Text};
 
-use crate::ui::lua::Page as _;
 use contra_ksp::{Cells, FIRST_UI_ID, Persistence, Script};
 
 /// One script slot's persistent number variables, and the instrument script
@@ -24,10 +20,6 @@ use contra_ksp::{Cells, FIRST_UI_ID, Persistence, Script};
 pub struct Vars {
     pub script: usize,
     pub vars: Vec<Var>,
-    /// A Lua script's persistent widgets: name and number.
-    pub widgets: Vec<(Box<str>, u32)>,
-    /// A Lua script: what its `onSave` returns is saved too.
-    pub state: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,33 +69,6 @@ impl Vars {
         Self {
             script,
             vars,
-            widgets: Vec::new(),
-            state: false,
-        }
-    }
-
-    /// The persistent widgets with a value of the page a Lua script built,
-    /// instrument script `script`.
-    #[must_use]
-    pub fn lua(script: usize, page: &contra_lua::Ui) -> Self {
-        let valued = [
-            "Knob",
-            "Slider",
-            "NumBox",
-            "Menu",
-            "OnOffButton",
-            "MultiStateButton",
-        ];
-        let widgets = (0u32..)
-            .zip(&page.widgets)
-            .filter(|(_, w)| w.persistent && !w.name.is_empty() && valued.contains(&&*w.kind))
-            .map(|(n, w)| (w.name.as_str().into(), n))
-            .collect();
-        Self {
-            script,
-            vars: Vec::new(),
-            widgets,
-            state: true,
         }
     }
 
@@ -148,14 +113,6 @@ pub struct Capture {
     /// Persistent text variables, back to back in `texts`.
     text_spans: Box<[Span]>,
     texts: Box<[Text]>,
-    /// Lua widgets by (slot, number), and their values.
-    widgets: Box<[(u8, u32)]>,
-    widget_values: Box<[Option<f64>]>,
-    /// By Lua slot, room for its `onSave` state and how much it took.
-    states: Box<[State]>,
-    /// By Lua slot, room for one file it saved (path, newline, contents),
-    /// for the control side to write ([`Capture::take_files`]).
-    files: Box<[State]>,
     /// By script slot, its change count ([`contra_engine::Vm::runs`]) when
     /// last read, and whether this capture reads it.
     seen: Box<[Option<u32>]>,
@@ -188,9 +145,6 @@ enum Cursor {
     Controls(usize),
     Done,
 }
-
-/// A Lua slot, room for its saved state, and the length it took.
-type State = (u8, Box<[u8]>, Option<usize>);
 
 /// What one text cell costs a read's budget, in number cells.
 const TEXT_WEIGHT: usize = size_of::<Text>() / size_of::<i64>();
@@ -233,14 +187,6 @@ impl Capture {
         let controls = (spans.iter().filter(|s| s.control))
             .flat_map(|s| (0..s.len).map(move |n| (s.slot, s.base + n, s.to + n)))
             .collect();
-        let widgets: Box<[(u8, u32)]> = slotted()
-            .flat_map(|(slot, v)| v.widgets.iter().map(move |&(_, n)| (slot, n)))
-            .collect();
-        let states: Box<[State]> = slotted()
-            .filter(|(_, v)| v.state)
-            .map(|(slot, _)| (slot, vec![0; STATE].into(), None))
-            .collect();
-        let files = states.clone();
         Box::new(Self {
             part,
             generation,
@@ -249,10 +195,6 @@ impl Capture {
             spans,
             controls,
             text_spans,
-            widget_values: vec![None; widgets.len()].into(),
-            widgets,
-            states,
-            files,
             seen: vec![None; slots.len()].into(),
             fresh: vec![false; slots.len()].into(),
             at: Cursor::Start,
@@ -329,8 +271,7 @@ impl Capture {
         true
     }
 
-    /// Decides which slots this capture reads, and takes their Lua widgets
-    /// and saved states (a few per part).
+    /// Decides which slots this capture reads.
     fn begin(&mut self, engine: &mut Engine) {
         for (slot, (seen, fresh)) in (0u8..).zip(self.seen.iter_mut().zip(self.fresh.iter_mut())) {
             let now = engine.vm(slot).map(contra_engine::Vm::runs);
@@ -338,33 +279,6 @@ impl Capture {
             *fresh = now.is_none() || *seen != now;
             *seen = now;
         }
-        let fresh = |slot: u8| self.fresh.get(usize::from(slot)).copied().unwrap_or(false);
-        for (slot, room, len) in self.states.iter_mut().filter(|s| fresh(s.0)) {
-            *len = engine.save_state(*slot, room);
-        }
-        // One saved file a read: a script saves one at a time.
-        for (slot, room, len) in self.files.iter_mut() {
-            *len = if fresh(*slot) {
-                engine.take_file(*slot, room)
-            } else {
-                None
-            };
-        }
-        let widgets = self.widget_values.iter_mut().zip(self.widgets.iter());
-        for (value, &(slot, n)) in widgets.filter(|(_, w)| fresh(w.0)) {
-            *value = engine.widget(slot, n).map(|w| w.value);
-        }
-    }
-
-    /// The files the scripts saved since the last read, as (bank path,
-    /// contents); each once.
-    pub(crate) fn take_files(&mut self) -> Vec<(String, String)> {
-        let files = self.files.iter_mut().filter_map(|(_, room, len)| {
-            let bytes = room.get(..len.take()?)?;
-            let (path, text) = std::str::from_utf8(bytes).ok()?.split_once('\n')?;
-            Some((path.to_owned(), text.to_owned()))
-        });
-        files.collect()
     }
 
     /// Asks only for what changed since `last`, this part's capture before,
@@ -404,16 +318,6 @@ impl Capture {
             {
                 to.copy_from_slice(from);
             }
-        }
-        let widgets =
-            (self.widget_values.iter_mut().zip(self.widgets.iter())).zip(last.widget_values.iter());
-        for ((mine, _), theirs) in widgets.filter(|((_, w), _)| !fresh(w.0)) {
-            *mine = *theirs;
-        }
-        let states = self.states.iter_mut().zip(last.states.iter_mut());
-        for (mine, theirs) in states.filter(|(s, _)| !fresh(s.0)) {
-            std::mem::swap(&mut mine.1, &mut theirs.1);
-            mine.2 = theirs.2;
         }
     }
 }
@@ -485,7 +389,6 @@ pub fn saved(loaded: &[Vec<String>], slots: &[Vars], capture: &Capture) -> Vec<V
     let texts = (capture.text_spans.iter()).map(|s| ((s.slot, s.base, true), *s));
     let spans: HashMap<(u8, usize, bool), Span> = numbers.chain(texts).collect();
     let mut out = loaded.to_vec();
-    lua_saved(&mut out, slots, capture);
     for (slot, vars) in slots.iter().enumerate() {
         let (Ok(slot), Some(entries)) = (u8::try_from(slot), out.get_mut(vars.script)) else {
             continue;
@@ -551,47 +454,6 @@ fn numbers_entry(name: &str, cells: &[i64], real: bool) -> String {
     entry
 }
 
-/// Room for a Lua script's saved state (Augmented Orchestra's: 336 bytes).
-const STATE: usize = 16 << 10;
-
-/// The Lua widgets of `capture` into `out`, as `name=value` lines, and the
-/// script's `onSave` state as one more.
-fn lua_saved(out: &mut [Vec<String>], slots: &[Vars], capture: &Capture) {
-    let read: HashMap<(u8, u32), Option<f64>> = (capture.widgets.iter().copied())
-        .zip(capture.widget_values.iter().copied())
-        .collect();
-    for (slot, vars) in slots.iter().enumerate() {
-        let (Ok(slot), Some(entries)) = (u8::try_from(slot), out.get_mut(vars.script)) else {
-            continue;
-        };
-        let mut by_name: HashMap<String, usize> = (entries.iter().enumerate())
-            .filter_map(|(n, e)| Some((e.split_once('=')?.0.to_owned(), n)))
-            .collect();
-        let state = (capture.states.iter())
-            .find(|s| s.0 == slot)
-            .and_then(|(_, room, len)| std::str::from_utf8(room.get(..(*len)?)?).ok());
-        let state = state.map(|s| {
-            (
-                contra_lua::STATE.into(),
-                format!("{}={s}", contra_lua::STATE),
-            )
-        });
-        let values = (vars.widgets.iter()).filter_map(|(name, n)| {
-            let value = read.get(&(slot, *n)).copied().flatten()?;
-            Some((name.to_string(), format!("{name}={value}")))
-        });
-        for (name, entry) in values.chain(state) {
-            match by_name.get(&name).and_then(|&at| entries.get_mut(at)) {
-                Some(e) => *e = entry,
-                None => {
-                    by_name.insert(name, entries.len());
-                    entries.push(entry);
-                }
-            }
-        }
-    }
-}
-
 /// A variable's name without its type sigil, as saved names are matched.
 fn bare(name: &str) -> String {
     name.trim_start_matches(['$', '%', '~', '?', '@', '!'])
@@ -601,30 +463,6 @@ fn bare(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_lua_pages_persistent_widgets_save_as_name_equals_value() {
-        let page = contra_lua::compile(
-            r#"Knob{"Air", 64, 0, 127} Knob{"Temp", 1, persistent=false}
-               OnOffButton{"Hold", false} Label{"Says"}"#,
-            &[],
-            &[],
-        )
-        .unwrap()
-        .ui;
-        let vars = Vars::lua(0, &page);
-        assert_eq!(vars.widgets, [("Air".into(), 0), ("Hold".into(), 2)]);
-        let mut capture = Capture::new(0, 0, std::slice::from_ref(&vars));
-        capture.widget_values = [Some(100.), Some(1.)].into();
-        let state = br#"{["ccVel"]=100,}"#;
-        let (_, room, len) = &mut capture.states[0];
-        room[..state.len()].copy_from_slice(state);
-        *len = Some(state.len());
-        let loaded = vec![vec!["Air=64".to_owned(), "Other=3".to_owned()]];
-        let out = saved(&loaded, std::slice::from_ref(&vars), &capture);
-        let state = r#"__state={["ccVel"]=100,}"#;
-        assert_eq!(out, [vec!["Air=100", "Other=3", "Hold=1", state]]);
-    }
 
     #[test]
     fn captured_values_replace_the_loaded_ones_in_kontakts_form() {

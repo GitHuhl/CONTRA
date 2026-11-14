@@ -383,10 +383,6 @@ pub(crate) fn libraries(browser: &Browser) -> Vec<app::Library> {
     (browser.catalog.libraries.iter())
         .map(|l| app::Library {
             name: l.name.clone(),
-            format: match l.format {
-                contra_library::Format::Kontakt => app::Format::Kontakt,
-                contra_library::Format::Uvi => app::Format::Uvi,
-            },
             recalls: (l.presets.iter().enumerate())
                 .filter_map(|(n, p)| is_preset(p).then_some(n))
                 .collect(),
@@ -734,7 +730,6 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
     let p = Arc::clone(&params);
     let watched = Arc::clone(&params);
     let dropping = Arc::clone(&params);
-    let owner = Arc::clone(&params);
     let closing = Arc::clone(&params);
     let mut app = App {
         build: crate::BUILD.into(),
@@ -972,8 +967,6 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
                 | contra_ui::pictures::arrived()
         }
     })
-    // Add folder's picker is owned by the host's window (Windows).
-    .on_win32_parent(move |hwnd| owner.shared.folder.set_owner(hwnd))
     .on_close(move || closing.shared.shown.store(false, Ordering::Release))
     .into_editor()
 }

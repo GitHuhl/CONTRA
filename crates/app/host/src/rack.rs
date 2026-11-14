@@ -401,11 +401,6 @@ impl Rack {
         }
         let mut instrument = instrument;
         crate::relink::apply(&self.moved, &mut instrument);
-        // The files its scripts saved come back as the bank's own.
-        let own = picks::script_files(self.saves.as_deref(), instrument.source_path.as_deref());
-        for s in (instrument.scripts.iter_mut()).filter(|s| s.dialect == ir::Dialect::Lua) {
-            s.data.extend(own.iter().cloned());
-        }
         let saved = instrument.scripts.iter().map(|s| s.saved.clone()).collect();
         let source = instrument.source_path.clone();
         let slots = instrument.scripts.iter().map(|s| s.slot).collect();
@@ -460,7 +455,7 @@ impl Rack {
         requests::init_tables(&mut engine, &self.store.client());
         // Its library's resources are found near the instrument file.
         let near = source.as_deref().or(path.as_deref());
-        let view = crate::view::View::of(&loaded.faces, &loaded.pages, &engine, near)
+        let view = crate::view::View::of(&loaded.faces, &engine, near)
             .map(|view| view.with_waves(waves));
         let sounds = crate::sound::Sounds::new(self.rate, engine.group_sounds());
         let part_info = Part {
@@ -578,15 +573,6 @@ impl Rack {
                     keys,
                 });
             }
-        } else if let Some((slot, n)) = view.widget(widget) {
-            p.modified = true;
-            self.send(Command::Widget {
-                part,
-                slot,
-                n,
-                value,
-                cell,
-            });
         } else if let Some((slot, id, value)) = view.control(widget, value) {
             p.modified |= saves(&p.script.vars, slot, id);
             self.send(Command::Control {
@@ -748,19 +734,10 @@ impl Rack {
             (frame.part, frame.generation) = (n, p.script.generation);
             self.send(Command::Look(frame));
         }
-        while let Some(mut c) = self.channels.captured.recv() {
+        while let Some(c) = self.channels.captured.recv() {
             if let Some(Some(p)) = self.parts.get_mut(c.part)
                 && p.script.generation == c.generation
             {
-                let files = c.take_files();
-                let source = p.source.as_deref();
-                let failed = picks::write_script_files(self.saves.as_deref(), source, files);
-                p.diagnostics
-                    .extend(failed.into_iter().map(|detail| ir::Diagnostic {
-                        impact: ir::Impact::Cosmetic,
-                        feature: "preset".into(),
-                        detail,
-                    }));
                 p.script.asked = false;
                 crate::persist::landed(c, &mut p.script.latest, &mut p.script.spare);
             }
@@ -773,7 +750,7 @@ impl Rack {
             };
             let s = &mut p.script;
             let nothing =
-                |v: &crate::persist::Vars| v.vars.is_empty() && v.widgets.is_empty() && !v.state;
+                |v: &crate::persist::Vars| v.vars.is_empty();
             if s.asked || s.vars.iter().all(nothing) {
                 continue;
             }

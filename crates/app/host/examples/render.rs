@@ -2,7 +2,7 @@
 //! a WAV file, for listening and A/B against other samplers. Prints load time,
 //! gaps and the script actions the engine does not answer yet.
 //! `cargo run --release -p contra-host --example render -- <file> <key> <out.wav>`
-//! `<file>` is a Kontakt instrument, or a UVI program as `bank.ufs/Name.uvip`.
+//! `<file>` is a Kontakt instrument.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             for (name, bytes) in &s.data {
                 std::fs::write(
-                    // A UVI module's name is a path in its bank.
                     std::path::Path::new(&dir).join(format!("{n}-{}.nka", name.replace('/', "_"))),
                     bytes,
                 )?;
@@ -102,7 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ir.scripts.push(contra_engine::ir::Script {
                 name: "append".into(),
                 slot: ir.scripts.len(),
-                dialect: contra_engine::ir::Dialect::Ksp,
                 source,
                 saved: Vec::new(),
                 data: Vec::new(),
@@ -112,7 +110,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let scripts = ir.scripts.clone();
     let loaded = contra_host::instrument::build(ir, RATE, &mut store);
-    let pages = loaded.pages.clone();
     println!(
         "{}: {} zones, loaded in {:?}",
         loaded.name,
@@ -300,14 +297,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     // A quarter second after load before the first note, as a player gives
-    // a program: a script may wait while it loads (UVI `onLoad`).
+    // a program: a script may wait while it loads.
     let mut silent = vec![[0.0f32; 2]; 512];
     for _ in 0..RATE as usize / 4 / 512 {
         engine.process(&mut silent, &[]);
         install_requests(&mut engine, &plan, &stream);
     }
     // CONTRA_CONTROL=name=value,...: each script control (a KSP one named
-    // without its type prefix, a UVI widget or macro by its name) moves there
+    // without its type prefix) moves there
     // in turn and its callbacks run, as a user's edit would; its effect loads
     // install over a quarter second. "name=value@1.5" moves it 1.5 s into
     // the render instead, at the start of that block.
@@ -332,33 +329,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("control {name} (script {slot}, id {id}) := {value}");
         engine.set_control(slot, id, value);
-        for _ in 0..RATE as usize / 4 / 512 {
-            engine.process(&mut silent, &[]);
-            install_requests(&mut engine, &plan, &stream);
-        }
-    }
-    // CONTRA_WIDGET=name=value,...: a Lua script's own widget moves there,
-    // as the editor moves it, and its `changed` runs.
-    for pair in std::env::var("CONTRA_WIDGET")
-        .iter()
-        .flat_map(|s| s.split(','))
-    {
-        let Some((name, value)) = pair.split_once('=') else {
-            continue;
-        };
-        let Ok(value) = value.parse::<f64>() else {
-            continue;
-        };
-        let found = pages.iter().enumerate().find_map(|(slot, page)| {
-            let n = page.as_ref()?.widgets.iter().position(|w| w.name == name)?;
-            Some((u8::try_from(slot).ok()?, u32::try_from(n).ok()?))
-        });
-        let Some((slot, n)) = found else {
-            println!("widget {name}: no such widget");
-            continue;
-        };
-        println!("widget {name} (script {slot}, number {n}) := {value}");
-        engine.set_widget(slot, n, value, None);
         for _ in 0..RATE as usize / 4 / 512 {
             engine.process(&mut silent, &[]);
             install_requests(&mut engine, &plan, &stream);
@@ -622,11 +592,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("last message: {}", engine.last_message());
     println!("calls: {:?}", engine.action_calls());
     println!("script faults: {:?}", engine.script_faults());
-    println!(
-        "script arena spills: {}, memory after render: {}",
-        contra_lua::alloc::spills(),
-        memory()
-    );
+    println!("memory after render: {}", memory());
     write_wav(&out, &audio)?;
     println!("wrote {}", out.display());
     Ok(())
@@ -665,9 +631,8 @@ fn write_wav(path: &std::path::Path, frames: &[[f32; 2]]) -> std::io::Result<()>
 }
 
 /// Script control `name` and `value` as `Engine::set_control` takes them:
-/// a UVI script's by its name among its controls (the last of that name, a
-/// widget before a macro), its value an `f64`; a KSP one's UI id is the first
-/// one plus its variable's index (persist.rs), its value an integer.
+/// its UI id is the first one plus its variable's index (persist.rs), its
+/// value an integer.
 fn control(
     plan: &Plan,
     scripts: &[contra_engine::ir::Script],
@@ -678,13 +643,8 @@ fn control(
         .iter()
         .zip(scripts)
         .enumerate()
-        .find_map(|(n, (script, ir))| {
+        .find_map(|(n, (_, ir))| {
             let slot = u8::try_from(n).ok()?;
-            if let Some(foreign) = &script.foreign {
-                let id = foreign.controls().iter().rposition(|c| c == name)?;
-                let value = value.parse::<f64>().ok()?.to_bits() as i64;
-                return Some((slot, i32::try_from(id).ok()?, value));
-            }
             // As the host compiles it: a performance view's controls take
             // their UI ids in the view's order.
             let view = contra_host::perf_view::find(&ir.data).map(|(_, v)| v);

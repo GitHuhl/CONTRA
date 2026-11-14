@@ -22,8 +22,6 @@ pub enum Control {
     Integer(i32),
     /// A KSP real control by UI id, its value the script's real bits.
     Real(i32),
-    /// A Lua widget by number, its value as is.
-    Widget(u32),
 }
 
 /// How a macro's 0..1 spans the control's values.

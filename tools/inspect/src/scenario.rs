@@ -14,10 +14,6 @@ pub struct Input {
 }
 
 fn note(frame: u64, key: u8, on: bool) -> Input {
-    note_at(frame, key, on, 100)
-}
-
-fn note_at(frame: u64, key: u8, on: bool, velocity: u8) -> Input {
     let event = if on {
         Event::NoteOn {
             note: HostNote {
@@ -27,7 +23,7 @@ fn note_at(frame: u64, key: u8, on: bool, velocity: u8) -> Input {
                 id: -1,
                 clap: true,
             },
-            velocity: f64::from(velocity) / 127.0,
+            velocity: 100.0 / 127.0,
             tune: 0.0,
         }
     } else {
@@ -42,7 +38,7 @@ fn note_at(frame: u64, key: u8, on: bool, velocity: u8) -> Input {
     Input {
         frame,
         event,
-        description: json!({"type":if on {"note_on"} else {"note_off"},"key":key,"velocity":velocity}),
+        description: json!({"type":if on {"note_on"} else {"note_off"},"key":key}),
     }
 }
 fn cc(frame: u64, cc: u8, value: u8) -> Input {
@@ -143,14 +139,7 @@ pub fn file(path: &Path) -> Result<Vec<Input>> {
             .and_then(Value::as_str)
             .context("event needs a type")?;
         out.push(match kind {
-            "note_on" => {
-                let velocity = if entry.get("velocity").is_some() {
-                    byte("velocity")?
-                } else {
-                    100
-                };
-                note_at(frame, byte("key")?, true, velocity)
-            }
+            "note_on" => note(frame, byte("key")?, true),
             "note_off" => note(frame, byte("key")?, false),
             "cc" => cc(frame, byte("cc")?, byte("value")?),
             _ => bail!("unknown event type {kind}"),

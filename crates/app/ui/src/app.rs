@@ -85,7 +85,6 @@ pub enum Loading {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub name: String,
-    pub format: Format,
     /// Its instruments by path inside the library: `Folder/Name`.
     pub presets: Vec<String>,
     /// Which of `presets` (sorted) are presets of an instrument, recalled
@@ -95,14 +94,6 @@ pub struct Library {
     /// Pictures that may be its cover, best first, as the host's cover
     /// store reads them; the first that decodes is shown.
     pub art: Vec<String>,
-}
-
-/// Which family of libraries the browser lists.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Format {
-    #[default]
-    Kontakt,
-    Uvi,
 }
 
 /// One loaded instrument.
@@ -259,7 +250,6 @@ pub struct View {
     pub browser_hidden: bool,
     /// The library list's share of the browser's height; 0 is the default.
     pub split: f64,
-    pub format: Format,
     pub shelf: Shelf,
     /// Libraries listed Z to A.
     pub descending: bool,

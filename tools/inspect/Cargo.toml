@@ -9,10 +9,8 @@ description = "Inspect v3 instrument loads and playback"
 
 [dependencies]
 anyhow = "1"
-libc = "0.2"
 hound = "3"
 contra-engine = { path = "../../crates/engine/engine", features = ["trace"] }
-contra-ksp = { path = "../../crates/script/ksp" }
 contra-ui-model = { path = "../../crates/model/ui-model" }
 contra-law = { path = "../../crates/base/law" }
 contra-host = { path = "../../crates/app/host" }
