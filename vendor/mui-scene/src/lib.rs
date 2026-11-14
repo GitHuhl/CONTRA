@@ -33,7 +33,10 @@ pub use mui_geometry::BorderAlign;
 pub use regions::ShapeLayout;
 mod border_ramp;
 pub use border_ramp::BorderRamp;
+mod declaration;
 mod dsl;
+#[doc(hidden)]
+pub use declaration::clear_declaration_storage;
 mod editable;
 mod element;
 pub use editable::{EditableText, TextGeometry, TextLineGeometry};
@@ -71,8 +74,8 @@ pub use mui_style::{
 pub use mui_text::{Axes, Font, Weight};
 pub use scene::bar;
 pub use scene::{
-    Layer, LocalPose, Painted, PlacedPath, ResolvedScene, ResolvedSurface, Resolver, SceneError,
-    SceneSpec, Text, TextGlyph, push_index, resolve,
+    FallbackSource, Layer, LocalPose, Painted, PlacedPath, ResolvedScene, ResolvedSurface,
+    Resolver, SceneError, SceneSpec, Text, TextGlyph, push_index, resolve,
 };
 
 /// Everything a scene file needs, including the spacing tokens as bare
@@ -143,3 +146,10 @@ pub mod prelude {
         }
     }
 }
+
+// Keep the named live-text contract runnable with targeted --lib validation.
+#[cfg(test)]
+extern crate self as mui_scene;
+#[cfg(test)]
+#[path = "../tests/text_cache_hardening.rs"]
+mod text_cache_contract;

@@ -26,6 +26,8 @@ pub(crate) struct WindowThreadShared {
     stopped_requested_from_host: AtomicBool,
     callbacks_revoked: AtomicBool,
     sizing_strategy: OnceLock<SizingStrategy>,
+    frame_requested: AtomicBool,
+    startup_signal: OnceLock<LoopSignal>,
 }
 
 impl WindowThreadShared {
@@ -38,13 +40,20 @@ impl WindowThreadShared {
             stopped_requested_from_host: false.into(),
             callbacks_revoked: false.into(),
             sizing_strategy: OnceLock::new(),
+            frame_requested: AtomicBool::new(false),
+            startup_signal: OnceLock::new(),
         }
     }
 
     fn init(&self, window: &WindowInner) {
         self.set_size(window.get_size());
         self.set_scaling_factor(window.scale_factor());
-        let Ok(()) = self.sizing_strategy.set(window.sizing_strategy) else { unreachable!() };
+        let _ = self.sizing_strategy.set(window.sizing_strategy);
+        let _ = self.startup_signal.set(window.loop_signal.clone());
+        if self.callbacks_revoked() {
+            window.loop_signal.stop();
+            window.loop_signal.wakeup();
+        }
     }
 
     pub fn get_size(&self) -> PhysicalSize<u16> {
@@ -80,6 +89,14 @@ impl WindowThreadShared {
     pub fn callbacks_revoked(&self) -> bool {
         self.callbacks_revoked.load(Ordering::Acquire)
     }
+
+    pub fn take_frame_request(&self) -> bool {
+        self.frame_requested.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn has_frame_request(&self) -> bool {
+        self.frame_requested.load(Ordering::Acquire)
+    }
 }
 
 struct ThreadStopWatcher(Arc<WindowThreadShared>);
@@ -101,19 +118,30 @@ pub enum WindowThreadRequest {
 
 pub type WindowThreadResponseMessage = core::result::Result<(), String>;
 
+pub struct WindowThreadMessage {
+    pub request: WindowThreadRequest,
+    pub response: mpsc::Sender<WindowThreadResponseMessage>,
+}
+
+// A host RPC can race a tick synchronously calling VST3 performEdit on the GUI
+// thread. Time out instead of waiting for that thread to service itself.
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
+// CONTRA: 250 ms (upstream) is shorter than a busy host restoring a session
+// takes to open an editor window, which then stayed blank. A stalled X server
+// still cannot freeze the host GUI for long.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub enum HostCallback {
     Resized { new_size: WindowSize, previous: WindowSize },
     Destroyed,
 }
 
-/// Thread control only: native state and the handler stay on the X11 worker.
-/// No owner-thread HostCallbacks are stored in this auto-Send type.
+/// Movable commands and metadata; native state stays on the X11 worker.
 pub struct WindowThreadControl {
     shared: Arc<WindowThreadShared>,
     loop_signal: LoopSignal,
     event_loop_handle: Cell<Option<JoinHandle<()>>>,
-    request_sender: calloop::channel::SyncSender<WindowThreadRequest>,
-    response_receiver: mpsc::Receiver<WindowThreadResponseMessage>,
+    request_sender: calloop::channel::SyncSender<WindowThreadMessage>,
     can_detach: Cell<bool>,
     close_timeout: Cell<Option<Duration>>,
 }
@@ -124,15 +152,6 @@ pub struct WindowThreadHandle {
     host_callbacks: Option<RefCell<Box<dyn HostCallbacks>>>,
 }
 
-impl std::ops::Deref for WindowThreadHandle {
-    type Target = WindowThreadControl;
-
-    fn deref(&self) -> &Self::Target {
-        &self.control
-    }
-}
-
-// Pinning code cannot keep a host-owned parent drawable alive after close.
 fn can_detach(settings: &WindowSettings, host: &crate::host::Host) -> bool {
     settings.parent.is_none()
         && !settings.wait_for_parent
@@ -140,7 +159,35 @@ fn can_detach(settings: &WindowSettings, host: &crate::host::Host) -> bool {
         && host.main_thread.is_none()
 }
 
+// A PIE executable cannot dlopen itself, but unlike a plugin its code cannot
+// unload. Fail *window* open for an unpinnable shared library, before spawning.
+fn image_is_unload_safe() -> bool {
+    if crate::pin_current_image_for_detached_work() {
+        return true;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    // SAFETY: the symbol is in this image and info is writable.
+    if unsafe { libc::dladdr(image_is_unload_safe as *const () as _, info.as_mut_ptr()) } == 0 {
+        return false;
+    }
+    // SAFETY: successful dladdr initialized the struct and owns its filename.
+    let info = unsafe { info.assume_init() };
+    if info.dli_fname.is_null() {
+        return false;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let name = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+    let image = std::fs::metadata(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    let executable = std::fs::metadata("/proc/self/exe");
+    matches!((image, executable), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
+
 impl WindowThreadHandle {
+    pub(crate) fn control(&self) -> &WindowThreadControl {
+        &self.control
+    }
+
     pub fn create_window(init: WindowInitializer) -> Result<Self> {
         let can_detach = can_detach(&init.settings, &init.host);
         let (control, callback_receiver) = WindowThreadControl::spawn(
@@ -149,17 +196,14 @@ impl WindowThreadHandle {
             init.host.main_thread,
             can_detach,
         )?;
-        Ok(Self {
-            control,
-            callback_receiver,
-            host_callbacks: init.host.callbacks.map(|c| c.into_inner().into()),
-        })
+        Ok(Self { control, callback_receiver, host_callbacks: init.host.callbacks })
     }
 
     pub fn handle_main_thread_callback(&self) {
         loop {
             let Some(receiver) = self.callback_receiver.as_ref() else { return };
             let Some(callback) = receiver.try_recv().ok() else { return };
+
             self.handle_main_thread_message(callback);
         }
     }
@@ -167,12 +211,14 @@ impl WindowThreadHandle {
     fn handle_main_thread_message(&self, msg: HostCallback) {
         let Some(host_callbacks) = self.host_callbacks.as_ref() else { return };
         let mut host_callbacks = host_callbacks.borrow_mut();
+
         match msg {
             HostCallback::Destroyed => host_callbacks.destroyed(),
             HostCallback::Resized { new_size: new, previous } => {
                 if let Err(e) = host_callbacks.request_resize(new) {
                     warn!("Host failed to resize parent window: {}. Reverting.", e);
-                    if let Err(e) = self.resize(previous.physical.into()) {
+
+                    if let Err(e) = self.control.resize(previous.physical.into()) {
                         warn!(
                             "Failed to revert to previous size while handling previous error: {}",
                             e
@@ -185,7 +231,6 @@ impl WindowThreadHandle {
 }
 
 impl WindowThreadControl {
-    /// Constructs a controller with no owner-thread callbacks by construction.
     pub(crate) fn create_without_host(
         settings: WindowSettings, builder: WindowHandlerBuilder,
     ) -> Result<Self> {
@@ -198,45 +243,68 @@ impl WindowThreadControl {
         settings: WindowSettings, builder: WindowHandlerBuilder,
         main_thread: Option<Box<dyn crate::host::HostMainThreadCaller>>, can_detach: bool,
     ) -> Result<(Self, Option<mpsc::Receiver<HostCallback>>)> {
+        if !image_is_unload_safe() {
+            warn!("X11 editor window open refused: could not pin plugin image");
+            return Err(PlatformError::CreationFailed("Could not pin X11 editor image".into()));
+        }
         let (tx, rx) = result_channel();
         let shared = Arc::new(WindowThreadShared::new());
         let (request_sender, request_receiver) = calloop::channel::sync_channel(1);
-        let (response_sender, response_receiver) = mpsc::channel();
         let (main_thread_caller, main_thread_receiver) = MainThreadCaller::new(main_thread);
 
         let join_handle = {
             let shared = Arc::clone(&shared);
             let stop_watcher = ThreadStopWatcher(Arc::clone(&shared));
 
-            thread::spawn(move || {
-                let thread = match WindowThread::create(
-                    settings,
-                    builder,
-                    shared,
-                    request_receiver,
-                    response_sender,
-                    main_thread_caller,
-                ) {
-                    Err(e) => return tx.send_error(e),
-                    Ok(thread) => thread,
-                };
+            thread::Builder::new()
+                .name("baseview-x11".into())
+                .spawn(move || {
+                    let created = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        WindowThread::create(
+                            settings,
+                            builder,
+                            shared,
+                            request_receiver,
+                            main_thread_caller,
+                        )
+                    }));
+                    let thread = match created {
+                        Ok(Ok(thread)) => thread,
+                        Ok(Err(e)) => return tx.send_error(e),
+                        Err(_) => {
+                            return tx.send_error(PlatformError::CreationFailed(
+                                "Panic during X11 window creation".into(),
+                            ))
+                        }
+                    };
 
-                if tx.send_success(&thread) {
-                    thread.run()
-                }
+                    if tx.send_success(&thread) {
+                        thread.run()
+                    }
 
-                // Forces the stop_watcher to be moved to this closure
-                drop(stop_watcher);
-            })
+                    // Forces the stop_watcher to be moved to this closure
+                    drop(stop_watcher);
+                })
+                .map_err(|e| PlatformError::CreationFailed(e.to_string()))?
         };
 
         let loop_signal = match rx.receive() {
             Ok(signal) => signal,
-            Err(error) => {
-                // Failed construction must finish dropping the worker-owned handler
-                // before returning control to a caller that may close its parent.
-                let _ = join_handle.join();
-                return Err(error);
+            Err(e) => {
+                shared.callbacks_revoked.store(true, Ordering::Release);
+                if let Some(signal) = shared.startup_signal.get() {
+                    signal.stop();
+                    signal.wakeup();
+                }
+                // The startup receiver is gone: a late creation will tear down
+                // instead of entering its loop. The image was pinned above.
+                if can_detach {
+                    join_bounded(join_handle, Duration::ZERO, || {});
+                } else {
+                    // Returning releases the caller's host/parent lifetime.
+                    let _ = join_handle.join();
+                }
+                return Err(e);
             }
         };
 
@@ -246,7 +314,6 @@ impl WindowThreadControl {
                 shared,
                 loop_signal,
                 request_sender,
-                response_receiver,
                 can_detach: Cell::new(can_detach),
                 close_timeout: Cell::new(None),
             },
@@ -281,11 +348,48 @@ impl WindowThreadControl {
         self.request(WindowThreadRequest::SetScaleFactorOverride(scale_factor))
     }
 
+    /// A timeout means the queued request may still run, not that it was
+    /// cancelled. Each request owns its reply, so a late acknowledgement can
+    /// never satisfy the next RPC. A full queue fails immediately.
     fn request(&self, req: WindowThreadRequest) -> Result<()> {
-        self.request_sender.send(req).map_err(|_| RequestFailed::Send)?;
-        let result = self.response_receiver.recv().map_err(|_| RequestFailed::Recv)?;
+        let (response, receiver) = mpsc::channel();
+        self.request_sender.try_send(WindowThreadMessage { request: req, response }).map_err(
+            |e| match e {
+                mpsc::TrySendError::Full(_) => RequestFailed::Busy,
+                mpsc::TrySendError::Disconnected(_) => RequestFailed::Send,
+            },
+        )?;
+        receive_response(&receiver, REQUEST_TIMEOUT)
+    }
 
-        result.map_err(|e| RequestFailed::Response(e).into())
+    pub fn visibility_control(&self) -> crate::WindowVisibility {
+        let shared = Arc::clone(&self.shared);
+        let sender = self.request_sender.clone();
+        crate::WindowVisibility::new(move |visible| {
+            if shared.callbacks_revoked()
+                || shared.is_stop_host_requested()
+                || shared.stopped.load(Ordering::Acquire)
+            {
+                return;
+            }
+            let (response, _) = mpsc::channel();
+            let request =
+                if visible { WindowThreadRequest::Show } else { WindowThreadRequest::Hide };
+            let _ = sender.try_send(WindowThreadMessage { request, response });
+        })
+    }
+    pub fn frame_requester(&self) -> crate::FrameRequester {
+        let shared = Arc::clone(&self.shared);
+        let signal = self.loop_signal.clone();
+        crate::FrameRequester::new(move || {
+            if !shared.callbacks_revoked()
+                && !shared.is_stop_host_requested()
+                && !shared.stopped.load(Ordering::Acquire)
+                && !shared.frame_requested.swap(true, Ordering::AcqRel)
+            {
+                signal.wakeup();
+            }
+        })
     }
 
     pub fn run_until_closed(&self) -> Result<()> {
@@ -294,7 +398,11 @@ impl WindowThreadControl {
         } else {
             self.request(WindowThreadRequest::Show)
         };
-        // Even an already-disconnected request channel cannot skip native teardown.
+        if shown.is_err() {
+            self.shared.stopped_requested_from_host.store(true, Ordering::Release);
+            self.loop_signal.stop();
+            self.loop_signal.wakeup();
+        }
         let joined = self.join_thread();
         shown.and(joined)
     }
@@ -302,10 +410,7 @@ impl WindowThreadControl {
     fn join_thread(&self) -> Result<()> {
         let Some(thread) = self.event_loop_handle.take() else { return Ok(()) };
         if thread.thread().id() == thread::current().id() {
-            // A callback can legally receive its own Send controller. The loop
-            // is already stopped by Drop; its current callback must return before
-            // the native handler can be destroyed. Never try to join ourselves.
-            drop(thread);
+            // Self-close completes when the current native callback returns.
             return Ok(());
         }
         if let Err(panic) = thread.join() {
@@ -353,89 +458,131 @@ impl Drop for WindowThreadControl {
         self.loop_signal.stop();
         self.loop_signal.wakeup();
 
-        if let Some(timeout) = self.close_timeout.get() {
-            let Some(thread) = self.event_loop_handle.take() else { return };
-            if thread.thread().id() == thread::current().id() {
-                drop(thread);
+        if self.can_detach.get() {
+            if let Some(timeout) = self.close_timeout.get() {
+                let Some(thread) = self.event_loop_handle.take() else { return };
+                if thread.thread().id() == thread::current().id() {
+                    return;
+                }
+                join_bounded(thread, timeout, || {
+                    self.shared.callbacks_revoked.store(true, Ordering::Release);
+                });
                 return;
             }
-            join_bounded(thread, timeout, || {
-                if !self.can_detach.get() || !crate::pin_current_image_for_detached_work() {
-                    return false;
-                }
-                self.shared.callbacks_revoked.store(true, Ordering::Release);
-                true
-            });
-        } else if let Err(e) = self.join_thread() {
-            warn!("Error while closing window: {}", e);
+        }
+        if let Err(error) = self.join_thread() {
+            warn!("Error while closing X11 window: {}", error);
         }
     }
 }
 
-// Return false only after the image has been pinned and the thread detached.
-fn join_bounded(thread: JoinHandle<()>, timeout: Duration, pin: impl FnOnce() -> bool) -> bool {
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
-        let _ = thread.join();
-        return true;
-    };
-    while !thread.is_finished() && Instant::now() < deadline {
+// Call only for workers whose image was made unload-safe before spawn. Joining
+// is permitted only once is_finished proves it cannot wait for GUI host work.
+fn join_bounded(thread: JoinHandle<()>, timeout: Duration, revoke: impl FnOnce()) -> bool {
+    let started = Instant::now();
+    while !thread.is_finished() && started.elapsed() < timeout {
         thread::sleep(Duration::from_millis(1));
     }
-    if !thread.is_finished() && pin() {
-        return false;
+    if thread.is_finished() {
+        let _ = thread.join();
+        true
+    } else {
+        revoke();
+        warn!("X11 close timed out; revoking callbacks and detaching pinned worker");
+        false
     }
-    let _ = thread.join();
-    true
+}
+
+fn receive_response(
+    receiver: &mpsc::Receiver<WindowThreadResponseMessage>, timeout: Duration,
+) -> Result<()> {
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result.map_err(|e| RequestFailed::Response(e).into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(RequestFailed::Timeout.into()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(RequestFailed::Recv.into()),
+    }
 }
 
 #[cfg(test)]
-mod ownership_tests;
-
-#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "failed test setup/assertions must fail the regression")]
 mod close_tests {
     use super::*;
 
     #[test]
-    fn embedded_windows_cannot_detach_before_native_teardown() {
-        let host = crate::host::Host::new();
-        let mut settings = WindowSettings::new();
-        assert!(can_detach(&settings, &host));
-
-        settings.wait_for_parent = true;
-        assert!(!can_detach(&settings, &host));
-
-        settings.wait_for_parent = false;
-        settings.parent = Some(crate::ParentWindowHandle {
-            inner: crate::platform::x11::ParentWindowHandle {
-                window_id: std::num::NonZeroU32::new(1).unwrap(),
-            },
-        });
-        assert!(!can_detach(&settings, &host));
+    fn executable_worker_is_unload_safe_without_dlopen() {
+        assert!(image_is_unload_safe());
     }
 
     #[test]
-    fn stalled_thread_detaches_only_after_pin() {
+    fn stalled_pinned_thread_never_joins_unboundedly() {
         let (release, waiting) = mpsc::channel();
-        let thread = thread::spawn(move || assert!(waiting.recv().is_ok()));
+        let (done, finished) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            assert!(waiting.recv().is_ok());
+            done.send(()).unwrap();
+        });
+        let started = Instant::now();
         let revoked = AtomicBool::new(false);
-        assert!(!join_bounded(thread, Duration::ZERO, || {
-            revoked.store(true, Ordering::Release);
-            true
-        }));
+        assert!(!join_bounded(thread, Duration::from_millis(5), || revoked
+            .store(true, Ordering::Release)));
         assert!(revoked.load(Ordering::Acquire));
-        assert!(release.send(()).is_ok());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        release.send(()).unwrap();
+        finished.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]
-    fn failed_pin_keeps_synchronous_close() {
-        let (release, waiting) = mpsc::channel();
-        let thread = thread::spawn(move || assert!(waiting.recv().is_ok()));
-        let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            assert!(release.send(()).is_ok());
-        });
-        assert!(join_bounded(thread, Duration::ZERO, || false));
-        assert!(releaser.join().is_ok());
+    fn request_timeout_does_not_consume_a_later_reply() {
+        let (first, first_rx) = mpsc::channel();
+        let started = Instant::now();
+        assert!(receive_response(&first_rx, Duration::from_millis(5)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(first_rx);
+        assert!(first.send(Ok(())).is_err());
+        let (second, second_rx) = mpsc::channel();
+        second.send(Err("second request failed".into())).unwrap();
+        assert!(receive_response(&second_rx, Duration::ZERO)
+            .unwrap_err()
+            .to_string()
+            .contains("second request failed"));
+    }
+
+    #[test]
+    fn host_request_times_out_when_window_thread_is_inside_a_callback() {
+        let loop_: calloop::EventLoop<'static, ()> = calloop::EventLoop::try_new().unwrap();
+        let (request_sender, _waiting) = calloop::channel::sync_channel(1);
+        let handle = WindowThreadControl {
+            shared: Arc::new(WindowThreadShared::new()),
+            loop_signal: loop_.get_signal(),
+            event_loop_handle: Cell::new(None),
+            request_sender,
+            can_detach: Cell::new(false),
+            close_timeout: Cell::new(None),
+        };
+        let start = Instant::now();
+        let error = handle.request(WindowThreadRequest::Show).unwrap_err().to_string();
+        assert!(error.contains("timed out"));
+        assert!(start.elapsed() >= REQUEST_TIMEOUT);
+        assert!(start.elapsed() < Duration::from_millis(150));
+        assert!(handle
+            .request(WindowThreadRequest::Hide)
+            .unwrap_err()
+            .to_string()
+            .contains("queue is full"));
+    }
+
+    #[test]
+    fn full_request_queue_fails_without_blocking() {
+        let (sender, _receiver) = calloop::channel::sync_channel(1);
+        let (response, _rx) = mpsc::channel();
+        sender
+            .try_send(WindowThreadMessage { request: WindowThreadRequest::Show, response })
+            .unwrap();
+        let (response, _rx) = mpsc::channel();
+        assert!(matches!(
+            sender.try_send(WindowThreadMessage { request: WindowThreadRequest::Hide, response }),
+            Err(mpsc::TrySendError::Full(_))
+        ));
     }
 }
 
@@ -454,6 +601,8 @@ struct WindowThread {
 pub enum RequestFailed {
     Send,
     Recv,
+    Timeout,
+    Busy,
     Response(String),
 }
 
@@ -462,6 +611,8 @@ impl Display for RequestFailed {
         match self {
             RequestFailed::Send => f.write_str("Request to X11 thread failed: Could not send request (X11 thread disconnected)"),
             RequestFailed::Recv => f.write_str("Request to X11 thread failed: Could not receive response (X11 thread disconnected)"),
+            RequestFailed::Timeout => f.write_str("X11 request timed out after 50 ms; it may still execute"),
+            RequestFailed::Busy => f.write_str("X11 request queue is full; request was not sent"),
             RequestFailed::Response(e) => f.write_str(e),
         }
     }
@@ -470,24 +621,32 @@ impl Display for RequestFailed {
 impl WindowThread {
     pub fn create(
         options: WindowSettings, handler: WindowHandlerBuilder, shared: Arc<WindowThreadShared>,
-        receiver: calloop::channel::Channel<WindowThreadRequest>,
-        sender: mpsc::Sender<WindowThreadResponseMessage>,
+        receiver: calloop::channel::Channel<WindowThreadMessage>,
         main_thread_caller: Option<MainThreadCaller>,
     ) -> Result<Self> {
         let mut ev_loop = calloop::EventLoop::try_new()?;
         let inner = WindowInner::create(options, &ev_loop, Arc::clone(&shared))?;
 
         shared.init(&inner);
+        if shared.callbacks_revoked() {
+            return Err(PlatformError::CreationFailed("X11 window open was cancelled".into()));
+        }
 
-        let handler = handler.build(WindowContext::new(Rc::clone(&inner)))?;
+        let handler = handler.build(WindowContext::new(Rc::clone(&inner).into()))?;
         let event_loop =
-            EventLoop::new(inner, handler, receiver, sender, main_thread_caller, &mut ev_loop)?;
+            EventLoop::new(inner, handler, receiver, main_thread_caller, &mut ev_loop)?;
 
         Ok(Self { event_loop, ev_loop, shared })
     }
 
     pub fn run(self) {
-        if let Err(e) = self.event_loop.run(self.ev_loop) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.event_loop.run(self.ev_loop)
+        }));
+        let result =
+            result.unwrap_or_else(|_| Err(PlatformError::Run("Panic in X11 event loop".into())));
+        if let Err(e) = result {
+            crate::warn!("X11 window thread stopped: {e}");
             // Ignore a poisoned mutex, we just fully override this value anyway.
             let mut guard = self.shared.final_error.lock().unwrap_or_else(|g| g.into_inner());
 
@@ -525,7 +684,12 @@ impl WindowResultSender {
 struct WindowResultReceiver(mpsc::Receiver<WindowOpenResult>);
 impl WindowResultReceiver {
     pub fn receive(self) -> Result<LoopSignal> {
-        let result = self.0.recv().map_err(|_| PlatformError::MainThreadRecvResult)?;
+        // Explicit first-open budget, including the builder. A slow/stalled X
+        // server may refuse this editor open, but cannot freeze the host GUI.
+        let result = self
+            .0
+            .recv_timeout(OPEN_TIMEOUT)
+            .map_err(|_| PlatformError::CreationFailed("X11 window open exceeded 5 s".into()))?;
 
         match result {
             WindowOpenResult::Error(e) => Err(PlatformError::CreationFailed(e)),

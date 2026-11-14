@@ -1,29 +1,27 @@
 [package]
 name = "moose-mui"
-version = "7.0.0"
-edition = "2024"
-license = "LicenseRef-TruceLicense-1.0"
 # MUI needs 1.98.
 rust-version = "1.98"
-repository = "https://github.com/Matari-Audio/moose"
-homepage = "https://github.com/Matari-Audio/moose"
 description = "MUI editors for moose plugins: MuiEditor and the parameter Bridge"
 keywords = ["audio", "plugin", "gui", "mui"]
 categories = ["multimedia::audio", "gui"]
 # Git dependencies (MUI is not on crates.io) keep this off the registry.
 publish = false
+version = "7.0.0"
+edition = "2024"
+license = "LicenseRef-TruceLicense-1.0"
+repository = "https://github.com/Matari-Audio/moose"
+homepage = "https://github.com/Matari-Audio/moose"
 
 [dependencies]
-moose-core = {path = "../moose-core"}
-moose-params = {path = "../moose-params"}
-mui = {features = ["gpu-effects"], path = "../mui"}
-# Keep the Rust import alias stable while separating the custom host package
-# from upstream mui-baseview, whose public native bridges it now consumes.
-mui-baseview = {package = "contra-native-host", path = "../mui-baseview"}
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+mui = {features = ["gpu-quad"], path = "../mui"}
+mui-baseview = {path = "../mui-baseview"}
 # baseview's parent handle is raw-window-handle 0.6.
 raw-window-handle = "0.6"
 
 [dev-dependencies]
-moose = {default-features = false, path = "../moose"}
+moose = {version = "7.0.0", default-features = false, path = "../moose"}
 keyboard-types = {version = "0.8", default-features = false}
 

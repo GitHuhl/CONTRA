@@ -9,10 +9,10 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-behaviour = { path = "../behaviour" }
-contra-dsp = { path = "../../dsp/registry" }
-contra-effects = { path = "../effects" }
-contra-ir = { path = "../../model/ir" }
-contra-ledger = { path = "../ledger" }
-contra-plan = { path = "../plan" }
-contra-time = { path = "../../base/time" }
+contra-behaviour = {path = "../behaviour"}
+contra-dsp = {path = "../../dsp/registry"}
+contra-effects = {path = "../effects"}
+contra-ir = {path = "../../model/ir"}
+contra-ledger = {path = "../ledger"}
+contra-plan = {path = "../plan"}
+contra-time = {path = "../../base/time"}

@@ -159,7 +159,9 @@ macro_rules! export_plugin {
                             )
                         }
                     };
-                    let spawner = if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED {
+                    let spawner = if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::WAKE_ON_SCHEDULE {
+                        $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed_waking(run, <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED)
+                    } else if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED {
                         $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed_serialized(run)
                     } else {
                         $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed(run)
@@ -203,6 +205,15 @@ macro_rules! export_plugin {
         #[unsafe(no_mangle)]
         pub fn moose_preserve_dsp_state() -> bool {
             <$logic as $crate::PluginLogicCore<Sample>>::PRESERVE_DSP_STATE
+        }
+
+        /// Independently versioned scalar classification, no state pointer and
+        /// no canary layout change. Prior exporters omit this symbol and retain
+        /// the historical synchronous class. New required logic is rejected by
+        /// hot loading before any task/state symbol can be invoked.
+        #[unsafe(no_mangle)]
+        pub fn moose_preparation_class_v1()->u32 {
+            u32::from(<$logic as $crate::PluginLogicCore<Sample>>::requires_fallible_preparation())
         }
 
         #[unsafe(no_mangle)]

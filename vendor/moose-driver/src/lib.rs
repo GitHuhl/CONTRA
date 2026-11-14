@@ -834,10 +834,17 @@ impl<P: PluginExport> PluginDriver<P> {
         // Build + activate.
         let mut plugin = P::create();
         plugin.init();
-        plugin.reset(
-            &AudioConfig::new(self.sample_rate, self.block_size)
+        let preparation = moose_core::plugin::PreparationConfig::new(
+            AudioConfig::new(self.sample_rate, self.block_size)
                 .with_process_mode(self.process_mode),
+            moose_core::plugin::PreparationFrameBound::ExplicitDriver,
         );
+        // Driver::run is an assertion-style harness (its IO/state/render errors
+        // already fail the run). Refusal happens before the first process and
+        // cannot become a successful all-silent DriverResult.
+        if let Err(error) = plugin.prepare(&preparation) {
+            panic!("driver plugin preparation refused: {error:?}");
+        }
 
         // 1. State load (if any). Reads from disk here rather than at
         // builder time, so the I/O failure (if any) surfaces as a
@@ -1195,6 +1202,7 @@ impl<P: PluginExport> PluginDriver<P> {
                 output_events: &mut output_events_block,
                 params_fn: None,
                 meters_fn: None,
+                latency_change_request: None,
                 param_infos: &param_infos,
                 min_subblock_samples,
             };
@@ -1576,7 +1584,7 @@ mod routing_tests {
             .input(InputSource::Constant(0.5))
             .run();
         let expected: f32 = if KIND == 3 { 0.25 } else { 0.5 };
-        assert!(!result.output[0].is_empty());
+        assert_ne!(result.output[0], []);
         assert!(
             result
                 .output

@@ -9,5 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-ir = { path = "../../model/ir" }
-contra-law = { path = "../../base/law" }
+contra-ir = {path = "../../model/ir"}
+contra-law = {path = "../../base/law"}

@@ -9,8 +9,8 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-engine = { path = "../engine" }
-contra-ir = { path = "../../model/ir" }
-contra-stream = { path = "../stream" }
-contra-voice = { path = "../voice" }
+contra-engine = {path = "../engine"}
+contra-ir = {path = "../../model/ir"}
+contra-stream = {path = "../stream"}
+contra-voice = {path = "../voice"}
 realfft = "3.5"

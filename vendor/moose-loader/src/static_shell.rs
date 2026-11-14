@@ -182,6 +182,22 @@ impl<P: Params + Default + 'static, L: PluginLogicCore<S, Params = P> + 'static,
         L::reset(&mut self.state, &self.params, config);
     }
 
+    fn requires_fallible_preparation(&self) -> bool {
+        L::requires_fallible_preparation()
+    }
+
+    fn prepare(
+        &mut self,
+        config: &moose_core::plugin::PreparationConfig,
+    ) -> Result<(), moose_core::plugin::PreparationError> {
+        config.validate()?;
+        self.params.set_sample_rate(config.audio.sample_rate);
+        self.params.snap_smoothers();
+        L::prepare(&mut self.state, &self.params, config)?;
+        self.sample_rate = config.audio.sample_rate;
+        Ok(())
+    }
+
     fn process(
         &mut self,
         buffer: &mut AudioBuffer<S>,
@@ -200,6 +216,7 @@ impl<P: Params + Default + 'static, L: PluginLogicCore<S, Params = P> + 'static,
         // No sync needed - plugin reads from the same Arc<Params>.
 
         // Build a ProcessContext with param/meter callbacks for the logic.
+        let latency_change_request = context.deferred_latency_change_request();
         let params = &self.params;
         let meters = &self.meters;
         let param_fn = |id: u32| -> f64 { params.get_plain(id).unwrap_or(0.0) };
@@ -214,6 +231,10 @@ impl<P: Params + Default + 'static, L: PluginLogicCore<S, Params = P> + 'static,
         .with_bus_routing(context.bus_routing)
         .with_params(&param_fn)
         .with_meters(&meter_fn);
+        let ctx = match latency_change_request {
+            Some(request) => ctx.with_deferred_latency_changes(request),
+            None => ctx,
+        };
         // Stamp the background-task spawner so `ctx.tasks::<T>()` works.
         let mut ctx = match &self.tasks {
             Some(t) => ctx.with_tasks(t),
@@ -416,6 +437,10 @@ macro_rules! export_static {
                 <$logic as $crate::__macro_deps::moose_plugin::PluginLogicCore<Sample>>::supports_in_place()
             }
 
+            fn max_host_state_bytes() -> usize {
+                <$logic as $crate::__macro_deps::moose_plugin::PluginLogicCore<Sample>>::max_host_state_bytes()
+            }
+
             fn info() -> $crate::__macro_deps::moose_core::info::PluginInfo
             where
                 Self: Sized,
@@ -445,6 +470,14 @@ macro_rules! export_static {
 
             fn reset(&mut self, config: &$crate::__macro_deps::moose_core::config::AudioConfig) {
                 self.inner.reset(config);
+            }
+
+            fn requires_fallible_preparation(&self)->bool{self.inner.requires_fallible_preparation()}
+
+            fn prepare(&mut self,
+                config: &$crate::__macro_deps::moose_core::plugin::PreparationConfig,
+            ) -> Result<(), $crate::__macro_deps::moose_core::plugin::PreparationError> {
+                self.inner.prepare(config)
             }
 
             fn process(
@@ -498,6 +531,16 @@ macro_rules! export_static {
         impl $crate::__macro_deps::moose_core::export::PluginExport for __HotShellWrapper {
             type Params = $params;
 
+            fn clap_extension(id: &::std::ffi::CStr) -> Option<$crate::__macro_deps::moose_core::export::CustomClapExtension> {
+                <$logic as $crate::__macro_deps::moose_plugin::PluginLogicCore<Sample>>::clap_extension(id)
+            }
+
+            fn with_dsp_state(&mut self, callback: &mut dyn FnMut(&mut dyn ::std::any::Any)) -> bool {
+                callback(self.inner.state_ref_mut());
+                true
+            }
+
+
             fn create() -> Self {
                 let params = std::sync::Arc::new(<$params>::new());
                 // Each `tasks: [..]` type gets its own lane (queue + mode).
@@ -519,7 +562,9 @@ macro_rules! export_static {
                         // `SERIALIZED` picks one-slot vs concurrent draining
                         // for this lane; the const folds the branch at
                         // compile time.
-                        let __spawner = if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED {
+                        let __spawner = if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::WAKE_ON_SCHEDULE {
+                            $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed_waking(__task_run, <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED)
+                        } else if <$task as $crate::__macro_deps::moose_plugin::BackgroundTask>::SERIALIZED {
                             $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed_serialized(__task_run)
                         } else {
                             $crate::__macro_deps::moose_core::tasks::TaskSpawner::<$task>::new_managed(__task_run)

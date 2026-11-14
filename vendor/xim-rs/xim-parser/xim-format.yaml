@@ -117,7 +117,7 @@ Enums:
       BadBackground: 15
       LocaleNotSupported: 16
       BadSomething: 999
-
+  
   # Common attribute values
   InputStyle:
     bitflag: true

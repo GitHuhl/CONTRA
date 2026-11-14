@@ -7,28 +7,26 @@ use crate::dpi::{PhysicalPosition, PhysicalSize};
 use crate::host::HostMainThreadCaller;
 use crate::platform::frame_rate::frame_interval;
 use crate::platform::x11::error::FatalError;
-use crate::platform::x11::window_thread::{
-    HostCallback, WindowThreadRequest, WindowThreadResponseMessage,
-};
+use crate::platform::x11::window_thread::{HostCallback, WindowThreadMessage, WindowThreadRequest};
 use crate::warn;
 use crate::wrappers::xkbcommon::XkbcommonState;
 use crate::{
-    Event, EventStatus, MouseButton, MouseEvent, ScrollDelta, WindowEvent, WindowHandler,
-    WindowSize,
+    Event, EventStatus, FrameDemand, MouseButton, MouseEvent, ScrollDelta, WindowEvent,
+    WindowHandler, WindowSize,
 };
 use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{Interest, LoopHandle, LoopSignal, Mode, PostAction};
+use calloop::{Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
+use matari_audio_drag_and_drop::{X11DropRouter, X11PointerEvent, X11SessionStatus};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt as _, MapState};
 use x11rb::errors::ConnectionError;
 use x11rb::protocol::randr::{ConnectionExt as _, ModeFlag, ModeInfo};
 use x11rb::protocol::xproto::{
-    ConnectionExt as _, EventMask, KeyPressEvent, KeyReleaseEvent, NotifyDetail, NotifyMode,
+    ConnectionExt as _, EventMask, InputFocus, KeyPressEvent, KeyReleaseEvent, NotifyDetail,
 };
 use x11rb::protocol::Event as XEvent;
 use x11rb::CURRENT_TIME;
@@ -64,8 +62,9 @@ pub(crate) struct EventLoop {
     new_size: Option<PhysicalSize<u16>>,
     new_parent_size: Option<PhysicalSize<u16>>,
     exposed: bool,
-    /// Last time a window believed hidden asked the server whether it is viewable.
-    viewable_asked_at: Instant,
+    /// A `request_frame` from another thread: served on the next paced frame,
+    /// never at once, so a renderer that asks again per frame stays at refresh.
+    frame_requested: Option<Instant>,
 
     /// `on_frame` pacing: the refresh period of the monitor under the window (MOOSE).
     frame_interval: Duration,
@@ -74,50 +73,49 @@ pub(crate) struct EventLoop {
     refresh_rate_queried_at: Instant,
 
     loop_signal: LoopSignal,
+    loop_handle: LoopHandle<'static, Self>,
+    frame_timer: Option<RegistrationToken>,
+    drag_timer: Option<RegistrationToken>,
+    frame_deadline: Option<Instant>,
+    last_frame: Instant,
 
     drag_n_drop: DragNDropState,
+    /// Hyprland's XWayland bridge delivers drops to the host's toplevel;
+    /// this routes them down to the editor window.
+    drop_router: Option<X11DropRouter>,
     xkb_state: Option<XkbcommonState>,
 
     run_error: Option<PlatformError>,
 
-    response_sender: mpsc::Sender<WindowThreadResponseMessage>,
     main_thread: Option<MainThreadCaller>,
 
     /// Keys currently held down in this window, by X keycode. Used to flag
     /// auto-repeat key-downs (MOOSE X01).
     pressed_keys: [bool; 256],
+    /// Focus ownership for click-to-focus; pointer-derived focus still drives
+    /// the existing focus notifications and IME state.
+    owns_focus: bool,
+    /// A click asked for the keyboard and its FocusIn has not come yet. The
+    /// pointer-derived focus it replaces ends first, with a FocusOut that
+    /// must not cancel the very click that asked.
+    taking_focus: bool,
     /// Key-downs the handler ignored and that were forwarded to the embed
     /// parent, so the matching key-up can be synthesized on focus loss/close.
     forwarded_keys: [Option<KeyPressEvent>; 256],
-    /// Mouse buttons held in this window, by X button number.
-    held_buttons: u16,
-    /// A pointer-detail FocusOut that arrived while a button was held; it
-    /// applies after the release so it cannot cancel the click in flight.
-    focus_out_after_release: bool,
-    /// Frames left before that FocusOut applies, once the button is up.
-    focus_out_in_frames: u8,
-    /// Focus loss made the handler forget the pointer; the next press reports
-    /// its own position first, as a double click's second press has no motion.
-    cursor_forgotten: bool,
 }
 
-/// Frames between a release and a held-back FocusOut: MUI records the click
-/// on the release's frame and dispatches it on the next, and a focus loss
-/// before then cancels it (mui-baseview
-/// `a_focus_loss_two_frames_after_the_release_keeps_the_click`).
-const FOCUS_OUT_FRAMES: u8 = 2;
+/// How often a window believed hidden asks the server whether it is viewable (CONTRA).
+const VIEWABLE_PROBE: Duration = Duration::from_millis(200);
 
 impl EventLoop {
     pub fn new(
         window: Rc<WindowInner>, handler: Box<dyn WindowHandler>,
-        request_receiver: calloop::channel::Channel<WindowThreadRequest>,
-        response_sender: mpsc::Sender<WindowThreadResponseMessage>,
+        request_receiver: calloop::channel::Channel<WindowThreadMessage>,
         main_thread: Option<MainThreadCaller>, inner: &mut calloop::EventLoop<'static, Self>,
     ) -> Result<Self, PlatformError> {
         let loop_handle = inner.handle();
 
         let frame_interval = frame_interval(query_refresh_hz(&window));
-        Self::setup_frame_timer(&loop_handle, frame_interval)?;
 
         loop_handle
             .insert_source(
@@ -134,29 +132,39 @@ impl EventLoop {
             .insert_source(request_receiver, |e, _, l| l.handle_main_thread_request(e))
             .map_err(|e| e.error)?;
 
+        let drop_router =
+            X11DropRouter::install(window.connection.conn.xcb_connection(), window.raw_id())
+                .unwrap_or_else(|error| {
+                    warn!("Could not install the X11 drop router: {}", error);
+                    None
+                });
+
         Ok(Self {
             loop_signal: inner.get_signal(),
+            loop_handle,
+            frame_timer: None,
+            frame_deadline: None,
+            drag_timer: None,
+            last_frame: Instant::now(),
             handler,
             new_size: None,
             new_parent_size: None,
             exposed: false,
-            viewable_asked_at: Instant::now(),
+            frame_requested: None,
             frame_interval,
             refresh_rate_stale: false,
             refresh_rate_queried_at: Instant::now(),
             drag_n_drop: DragNDropState::NoCurrentSession,
+            drop_router,
             xkb_state: XkbcommonState::new(&window.connection),
             run_error: None,
             main_thread,
             pressed_keys: [false; 256],
+            owns_focus: false,
+            taking_focus: false,
             forwarded_keys: [None; 256],
-            held_buttons: 0,
-            focus_out_after_release: false,
-            focus_out_in_frames: 0,
-            cursor_forgotten: false,
 
             window,
-            response_sender,
         })
     }
 
@@ -209,39 +217,82 @@ impl EventLoop {
         Ok(event_received)
     }
 
-    fn setup_frame_timer(
-        loop_handle: &LoopHandle<'_, Self>, interval: Duration,
-    ) -> Result<(), calloop::Error> {
-        fn handle_frame(evloop: &mut EventLoop, previous_deadline: Instant) -> TimeoutAction {
-            evloop.exposed = true;
-
-            // A window drag sends a ConfigureNotify per step: re-query a few times a second at most.
-            if evloop.refresh_rate_stale
-                && evloop.refresh_rate_queried_at.elapsed() >= Duration::from_millis(250)
-            {
-                evloop.refresh_rate_stale = false;
-                evloop.refresh_rate_queried_at = Instant::now();
-                evloop.frame_interval = frame_interval(query_refresh_hz(&evloop.window));
-            }
-
-            // Keep a steady cadence. If a frame overran its slot, restart the cadence from now
-            // instead of queueing catch-up frames.
-            let interval = evloop.frame_interval;
-            match previous_deadline.checked_add(interval) {
-                Some(next) if next > Instant::now() => TimeoutAction::ToInstant(next),
-                _ => TimeoutAction::ToDuration(interval),
-            }
+    fn schedule_frame(&mut self) -> Result<(), calloop::Error> {
+        let visible = !self.window.xcb_window.is_destroyed()
+            && !self.window.main_thread_shared.is_stop_host_requested()
+            && !self.window.main_thread_shared.callbacks_revoked()
+            && self.window.visibility_state.own_window_is_viewable();
+        let now = Instant::now();
+        if visible
+            && self.refresh_rate_stale
+            && self.refresh_rate_queried_at.elapsed() >= Duration::from_millis(250)
+        {
+            self.refresh_rate_stale = false;
+            self.refresh_rate_queried_at = now;
+            self.frame_interval = frame_interval(query_refresh_hz(&self.window));
         }
-
-        loop_handle
-            .insert_source(Timer::from_duration(interval), |i, _, e| handle_frame(e, i))
-            .map_err(|e| e.error)?;
-
+        let alive = !self.window.xcb_window.is_destroyed()
+            && !self.window.main_thread_shared.is_stop_host_requested()
+            && !self.window.main_thread_shared.callbacks_revoked();
+        let deadline = if visible {
+            let demand = self.handler.frame_demand();
+            let demand = self.frame_requested.map_or(demand, |at| soonest(demand, at));
+            frame_deadline(demand, now, self.last_frame, self.frame_interval)
+        } else if alive {
+            // CONTRA safety net: while the window is believed hidden, wake now
+            // and then so handle_redraw can ask the server (a missed map event
+            // otherwise leaves the editor blank for good). Keep a probe that
+            // is already armed rather than pushing it back on every pass.
+            if self.frame_timer.is_some() {
+                return Ok(());
+            }
+            Some(now + VIEWABLE_PROBE)
+        } else {
+            None
+        };
+        if deadline == self.frame_deadline {
+            return Ok(());
+        }
+        if let Some(timer) = self.frame_timer.take() {
+            self.loop_handle.remove(timer);
+        }
+        self.frame_deadline = deadline;
+        if let Some(deadline) = deadline {
+            self.frame_timer = Some(
+                self.loop_handle
+                    .insert_source(Timer::from_deadline(deadline), |_, _, e| {
+                        e.frame_timer = None;
+                        e.frame_deadline = None;
+                        e.exposed = true;
+                        TimeoutAction::Drop
+                    })
+                    .map_err(|e| e.error)?,
+            );
+        }
         Ok(())
+    }
+
+    /// CONTRA safety net: viewability is inferred from map events on the
+    /// host's window ancestry; ask the server instead, and trust a VIEWABLE
+    /// answer.
+    fn server_says_viewable(&mut self) -> bool {
+        let viewable = self
+            .window
+            .connection
+            .conn
+            .get_window_attributes(self.window.raw_id())
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|a| a.map_state == x11rb::protocol::xproto::MapState::VIEWABLE);
+        if viewable {
+            self.window.visibility_state.mark_viewable();
+        }
+        viewable
     }
 
     fn handle_redraw(&mut self) {
         if self.window.xcb_window.is_destroyed()
+            || self.window.main_thread_shared.is_stop_host_requested()
             || self.window.main_thread_shared.callbacks_revoked()
         {
             return;
@@ -254,16 +305,12 @@ impl EventLoop {
         if !self.window.visibility_state.own_window_is_viewable() && !self.server_says_viewable() {
             return;
         }
+        self.frame_requested = None;
 
+        self.last_frame = Instant::now();
         if let Err(e) = self.handler.on_frame() {
             self.trigger_fatal_error(e.into());
             return;
-        }
-        if self.focus_out_in_frames > 0 {
-            self.focus_out_in_frames -= 1;
-            if self.focus_out_in_frames == 0 {
-                self.focus_out();
-            }
         }
 
         self.drain_ime();
@@ -271,30 +318,9 @@ impl EventLoop {
         let _ = self.window.connection.conn.flush();
     }
 
-    /// CONTRA safety net: the ancestry tracking infers viewability from
-    /// events, and a missed one would keep the editor from ever drawing. While
-    /// it believes the window hidden, ask the server a few times a second.
-    fn server_says_viewable(&mut self) -> bool {
-        if self.viewable_asked_at.elapsed() < Duration::from_millis(200) {
-            return false;
-        }
-        self.viewable_asked_at = Instant::now();
-        let viewable = self
-            .window
-            .connection
-            .conn
-            .get_window_attributes(self.window.raw_id())
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .is_some_and(|a| a.map_state == MapState::VIEWABLE);
-        if viewable {
-            self.window.visibility_state.mark_viewable();
-        }
-        viewable
-    }
-
     fn handle_coalesced_resize_events(&mut self) -> Result<(), FatalError> {
         if self.window.xcb_window.is_destroyed()
+            || self.window.main_thread_shared.is_stop_host_requested()
             || self.window.main_thread_shared.callbacks_revoked()
         {
             return Ok(());
@@ -314,7 +340,9 @@ impl EventLoop {
             }
         }
 
-        let Some(new_size) = self.new_size.take() else { return Ok(()) };
+        let Some(new_size) = self.new_size.take() else {
+            return Ok(());
+        };
         let previous = self.window.store_size(new_size);
 
         if previous == new_size {
@@ -349,28 +377,24 @@ impl EventLoop {
         Ok(())
     }
 
-    fn handle_main_thread_request(&mut self, event: calloop::channel::Event<WindowThreadRequest>) {
+    fn handle_main_thread_request(&mut self, event: calloop::channel::Event<WindowThreadMessage>) {
         match event {
             calloop::channel::Event::Closed => {
                 // Closed channel means the sender, i.e. the Window Handle has been dropped.
                 // It should already stop this event loop on drop, but we'll take the hint.
                 self.stop_now();
             }
-            calloop::channel::Event::Msg(req) => match self.handle_request(req) {
-                Ok(()) => self.send_response(Ok(())),
-                Err(e) => self.send_response(Err(e.to_string())),
-            },
-        }
-    }
-
-    fn send_response(&mut self, response: WindowThreadResponseMessage) {
-        if let Err(e) = self.response_sender.send(response) {
-            warn!("Failed to send response back to main thread: {}", &e);
-            if let Err(e) = e.0 {
-                crate::error!("Request failed: {}", e)
+            calloop::channel::Event::Msg(message) => {
+                let result = if self.window.main_thread_shared.callbacks_revoked()
+                    || self.window.main_thread_shared.is_stop_host_requested()
+                {
+                    Err("X11 window is closing".into())
+                } else {
+                    self.handle_request(message.request).map_err(|e| e.to_string())
+                };
+                // Late replies belong to this RPC alone, never the next one.
+                let _ = message.response.send(result);
             }
-
-            self.stop_now();
         }
     }
 
@@ -387,8 +411,14 @@ impl EventLoop {
     }
 
     fn handle_request(&mut self, req: WindowThreadRequest) -> Result<(), PlatformError> {
+        self.exposed = true;
         match req {
             WindowThreadRequest::Resize(new_size) => {
+                if let Some(dock) = self.window.dock.borrow_mut().as_mut() {
+                    let logical: crate::dpi::LogicalSize<f64> =
+                        new_size.to_logical(self.window.scale_factor());
+                    return dock.resize(logical);
+                }
                 let scale_factor = self.window.scaling_factor.get();
                 let new_size = new_size.to_physical(scale_factor);
 
@@ -413,16 +443,25 @@ impl EventLoop {
                 self.window.set_scale_factor_override(scale_factor)
             }
             WindowThreadRequest::SetParent(new_parent) => {
-                self.window.xcb_window.reparent(Some(new_parent.window_id))?;
+                self.window.xcb_window.reparent(Some(new_parent.window_id))?.check()?;
 
                 Ok(())
             }
             WindowThreadRequest::Show => {
+                if let Some(dock) = self.window.dock.borrow_mut().as_mut() {
+                    dock.sync(true)?;
+                }
                 self.window.xcb_window.map_window()?.check()?;
-                self.window.visibility_state.window_mapped(self.window.xcb_window.id());
+                // A top-level MapWindow can be redirected to the WM. A
+                // checked reply is not proof of visibility: wait for the real
+                // MapNotify/Expose before calling the first renderer frame.
+                self.exposed = true;
                 Ok(())
             }
             WindowThreadRequest::Hide => {
+                if let Some(dock) = self.window.dock.borrow_mut().as_mut() {
+                    dock.sync(false)?;
+                }
                 self.window.xcb_window.unmap_window()?.check()?;
                 self.window.visibility_state.window_unmapped(self.window.xcb_window.id());
                 Ok(())
@@ -438,14 +477,19 @@ impl EventLoop {
 
     fn handle_idle(&mut self) {
         if let Err(e) = self.try_handle_idle() {
-            self.trigger_fatal_error(e.into());
+            self.trigger_fatal_error(e);
         }
     }
 
-    fn try_handle_idle(&mut self) -> Result<(), FatalError> {
-        if self.window.main_thread_shared.callbacks_revoked() {
+    fn try_handle_idle(&mut self) -> Result<(), PlatformError> {
+        if self.window.main_thread_shared.callbacks_revoked()
+            || self.window.main_thread_shared.is_stop_host_requested()
+        {
             self.stop_now();
             return Ok(());
+        }
+        if self.window.main_thread_shared.take_frame_request() {
+            self.frame_requested.get_or_insert_with(Instant::now);
         }
         // Check for any events in the internal buffers before going to sleep:
         self.drain_xcb_events()?;
@@ -459,17 +503,30 @@ impl EventLoop {
             }
         }
 
+        self.schedule_frame()?;
+        self.schedule_drag_poll()?;
         self.window.connection.conn.flush()?;
+        // Only take_frame_request at the beginning of an idle pass clears the
+        // latch. A producer racing demand query/timer re-arm keeps its request
+        // pending. Re-notify here; a later producer sends its own notification.
+        if self.window.main_thread_shared.has_frame_request() {
+            self.loop_signal.wakeup();
+        }
 
         Ok(())
     }
 
     pub fn run(mut self, mut inner: calloop::EventLoop<Self>) -> Result<(), PlatformError> {
         self.drain_xcb_events()?;
-        if !self.window.xcb_window.is_destroyed() {
+        if !self.window.xcb_window.is_destroyed()
+            && !self.window.main_thread_shared.callbacks_revoked()
+            && !self.window.main_thread_shared.is_stop_host_requested()
+        {
             inner.run(None, &mut self, Self::handle_idle)?;
         }
 
+        self.cancel_matari_drag();
+        self.uninstall_drop_router();
         if !self.window.main_thread_shared.callbacks_revoked() {
             if !self.window.xcb_window.is_destroyed() {
                 self.release_forwarded_keys();
@@ -491,17 +548,6 @@ impl EventLoop {
         };
 
         Ok(())
-    }
-
-    fn focus_out(&mut self) {
-        self.window.is_focused.set(false);
-        let config = self.window.ime_configuration.borrow().clone();
-        self.window.set_ime_configuration(config);
-        self.drain_ime();
-        self.pressed_keys.fill(false);
-        self.release_forwarded_keys();
-        self.cursor_forgotten = true;
-        self.handle_event(Event::Window(WindowEvent::Unfocused));
     }
 
     fn drain_ime(&mut self) {
@@ -528,11 +574,113 @@ impl EventLoop {
                         key.repeat = is_down && *pressed;
                         *pressed = is_down;
                     }
-                    if self.handler.on_event(Event::Keyboard(key)) == EventStatus::Ignored {
+                    if self.handle_event(Event::Keyboard(key)) == EventStatus::Ignored {
                         self.forward_key_event(event);
                     }
                 }
             }
+        }
+    }
+
+    /// Tracks the primary button and the newest pointer event: an outbound
+    /// drag may only start from a live press.
+    fn update_pointer_authority(&self, event: &XEvent) {
+        let pointer = match event {
+            XEvent::MotionNotify(e) => {
+                self.window
+                    .primary_pointer_down
+                    .set(e.state.contains(x11rb::protocol::xproto::KeyButMask::BUTTON1));
+                X11PointerEvent { root: e.root, root_x: e.root_x, root_y: e.root_y, time: e.time }
+            }
+            XEvent::ButtonPress(e) => {
+                if e.detail == 1 {
+                    self.window.primary_pointer_down.set(true);
+                }
+                X11PointerEvent { root: e.root, root_x: e.root_x, root_y: e.root_y, time: e.time }
+            }
+            XEvent::ButtonRelease(e) => {
+                X11PointerEvent { root: e.root, root_x: e.root_x, root_y: e.root_y, time: e.time }
+            }
+            _ => return,
+        };
+        self.window.last_pointer_event.set(Some(pointer));
+    }
+
+    fn forward_matari_drag_event(&self, event: &XEvent) {
+        let released = matches!(event, XEvent::ButtonRelease(e) if e.detail == 1);
+        let connection = self.window.connection.conn.xcb_connection();
+        let session = self.window.external_drag_session.borrow_mut().take();
+        if let Some(mut session) = session {
+            match session.handle_event(connection, event) {
+                Ok(X11SessionStatus::Active) => {
+                    *self.window.external_drag_session.borrow_mut() = Some(session);
+                }
+                Ok(X11SessionStatus::Finished) => {}
+                Err(_) => {
+                    let _ = session.cancel(connection);
+                }
+            }
+        }
+        if released {
+            self.window.primary_pointer_down.set(false);
+        }
+    }
+
+    fn poll_matari_drag(&self) {
+        let connection = self.window.connection.conn.xcb_connection();
+        let session = self.window.external_drag_session.borrow_mut().take();
+        if let Some(mut session) = session {
+            match session.poll(connection) {
+                Ok(X11SessionStatus::Active) => {
+                    *self.window.external_drag_session.borrow_mut() = Some(session);
+                }
+                Ok(X11SessionStatus::Finished) => {}
+                Err(_) => {
+                    let _ = session.cancel(connection);
+                }
+            }
+        }
+    }
+
+    fn schedule_drag_poll(&mut self) -> Result<(), calloop::Error> {
+        if self.window.external_drag_session.borrow().is_none() {
+            if let Some(timer) = self.drag_timer.take() {
+                self.loop_handle.remove(timer);
+            }
+        } else if self.drag_timer.is_none() {
+            self.drag_timer = Some(
+                self.loop_handle
+                    .insert_source(
+                        Timer::from_duration(Duration::from_millis(100)),
+                        |_, _, event_loop| {
+                            event_loop.poll_matari_drag();
+                            if event_loop.window.external_drag_session.borrow().is_some() {
+                                TimeoutAction::ToDuration(Duration::from_millis(100))
+                            } else {
+                                event_loop.drag_timer = None;
+                                TimeoutAction::Drop
+                            }
+                        },
+                    )
+                    .map_err(|error| error.error)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn uninstall_drop_router(&mut self) {
+        if let Some(router) = self.drop_router.take() {
+            if let Err(error) = router.uninstall(self.window.connection.conn.xcb_connection()) {
+                warn!("Could not uninstall the X11 drop router: {}", error);
+            }
+        }
+    }
+
+    fn cancel_matari_drag(&self) {
+        let connection = self.window.connection.conn.xcb_connection();
+        let session = self.window.external_drag_session.borrow_mut().take();
+        if let Some(session) = session {
+            let _ = session.cancel(connection);
         }
     }
 
@@ -575,7 +723,30 @@ impl EventLoop {
         //   the keyboard modifier keys at the time of the event.
         //   http://rtbo.github.io/rust-xcb/src/xcb/ffi/xproto.rs.html#445
 
+        let routed = self.drop_router.as_mut().map(|router| {
+            router.handle_event(self.window.connection.conn.xcb_connection(), &event)
+        });
+        match routed {
+            Some(Ok(true)) => return Ok(()),
+            Some(Err(error)) => {
+                warn!("X11 drop router event failed: {}", error);
+                self.uninstall_drop_router();
+            }
+            Some(Ok(false)) | None => {}
+        }
+
+        self.update_pointer_authority(&event);
+        self.forward_matari_drag_event(&event);
+
         match event {
+            XEvent::RandrScreenChangeNotify(_) | XEvent::RandrNotify(_) => {
+                if let Some(dock) = self.window.dock.borrow_mut().as_mut() {
+                    if let Err(error) = dock.refresh() {
+                        warn!("dock output changed: {}", error);
+                        self.window.request_close();
+                    }
+                }
+            }
             ////
             // window
             ////
@@ -585,7 +756,11 @@ impl EventLoop {
                 }
 
                 if event.data.as_data32()[0] == self.window.connection.atoms.WM_DELETE_WINDOW {
-                    self.window.request_close();
+                    if self.window.defer_user_close {
+                        self.handle_event(Event::Window(WindowEvent::WillClose));
+                    } else {
+                        self.window.request_close();
+                    }
                     return Ok(());
                 }
 
@@ -604,7 +779,7 @@ impl EventLoop {
             }
 
             XEvent::SelectionNotify(event) => {
-                if event.property == self.window.connection.atoms.XdndSelection {
+                if event.selection == self.window.connection.atoms.XdndSelection {
                     self.drag_n_drop.handle_selection_notify_event(
                         &self.window,
                         &*self.handler,
@@ -622,7 +797,10 @@ impl EventLoop {
                 self.refresh_rate_stale = true;
                 // These are coalesced and then handled asynchronously at the end of the event loop
                 if event.window == self.window.raw_id() {
-                    self.new_size = Some(PhysicalSize::new(event.width, event.height));
+                    let size = (u32::from(event.width), u32::from(event.height));
+                    if !self.window.xcb_window.is_stale_echo(size) {
+                        self.new_size = Some(PhysicalSize::new(event.width, event.height));
+                    }
                 } else if Some(event.window)
                     == self.window.visibility_state.parent_id().map(|i| i.get())
                 {
@@ -634,6 +812,14 @@ impl EventLoop {
 
             XEvent::Expose(e) if e.window == self.window.raw_id() => {
                 self.exposed = true;
+                if !self.window.main_thread_shared.callbacks_revoked()
+                    && !self.window.main_thread_shared.is_stop_host_requested()
+                {
+                    self.handler.damage(crate::DamageArea::Rect(crate::DamageRect::new(
+                        PhysicalPosition::new(u32::from(e.x), u32::from(e.y)),
+                        PhysicalSize::new(u32::from(e.width), u32::from(e.height)),
+                    )));
+                }
                 self.handle_event(Event::Window(WindowEvent::RedrawRequested));
             }
 
@@ -649,12 +835,7 @@ impl EventLoop {
                 }));
             }
 
-            // Grab activation only simulates crossing into/out of the grab
-            // window; it did not move the cursor. Ungrab crossings are kept
-            // to reconcile the physical pointer when capture is released.
-            XEvent::EnterNotify(event)
-                if event.event == self.window.raw_id() && event.mode != NotifyMode::GRAB =>
-            {
+            XEvent::EnterNotify(event) if event.event == self.window.raw_id() => {
                 self.handle_event(Event::Mouse(MouseEvent::CursorEntered));
                 // since no `MOTION_NOTIFY` event is generated when `ENTER_NOTIFY` is generated,
                 // we generate a CursorMoved as well, so the mouse position from here isn't lost
@@ -665,20 +846,11 @@ impl EventLoop {
                 }));
             }
 
-            XEvent::LeaveNotify(event)
-                if event.event == self.window.raw_id() && event.mode != NotifyMode::GRAB =>
-            {
+            XEvent::LeaveNotify(event) if event.event == self.window.raw_id() => {
                 self.handle_event(Event::Mouse(MouseEvent::CursorLeft));
             }
 
             XEvent::ButtonPress(event) if event.event == self.window.raw_id() => {
-                if std::mem::take(&mut self.cursor_forgotten) {
-                    let physical_pos = PhysicalPosition::new(event.event_x, event.event_y);
-                    self.handle_event(Event::Mouse(MouseEvent::CursorMoved {
-                        position: physical_pos.cast(),
-                        modifiers: key_mods(event.state),
-                    }));
-                }
                 match event.detail {
                     4..=7 => {
                         self.handle_event(Event::Mouse(MouseEvent::WheelScrolled {
@@ -693,12 +865,19 @@ impl EventLoop {
                         }));
                     }
                     detail => {
-                        // A new gesture before the held-back FocusOut applied:
-                        // it waits for this release instead.
-                        if std::mem::take(&mut self.focus_out_in_frames) > 0 {
-                            self.focus_out_after_release = true;
+                        // A host does not always give its plugin's window the
+                        // keyboard: a click inside takes it, with the click's
+                        // own time, and it goes back to the parent after.
+                        if takes_focus(self.window.parented, self.owns_focus, detail) {
+                            let conn = &self.window.connection.conn;
+                            let _ = conn.set_input_focus(
+                                InputFocus::PARENT,
+                                self.window.raw_id(),
+                                event.time,
+                            );
+                            let _ = conn.flush();
+                            self.taking_focus = true;
                         }
-                        self.held_buttons |= 1u16.checked_shl(detail.into()).unwrap_or(0);
                         self.handle_event(Event::Mouse(MouseEvent::ButtonPressed {
                             button: mouse_id(detail),
                             modifiers: key_mods(event.state),
@@ -711,14 +890,10 @@ impl EventLoop {
                 if event.event == self.window.raw_id() && !(4..=7).contains(&event.detail) =>
             {
                 let button_id = mouse_id(event.detail);
-                self.held_buttons &= !1u16.checked_shl(event.detail.into()).unwrap_or(0);
                 self.handle_event(Event::Mouse(MouseEvent::ButtonReleased {
                     button: button_id,
                     modifiers: key_mods(event.state),
                 }));
-                if self.held_buttons == 0 && std::mem::take(&mut self.focus_out_after_release) {
-                    self.focus_out_in_frames = FOCUS_OUT_FRAMES;
-                }
             }
 
             ////
@@ -729,7 +904,7 @@ impl EventLoop {
                 if let Some(pressed) = self.pressed_keys.get_mut(usize::from(event.detail)) {
                     key.repeat = std::mem::replace(pressed, true);
                 }
-                if self.handler.on_event(Event::Keyboard(key)) == EventStatus::Ignored {
+                if self.handle_event(Event::Keyboard(key)) == EventStatus::Ignored {
                     self.forward_key_event(event);
                 }
             }
@@ -739,20 +914,14 @@ impl EventLoop {
                     *pressed = false;
                 }
                 let key = convert_key_release_event(&event, &mut self.xkb_state);
-                if self.handler.on_event(Event::Keyboard(key)) == EventStatus::Ignored {
+                if self.handle_event(Event::Keyboard(key)) == EventStatus::Ignored {
                     self.forward_key_event(event);
                 }
             }
 
-            // Keyboard grab/ungrab events describe temporary device routing,
-            // not a change to XGetInputFocus. Forwarding them as deactivation
-            // cancels the MUI gesture and IME state. Normal/WhileGrabbed
-            // events still carry real focus changes, including Alt-Tab.
-            XEvent::FocusIn(event)
-                if event.event == self.window.raw_id() && !is_grab_transition(event.mode) =>
-            {
-                self.focus_out_after_release = false;
-                self.focus_out_in_frames = 0;
+            XEvent::FocusIn(event) if event.event == self.window.raw_id() => {
+                self.taking_focus = false;
+                self.owns_focus = event.detail != NotifyDetail::POINTER;
                 self.window.is_focused.set(true);
                 let config = self.window.ime_configuration.borrow().clone();
                 self.window.set_ime_configuration(config);
@@ -760,22 +929,18 @@ impl EventLoop {
                 self.handle_event(Event::Window(WindowEvent::Focused));
             }
 
-            // NotifyPointer: focus stays on an ancestor (Bitwig moves it on
-            // every click) and only the pointer is here. The implicit grab
-            // still delivers the release, so the click finishes first and the
-            // focus loss applies FOCUS_OUT_FRAMES frames later.
             XEvent::FocusOut(e)
-                if e.event == self.window.raw_id() && !is_grab_transition(e.mode) =>
+                if e.event == self.window.raw_id()
+                    && !(self.taking_focus && e.detail == NotifyDetail::POINTER) =>
             {
-                if e.detail != NotifyDetail::POINTER {
-                    self.focus_out_after_release = false;
-                    self.focus_out_in_frames = 0;
-                    self.focus_out();
-                } else if self.held_buttons != 0 {
-                    self.focus_out_after_release = true;
-                } else if self.focus_out_in_frames == 0 {
-                    self.focus_out();
-                }
+                self.owns_focus = false;
+                self.window.is_focused.set(false);
+                let config = self.window.ime_configuration.borrow().clone();
+                self.window.set_ime_configuration(config);
+                self.drain_ime();
+                self.pressed_keys.fill(false);
+                self.release_forwarded_keys();
+                self.handle_event(Event::Window(WindowEvent::Unfocused));
             }
 
             XEvent::MapNotify(e) => {
@@ -808,7 +973,8 @@ impl EventLoop {
                         window_id,
                         NonZero::new(e.parent),
                         &self.window.connection,
-                    )
+                    );
+                    self.exposed = self.window.visibility_state.own_window_is_viewable();
                 }
             }
 
@@ -834,10 +1000,20 @@ impl EventLoop {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: Event) {
-        if !self.window.main_thread_shared.callbacks_revoked() {
-            self.handler.on_event(event);
+    fn handle_event(&mut self, event: Event) -> EventStatus {
+        if self.window.main_thread_shared.callbacks_revoked()
+            || (self.window.main_thread_shared.is_stop_host_requested()
+                && !matches!(event, Event::Window(WindowEvent::WillClose)))
+        {
+            return EventStatus::Ignored;
         }
+        if matches!(&event, Event::Window(WindowEvent::WillClose)) {
+            self.window.primary_pointer_down.set(false);
+            self.window.last_pointer_event.set(None);
+            self.cancel_matari_drag();
+        }
+        self.exposed = true;
+        self.handler.on_event(event)
     }
 
     /// Hands a key event the handler ignored to the embed parent, so host
@@ -873,6 +1049,33 @@ impl EventLoop {
             event.time = CURRENT_TIME;
             self.forward_key_event(event);
         }
+    }
+}
+
+/// Whether a press of button `detail` takes the keyboard: only in an
+/// embedded window that lacks it, and never for the wheel (4..=7), so a
+/// pointer passing over or scrolling leaves the host's keys alone.
+fn takes_focus(parented: bool, focused: bool, detail: u8) -> bool {
+    parented && !focused && !(4..=7).contains(&detail)
+}
+
+fn frame_deadline(
+    demand: FrameDemand, now: Instant, last_frame: Instant, interval: Duration,
+) -> Option<Instant> {
+    let paced = last_frame.checked_add(interval).unwrap_or(now).max(now);
+    match demand {
+        FrameDemand::Idle => None,
+        FrameDemand::Continuous => Some(paced),
+        FrameDemand::At(at) => Some(at.max(paced)),
+    }
+}
+
+/// `demand`, due no later than `now`.
+fn soonest(demand: FrameDemand, now: Instant) -> FrameDemand {
+    match demand {
+        FrameDemand::Idle => FrameDemand::At(now),
+        FrameDemand::At(at) => FrameDemand::At(at.min(now)),
+        FrameDemand::Continuous => FrameDemand::Continuous,
     }
 }
 
@@ -913,10 +1116,6 @@ fn mode_refresh_hz(mode: &ModeInfo) -> Option<f64> {
     (pixels > 0.0).then(|| f64::from(mode.dot_clock) / pixels)
 }
 
-fn is_grab_transition(mode: NotifyMode) -> bool {
-    matches!(mode, NotifyMode::GRAB | NotifyMode::UNGRAB)
-}
-
 fn is_auto_repeat_pair(release: &KeyReleaseEvent, press: &KeyPressEvent) -> bool {
     release.detail == press.detail && release.time == press.time && release.event == press.event
 }
@@ -933,7 +1132,17 @@ fn mouse_id(id: u8) -> MouseButton {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, reason = "test clocks use fixed small durations")]
 mod tests {
+    #[test]
+    fn only_a_click_in_an_unfocused_embedded_window_takes_the_keyboard() {
+        assert!(super::takes_focus(true, false, 1));
+        assert!(super::takes_focus(true, false, 3));
+        assert!(!super::takes_focus(true, true, 1), "it has it already");
+        assert!(!super::takes_focus(false, false, 1), "a top level's is the WM's");
+        assert!((4..=7).all(|w| !super::takes_focus(true, false, w)), "the wheel never");
+    }
+
     use super::mode_refresh_hz;
     use x11rb::protocol::randr::{ModeFlag, ModeInfo};
 
@@ -953,6 +1162,39 @@ mod tests {
             name_len: 0,
             mode_flags: flags,
         }
+    }
+
+    #[test]
+    fn idle_has_no_deadline_and_demand_never_schedules_catchup_frames() {
+        use super::frame_deadline;
+        use crate::FrameDemand;
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let interval = Duration::from_millis(16);
+        assert_eq!(frame_deadline(FrameDemand::Idle, now, now, interval), None);
+        assert_eq!(
+            frame_deadline(FrameDemand::Continuous, now, now, interval),
+            Some(now + interval)
+        );
+        let later = now + Duration::from_secs(1);
+        assert_eq!(frame_deadline(FrameDemand::At(later), now, now, interval), Some(later));
+        assert_eq!(frame_deadline(FrameDemand::Continuous, later, now, interval), Some(later));
+    }
+
+    #[test]
+    fn a_frame_request_right_after_a_frame_waits_for_the_refresh() {
+        use super::{frame_deadline, soonest};
+        use crate::FrameDemand;
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let interval = Duration::from_millis(16);
+        let asked = soonest(FrameDemand::Idle, now);
+        assert_eq!(frame_deadline(asked, now, now, interval), Some(now + interval));
+        let long_ago = now.checked_sub(interval * 2).unwrap_or(now);
+        assert_eq!(frame_deadline(asked, now, long_ago, interval), Some(now));
+        // A request is never held behind a later deadline the handler gave.
+        let later = now + Duration::from_secs(5);
+        assert_eq!(soonest(FrameDemand::At(later), now), FrameDemand::At(now));
     }
 
     #[test]

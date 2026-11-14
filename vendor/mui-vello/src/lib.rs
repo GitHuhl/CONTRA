@@ -10,14 +10,15 @@
 //! Arcs stay arcs until this point. MUI's tessellation path flattens them to
 //! line segments; here they become cubics instead, which is what Vello wants
 //! and what keeps a 24 px corner smooth when the scene is scaled up.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+// The shared session's wgpu resource graph needs deeper auto-trait evaluation
+// with the newer Rust trait solver.
+#![recursion_limit = "256"]
 
 use kurbo::{Affine, BezPath, Rect, Shape as _, Stroke};
 use mui_geometry::Error;
 use mui_scene::{Fit, GradientKind, Layer, Paint, Painted, ResolvedScene, ShadowKind};
 use std::sync::{Arc, Weak};
-#[cfg(feature = "gpu-effects")]
-pub use vello;
 #[cfg(feature = "cpu")]
 use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
 /// The brush type [`Canvas::set_paint`] takes, so the trait can be
@@ -25,24 +26,23 @@ use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
 pub use vello_common::paint::PaintType;
 #[cfg(feature = "cpu")]
 use vello_common::peniko::ImageSampler;
-use vello_common::peniko::color::PremulRgba8;
 use vello_common::peniko::color::{AlphaColor, DynamicColor, Srgb};
 use vello_common::peniko::{Blob, ColorStop, ColorStops, FontData, Gradient};
-use vello_common::pixmap::Pixmap;
+use vello_common::pixmap::{PixelMetadata, Pixmap};
 pub use vello_common::{kurbo, peniko};
+#[cfg(feature = "cpu")]
+mod damage;
 pub mod diagnostics;
 #[cfg(feature = "cpu")]
 pub use vello_cpu;
-#[cfg(feature = "gpu-effects")]
-mod classic;
+#[cfg(feature = "gpu-quad")]
+pub mod effects;
+#[cfg(feature = "gpu-quad")]
+pub mod host;
+#[cfg(feature = "gpu-quad")]
+pub mod quad;
 #[cfg(feature = "cpu")]
 pub mod software;
-#[cfg(feature = "gpu-effects")]
-pub use classic::Classic;
-#[cfg(feature = "gpu-effects")]
-pub mod effects;
-#[cfg(feature = "gpu-effects")]
-pub mod host;
 
 /// The path conversion painting uses, the same one input hit-tests with.
 pub use mui_geometry::{ARC_TOLERANCE, bez_path, bez_path_into};
@@ -131,8 +131,7 @@ pub trait Canvas {
     fn set_paint_transform(&mut self, _t: Affine) {}
     fn reset_paint_transform(&mut self) {}
     /// This image as a brush, or `None` for [`mui_scene::Paint::solid`]'s
-    /// stand-in. `vello_cpu` takes the pixmap itself, [`Classic`] the
-    /// buffer as Vello's image. A canvas with no image support keeps this
+    /// stand-in. `vello_cpu` takes the pixmap itself. A canvas with no image support keeps this
     /// default and paints the stand-in.
     fn image(&mut self, _img: &mui_scene::Image) -> Option<PaintType> {
         None
@@ -174,9 +173,15 @@ pub trait Canvas {
     /// Draw a hinted glyph run in the current paint, each glyph's `x`
     /// measured from the run's origin along the baseline.
     fn glyphs(&mut self, text: &mui_scene::Text);
+    /// Fallible glyph painting. Renderers with fallible glyph APIs override this;
+    /// existing canvases retain their infallible contract by default.
+    fn try_glyphs(&mut self, text: &mui_scene::Text) -> Result<(), Error> {
+        self.glyphs(text);
+        Ok(())
+    }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(any(feature = "cpu", feature = "gpu-quad"))]
 fn run(
     origin: mui_geometry::Point,
     glyphs: &[mui_scene::TextGlyph],
@@ -211,16 +216,10 @@ pub struct Cache {
     /// allocation, which is what keeps the address a sound key.
     // ponytail: linear scan, bounded by the live image count.
     images: Vec<(Weak<[u8]>, Stored)>,
-    /// Draw every glyph from the atlas, its first use included. The default
-    /// draws a glyph's first use as a path and later uses from the bitmap, so
-    /// a glyph's pixels depend on which frames drew it before; a partial repaint
-    /// would not match a full one. The atlas key (glyph, size, hint, quantised
-    /// subpixel) alone fixes the bitmap, so this keeps the output frame-independent.
-    pub(crate) atlas_always: bool,
 }
 
 #[cfg_attr(
-    not(any(feature = "cpu", feature = "gpu-effects", test)),
+    not(any(feature = "cpu", feature = "gpu-quad", test)),
     expect(dead_code, reason = "no canvas feature, nothing keeps fonts or images")
 )]
 #[derive(Clone, Copy)]
@@ -232,7 +231,7 @@ struct Frames {
 /// How long an unused font keeps its [`FontData`], and with it Vello's
 /// hinted outlines: glifo's own glyph atlas ages entries out after as many.
 #[cfg_attr(
-    not(any(feature = "cpu", feature = "gpu-effects", test)),
+    not(any(feature = "cpu", feature = "gpu-quad", test)),
     expect(dead_code, reason = "no canvas feature, nothing keeps fonts or images")
 )]
 const FONT_FRAMES: u64 = 64;
@@ -244,13 +243,13 @@ enum Stored {
         expect(dead_code, reason = "only the CPU canvas builds it")
     )]
     Pixmap(Arc<Pixmap>),
-    /// Only the GPU canvas stores these.
-    #[cfg(feature = "gpu-effects")]
-    Image(vello::peniko::ImageData),
+    /// The quad pass's image texture, bound as its own group.
+    #[cfg(feature = "gpu-quad")]
+    Texture(wgpu::BindGroup),
 }
 
 #[cfg_attr(
-    not(any(feature = "cpu", feature = "gpu-effects")),
+    not(any(feature = "cpu", feature = "gpu-quad")),
     expect(dead_code, reason = "no canvas feature, nothing keeps fonts or images")
 )]
 impl Cache {
@@ -342,7 +341,7 @@ macro_rules! wrapper {
             self.$inner.push_clip_path(p)
         }
         fn pop_clip(&mut self) {
-            self.$inner.pop_clip_path()
+            self.$inner.pop_clip()
         }
         fn push_layer(&mut self, blend: peniko::BlendMode, opacity: f32) {
             self.$inner
@@ -352,6 +351,10 @@ macro_rules! wrapper {
             self.$inner.pop_layer()
         }
         fn glyphs(&mut self, text: &mui_scene::Text) {
+            // Keep the legacy void API; paint() uses the fallible path below.
+            let _ = self.try_glyphs(text);
+        }
+        fn try_glyphs(&mut self, text: &mui_scene::Text) -> Result<(), Error> {
             let mut start = 0;
             while start < text.glyphs.len() {
                 let font_index = text.glyphs[start].font;
@@ -376,10 +379,15 @@ macro_rules! wrapper {
                     .normalized_coords(coords)
                     // Rasterise each glyph once and reuse the bitmap: strip
                     // generation per glyph was most of a frame's encode.
-                    .atlas_cache($atlas && (warm || self.cache.atlas_always))
-                    .fill_glyphs(run(text.origin, &text.glyphs[start..end]));
+                    .atlas_cache($atlas && warm)
+                    .fill_glyphs(run(text.origin, &text.glyphs[start..end]))
+                    .map_err(|error| {
+                        diagnostics::error("mui-vello", "glyph_render_failed", &error.to_string());
+                        Error::InvalidPath
+                    })?;
                 start = end;
             }
+            Ok(())
         }
     };
 }
@@ -460,8 +468,11 @@ fn srgb(c: mui_scene::Color) -> AlphaColor<Srgb> {
 /// what a decoder produces -- and premultiplying a photo is far too much work
 /// to redo every frame, so each renderer's [`Cache`] keeps the result.
 #[cfg_attr(
-    not(any(test, feature = "cpu")),
-    expect(dead_code, reason = "only the CPU renderer and tests call it")
+    not(any(test, feature = "cpu", feature = "gpu-quad")),
+    expect(
+        dead_code,
+        reason = "only the CPU renderer, the quad pass and tests call it"
+    )
 )]
 fn premultiply(img: &mui_scene::Image) -> Option<Pixmap> {
     size(img).map(|(w, h)| premultiplied(img, w, h))
@@ -475,28 +486,25 @@ fn size(img: &mui_scene::Image) -> Option<(u16, u16)> {
         u16::try_from(img.height).ok()?,
     );
     // `Image`'s fields are public, so the buffer need not match the size;
-    // `Pixmap::from_parts_with_opacity` asserts that it does.
+    // `Pixmap::from_parts` asserts that it does.
     (img.rgba.len() == usize::from(w) * usize::from(h) * 4).then_some((w, h))
 }
 
 /// [`premultiply`] for a size [`size`] already checked.
 fn premultiplied(img: &mui_scene::Image, w: u16, h: u16) -> Pixmap {
     let mut clear = false;
-    let (pixels, _) = img.rgba.as_chunks::<4>();
-    let data = pixels
-        .iter()
-        .map(|p| {
-            clear |= p[3] != 255;
-            let m = |c: u8| ((u16::from(p[3]) * u16::from(c)) / 255) as u8;
-            PremulRgba8 {
-                r: m(p[0]),
-                g: m(p[1]),
-                b: m(p[2]),
-                a: p[3],
-            }
-        })
-        .collect();
-    Pixmap::from_parts_with_opacity(data, w, h, clear)
+    let mut data = Vec::with_capacity(img.rgba.len());
+    for p in img.rgba.as_chunks::<4>().0 {
+        clear |= p[3] != 255;
+        let m = |c: u8| ((u16::from(p[3]) * u16::from(c)) / 255) as u8;
+        data.extend_from_slice(&[m(p[0]), m(p[1]), m(p[2]), p[3]]);
+    }
+    Pixmap::from_parts(
+        data,
+        w,
+        h,
+        PixelMetadata::new(peniko::ImageAlphaType::AlphaPremultiplied, clear),
+    )
 }
 
 /// Where the image's pixels land so that it fills `bounds` per `fit`.
@@ -582,41 +590,23 @@ pub fn paint(
     paint_within(canvas, scene, transform, None)
 }
 
-/// [`paint`], skipping the plain fills, strokes, shadows and text whose
-/// device box misses `within` (device space under `transform`). Their pixels
-/// all lie outside `within`, so a canvas drawing only `within` sees the same
-/// pixels. Structural entries are never skipped, and a scene holding a
-/// [`Layer::Backdrop`] cannot be culled: its blur reads past its own edges.
+/// [`paint`], skipping every leaf whose reach misses the device rect
+/// `view`. Clips, masks and layers are kept so their pushes and pops pair.
 pub(crate) fn paint_within(
     canvas: &mut impl Canvas,
     scene: &ResolvedScene,
     transform: Affine,
-    within: Option<Rect>,
+    view: Option<Rect>,
 ) -> Result<(), Error> {
     // A CPU/sink Canvas must not silently omit external GPU paint. Use
     // effects::GpuRenderer for scenes containing native material surfaces.
     if scene.paint.iter().any(|p| p.layer == Layer::External) {
         return Err(Error::InvalidPath);
     }
-    let within = within.filter(|_| !scene.paint.iter().any(|p| p.layer == Layer::Backdrop));
     canvas.begin_frame();
     let mut bez = BezPath::new();
-    let mut skip_to = 0;
     for (i, p) in scene.paint.iter().enumerate() {
-        if i < skip_to {
-            continue;
-        }
-        if let Some(end) = invisible_end(&scene.paint, i) {
-            skip_to = end + 1;
-            continue;
-        }
-        if let Some(w) = within
-            && device_reach(p, transform, false)
-                .is_some_and(|r| r.x1 < w.x0 || r.x0 > w.x1 || r.y1 < w.y0 || r.y0 > w.y1)
-        {
-            continue;
-        }
-        if layered(canvas, p) {
+        if layered(canvas, p) || view.is_some_and(|v| misses(p, transform, v)) {
             continue;
         }
         bez_path_into(&p.path, ARC_TOLERANCE, &mut bez)?;
@@ -632,32 +622,24 @@ pub(crate) fn paint_within(
     Ok(())
 }
 
-/// Where the layer opened at `list[i]` closes, if it is fully transparent and
-/// holds nothing that must still be walked: a hidden control paints nothing,
-/// yet as a layer it costs the GPU blend spill of everything inside it.
-pub(crate) fn invisible_end(list: &[Painted], i: usize) -> Option<usize> {
-    let Layer::Blend { opacity, .. } = list[i].layer else {
-        return None;
-    };
-    if opacity.partial_cmp(&0.0).is_none_or(|o| o.is_gt()) {
-        return None;
-    }
-    let mut depth = 0;
-    for (j, q) in list.iter().enumerate().skip(i) {
-        match q.layer {
-            Layer::Blend { .. } => depth += 1,
-            Layer::Unblend => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(j);
-                }
-            }
-            Layer::Backdrop | Layer::External => return None,
-            _ if path_shadow(q) => return None,
-            _ => {}
-        }
-    }
-    None
+/// Whether leaf `p` paints nothing inside device rect `view`. Only the
+/// CPU damage pass culls; without it nothing is skipped.
+#[cfg(not(feature = "cpu"))]
+fn misses(_: &Painted, _: Affine, _: Rect) -> bool {
+    false
+}
+
+/// Whether leaf `p` paints nothing inside device rect `view`.
+#[cfg(feature = "cpu")]
+fn misses(p: &Painted, transform: Affine, view: Rect) -> bool {
+    !matches!(p.layer, Layer::Clip | Layer::Mask)
+        && damage::reach(p).is_some_and(|r| {
+            r == damage::NOTHING
+                || !transform
+                    .transform_rect_bbox(r)
+                    .inflate(2., 2.)
+                    .overlaps(view)
+        })
 }
 
 /// `base` moved to where `p` stands: its paths are local to
@@ -668,49 +650,6 @@ pub(crate) fn placed(base: Affine, p: &Painted) -> Affine {
         o if o.x == 0. && o.y == 0. => base,
         o => base * Affine::translate((o.x, o.y)),
     }
-}
-
-/// Where the plain paint `p` can reach in device space under `transform`:
-/// its box, grown by its blur and stroke. `None` for a structural entry (a
-/// clip, layer or backdrop, which reaches past its own box), and for a
-/// path-only entry unless `convert` is set, since its box needs the path
-/// converted; cheaper callers skip those and draw them.
-// ponytail: the per-frame cull skips path-only entries (icons, custom
-// outlines) rather than converting them; add their bounds to mui-scene when
-// a scene of them is measured hot.
-pub(crate) fn device_reach(p: &Painted, transform: Affine, convert: bool) -> Option<Rect> {
-    if !matches!(
-        p.layer,
-        Layer::Fill
-            | Layer::Stroke
-            | Layer::Text
-            | Layer::Shell(_)
-            | Layer::Draw(_)
-            | Layer::Shadow(_)
-    ) {
-        return None;
-    }
-    let local = match (&p.rect, &p.text) {
-        (Some(rr), _) => rr.bounds(),
-        // Ink reaches past the run's advance box, above and below it: a full em.
-        (None, Some(t)) => {
-            paint_box(p, &BezPath::new()).inflate(f64::from(t.size), f64::from(t.size))
-        }
-        (None, None) if convert => {
-            let mut bez = BezPath::new();
-            bez_path_into(&p.path, ARC_TOLERANCE, &mut bez).ok()?;
-            bez.bounding_box()
-        }
-        (None, None) => return None,
-    };
-    let placed = transform * p.transform;
-    let scale = placed.as_coeffs()[..4].iter().fold(0., |s, v| s + v.abs());
-    let grow = (3. * p.blur + p.width / 2. + 2.) * scale;
-    Some(
-        placed
-            .transform_rect_bbox(local + kurbo::Vec2::new(p.offset.x, p.offset.y))
-            .inflate(grow, grow),
-    )
 }
 
 /// `p`'s paint box where it stands in the scene.
@@ -834,7 +773,7 @@ pub(crate) fn replay(
 /// The box a gradient or image paint is fitted to. A text layer carries its
 /// ink as glyphs and leaves `path` empty, so its box comes from the run.
 // ponytail: the last glyph's own advance is estimated at the em size.
-fn paint_box(p: &Painted, path: &BezPath) -> Rect {
+pub(crate) fn paint_box(p: &Painted, path: &BezPath) -> Rect {
     let Some(t) = &p.text else {
         return path.bounding_box();
     };
@@ -889,19 +828,6 @@ fn mix(m: mui_scene::Mix) -> peniko::Mix {
         M::Color => peniko::Mix::Color,
         M::Luminosity => peniko::Mix::Luminosity,
     }
-}
-
-/// The colour of an entry [`one`] would only fill or stroke with: solid,
-/// sharp and no text. See `GpuRenderer::encode`, which keeps its encoding.
-#[cfg(feature = "gpu-effects")]
-pub(crate) fn plain(p: &Painted) -> Option<AlphaColor<Srgb>> {
-    let Paint::Solid(c) = p.paint else {
-        return None;
-    };
-    // Sharp as `one` reads it: a NaN blur is none.
-    let sharp = p.blur.is_nan() || p.blur <= 0.0;
-    let plain = matches!(p.layer, Layer::Fill | Layer::Draw(_)) && p.text.is_none() && sharp;
-    plain.then(|| srgb(c))
 }
 
 /// Replay retained vector paths under the element and device transforms.
@@ -1092,7 +1018,7 @@ fn one(
     let solid = matches!(fill, PaintType::Solid(_));
     canvas.set_paint(fill);
     if let Some(t) = &p.text {
-        canvas.glyphs(t);
+        canvas.try_glyphs(t)?;
         return Ok(());
     }
     // An image paint lives in pixel space; this is what puts it on the box.
@@ -1151,35 +1077,6 @@ fn one(
 #[cfg(test)]
 mod seam {
     use super::*;
-    /// A hidden control is an opacity-0 layer: it paints nothing, so the
-    /// walk skips it whole instead of opening a layer for it.
-    #[test]
-    fn a_fully_transparent_layer_is_skipped() {
-        use mui_layout::Size;
-        use mui_scene::{Color, Paints, SceneSpec, Styled, block, resolve, stack};
-        let ink = |hidden: bool| {
-            let child = block(10., 10.).fill(Color::srgb(1., 0., 0.));
-            let child = if hidden { child.opacity(0.) } else { child };
-            resolve(&SceneSpec::new(stack([child, block(4., 4.).fill(Color::srgb(0., 0., 1.))]).size(16., 16.)).offered(Size::new(16., 16.))).unwrap()
-        };
-        let scene = ink(true);
-        let open = scene.paint.iter().position(|p| matches!(p.layer, Layer::Blend { .. })).expect("opacity opens a layer");
-        let end = invisible_end(&scene.paint, open).expect("a transparent layer is skippable");
-        assert!(matches!(scene.paint[end].layer, Layer::Unblend));
-        assert!(invisible_end(&ink(false).paint, 0).is_none());
-        let render = |scene: &ResolvedScene| {
-            let mut ctx = vello_cpu::RenderContext::new(16, 16);
-            let mut resources = vello_cpu::Resources::default();
-            paint(&mut Cpu { ctx: &mut ctx, resources: &mut resources, cache: &mut Cache::default() }, scene, Affine::IDENTITY).unwrap();
-            ctx.flush();
-            let mut pixels = Pixmap::new(16, 16);
-            ctx.render(&mut pixels, &mut resources);
-            pixels.data().to_vec()
-        };
-        let hidden = render(&scene);
-        assert!(hidden.iter().all(|p| p.r == 0), "nothing red may show through");
-    }
-
     use mui_geometry::Path;
     use mui_scene::{Image, Text};
 
@@ -1417,27 +1314,6 @@ mod snapshot {
                     p.r > 80 && p.g > 80 && p.b > 80
                 })),
                 "glyphs must paint in their rotated region at{scale}x"
-            );
-        }
-        #[cfg(feature = "gpu-effects")]
-        {
-            let mut encoded = vello::Scene::new();
-            let mut cache = Cache::default();
-            let textures = classic::Textures::default();
-            let mut gpu = Classic::new(&mut encoded, &mut cache, &textures, [80, 80]);
-            paint(&mut gpu, &rotated, Affine::scale(2.)).unwrap();
-            assert_eq!(
-                gpu.images.len(),
-                1,
-                "only authored bitmap uploads; vector and text stay vector/glyph paint"
-            );
-            assert!(!encoded.encoding().path_tags.is_empty());
-            let mut unchanged = vello::Scene::new();
-            let mut gpu = Classic::new(&mut unchanged, &mut cache, &textures, [80, 80]);
-            paint(&mut gpu, &plain, Affine::scale(2.)).unwrap();
-            assert_ne!(
-                encoded.encoding().transforms,
-                unchanged.encoding().transforms
             );
         }
     }
@@ -1679,16 +1555,6 @@ mod snapshot {
             assert_eq!(at(24, 16).a, 0, "even-odd hole lost at {scale}x");
             assert_eq!(at(24, 30).a, 0, "group clip lost at {scale}x");
         }
-        #[cfg(feature = "gpu-effects")]
-        {
-            let mut encoded = vello::Scene::new();
-            let mut cache = Cache::default();
-            let textures = classic::Textures::default();
-            let mut gpu = Classic::new(&mut encoded, &mut cache, &textures, [96, 64]);
-            paint(&mut gpu, &scene, Affine::scale(2.)).unwrap();
-            assert!(gpu.images.is_empty(), "vector became a bitmap upload");
-            assert!(!encoded.encoding().path_tags.is_empty());
-        }
     }
 
     #[test]
@@ -1766,16 +1632,6 @@ mod snapshot {
             scene.paint, ready_scene.paint,
             "ready pixels on same vector Arc must invalidate retained GPU paint"
         );
-        #[cfg(feature = "gpu-effects")]
-        {
-            let mut encoded = vello::Scene::new();
-            let mut cache = Cache::default();
-            let textures = classic::Textures::default();
-            let mut gpu = Classic::new(&mut encoded, &mut cache, &textures, [40, 30]);
-            paint(&mut gpu, &scene, Affine::scale(2.)).unwrap();
-            assert_eq!(gpu.images.len(), 1);
-            assert_eq!(source.requests.lock().unwrap().last(), Some(&(40, 30)));
-        }
     }
 
     /// A gradient shadow keeps its alpha. Both backends paint opaque black
@@ -2020,3 +1876,10 @@ mod snapshot {
         }
     }
 }
+
+// Reuse the adapter/pixel contracts in targeted --lib validation too.
+#[cfg(all(test, feature = "gpu-quad"))]
+extern crate self as mui_vello;
+#[cfg(all(test, feature = "gpu-quad"))]
+#[path = "../tests/effects_smoke.rs"]
+mod retained_gpu_contract;

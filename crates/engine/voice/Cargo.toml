@@ -12,5 +12,5 @@ workspace = true
 trace = []
 
 [dependencies]
-contra-stream = { path = "../stream" }
-smallvec = { workspace = true }
+contra-stream = {path = "../stream"}
+smallvec = {workspace = true}

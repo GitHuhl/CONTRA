@@ -14,7 +14,6 @@ pub mod perf_view;
 
 mod keybed;
 mod looks;
-pub mod lua;
 mod nui;
 mod picture;
 mod waves;

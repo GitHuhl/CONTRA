@@ -235,6 +235,67 @@ fn space_is_a_key_and_text_but_a_shortcut_is_only_a_key() {
 }
 
 #[test]
+fn native_text_reaches_the_field_verbatim_with_repeats_and_ime_commits() {
+    struct Text(String);
+    impl View for Text {
+        fn build(&mut self, ui: &mut Ui, _: &Input) -> El {
+            crate::widgets::text_input(ui, "edit", &mut self.0).el
+        }
+        fn changed(&mut self) -> bool {
+            false
+        }
+        fn request_resize(&mut self, _: u32, _: u32) -> bool {
+            false
+        }
+    }
+    let mut r = Rig::new(Text(String::new()), (400, 300), 1.);
+    r.s.ui =
+        Ui::default().font(crate::prelude::Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+    r.step();
+    r.s.ui.focus("edit");
+    let shifted = Mods {
+        shift: true,
+        ..none()
+    };
+    for (code, text, mods) in [
+        (1, "a", none()),
+        (2, "A", shifted),
+        (3, "#", shifted),
+        (3, "#", shifted),
+        (4, "!@#$%^&*()", shifted),
+    ] {
+        assert!(r.key(&press(code, NativeKey::Text(text.into()), mods)));
+        r.step();
+        r.step();
+    }
+    assert_eq!(r.s.view.0, "aA##!@#$%^&*()");
+    r.d.ime(Ime::Commit("é日本".into()));
+    r.step();
+    r.step();
+    assert_eq!(r.s.view.0, "aA##!@#$%^&*()é日本");
+    // Shortcut matching remains case-insensitive without adding typed text.
+    assert_eq!(
+        shortcut_key(&NativeKey::Text("Z".into())),
+        Some(Key::Char('z'))
+    );
+    let mut input = Input::default();
+    typed(
+        &mut input,
+        &NativeKey::Text("Z".into()),
+        Mods {
+            ctrl: true,
+            ..shifted
+        },
+    );
+    assert!(input.text.is_empty());
+    assert_eq!(input.keys[0].key, Key::Char('Z'));
+    // Ownership follows the physical key even if focus and Shift change.
+    r.s.ui.blur();
+    assert!(r.key(&release(3, NativeKey::Text("3".into()), none())));
+    assert!(!r.key(&release(3, NativeKey::Text("3".into()), none())));
+}
+
+#[test]
 fn keys_route_to_the_host_unless_focus_or_a_shortcut_claims_them() {
     let mut r = Rig::new(Knob::default(), (400, 400), 1.0);
     r.step();
@@ -325,6 +386,87 @@ fn focus_loss_queues_a_cancel_after_the_pressed_snapshot() {
         matches!(r.d.pending.front(), Some(Pending::Input(i)) if i.pointer.buttons.contains(Button::Primary))
     );
     assert!(matches!(r.d.pending.get(1), Some(Pending::Cancel(p)) if p.buttons.is_empty()));
+}
+
+mod keyboard_capture_tests {
+    use super::*;
+    use crate::prelude::{Font, Styled, col};
+
+    #[derive(Default)]
+    struct Menu {
+        search: String,
+        clicks: usize,
+    }
+    impl View for Menu {
+        fn build(&mut self, ui: &mut Ui, _: &Input) -> El {
+            col([
+                crate::widgets::text_input(ui, "search", &mut self.search).el,
+                block(160., 40.).id("row").focusable(),
+            ])
+        }
+        fn after_frame(&mut self, ui: &mut Ui) {
+            self.clicks += usize::from(ui.get("row").clicked);
+        }
+        fn changed(&mut self) -> bool {
+            false
+        }
+        fn request_resize(&mut self, _: u32, _: u32) -> bool {
+            false
+        }
+    }
+
+    fn press_row_after_focusing_search() -> Rig<Menu> {
+        let mut r = Rig::new(Menu::default(), (300, 200), 1.);
+        r.s.ui = Ui::default().font(Font::new(epaint_default_fonts::HACK_REGULAR).unwrap());
+        r.d.focus(true);
+        assert!(r.step());
+        r.s.ui.focus("search");
+        r.d.redraw();
+        assert!(r.step());
+        assert!(
+            r.s.ui.focus_is_text(),
+            "the search field captures native keyboard input"
+        );
+        let row = r.s.ui.scene().unwrap().surface("row").unwrap().frame;
+        r.d.pointer_moved(
+            at(row.x + row.size.width / 2., row.y + row.size.height / 2.),
+            none(),
+        );
+        r.d.button(Button::Primary, true, none());
+        assert!(r.step());
+        assert!(r.s.ui.get("row").held);
+        assert_eq!(r.s.ui.focus_key(), Some("row"));
+        assert!(
+            !r.s.ui.focus_is_text(),
+            "the row surrenders native keyboard capture"
+        );
+        assert_eq!(r.s.view.clicks, 0);
+        r
+    }
+
+    #[test]
+    fn row_click_survives_surrendering_text_keyboard_capture() {
+        let mut r = press_row_after_focusing_search();
+        // Returning native keyboard ownership to the host is not a focus(false)
+        // event: the platform suppresses its synchronous focus-loss callback.
+        assert!(r.d.pointer().pos.is_some());
+        r.d.button(Button::Primary, false, none());
+        assert!(r.step());
+        assert_eq!(r.s.view.clicks, 1, "the first row click must arrive");
+        assert!(!r.s.ui.get("row").held);
+    }
+
+    #[test]
+    fn genuine_focus_loss_between_row_press_and_release_still_cancels() {
+        let mut r = press_row_after_focusing_search();
+        r.d.focus(false);
+        assert_eq!(r.d.pointer().pos, None);
+        r.d.button(Button::Primary, false, none());
+        assert!(r.step());
+        assert_eq!(r.s.view.clicks, 0);
+        assert!(!r.s.ui.get("row").held);
+        assert!(!r.s.ui.get("row").clicked);
+    }
 }
 
 #[test]
@@ -607,22 +749,182 @@ fn ime_configuration_uses_utf8_boundaries_and_disables_after_blur() {
 }
 
 #[test]
-fn drag_coalescing_preserves_modifier_boundaries_and_release() {
-    let mut r = Rig::new(Knob::default(), (400, 400), 1.0);
-    r.step();
-    r.d.pointer_moved(at(10.0, 10.0), none());
-    r.d.button(Button::Primary, true, none());
-    for x in [12.0, 14.0] { r.d.pointer_moved(at(x, 10.0), none()); }
-    let shift = Mods { shift: true, ..none() };
-    for x in [16.0, 18.0] { r.d.pointer_moved(at(x, 10.0), shift); }
-    r.d.button(Button::Primary, false, shift);
-    r.s.view.trails.clear();
+fn refused_layout_stops_unchanged_retries_and_retries_real_changes() {
+    let mut r = Rig::new(
+        Keys {
+            enters: 0,
+            refuse: false,
+        },
+        (200, 200),
+        1.0,
+    );
     assert!(r.step());
-    // Hover, press, two separate drag groups, release. Each drag group
-    // retains its skipped sample; changing modifiers never merges groups.
-    assert_eq!(r.s.view.trails, [0, 0, 1, 1, 0]);
-    assert!(r.d.pending.is_empty());
-    assert_eq!(r.d.pointer.pos, Some(at(18.0, 10.0)));
-    assert_eq!(r.d.pointer.mods, shift);
-    assert!(r.d.pointer.buttons.is_empty());
+    r.s.view.refuse = true;
+    r.d.animating = true;
+    r.d.wake_at = Some(r.d.last_frame());
+    r.d.redraw();
+    assert!(!r.step());
+    assert!(!r.d.dirty, "refusal consumes this redraw");
+    assert!(!r.d.animating, "a failed frame owes no old animation");
+    assert_eq!(r.d.next_wake(), None);
+    r.d.enable_profiling(ProfileConfig::default());
+    for _ in 0..5 {
+        assert!(!r.step());
+    }
+    assert_eq!(
+        r.d.profiler().unwrap().percentiles(Phase::ViewBuild).total,
+        0
+    );
+    r.s.view.refuse = false;
+    r.d.resized((250, 250), 1.0);
+    assert!(r.step(), "a new size must retry");
+}
+
+#[test]
+fn display_paced_driver_has_no_interval_cap_and_idle_builds_nothing() {
+    let mut r = Rig::new(Pad, (200, 200), 1.0);
+    r.d.display_paced = true;
+    assert!(r.step());
+    for hz in [1000., 360., 240., 144., 60.] {
+        r.d.animating = true;
+        assert_eq!(r.d.next_wake(), Some(r.d.last_frame()));
+        let next_display = r.d.last_frame() + Duration::from_secs_f64(1. / hz);
+        assert!(r.d.advance(&mut r.s, next_display));
+    }
+    r.d.animating = false;
+    let last = r.d.last_frame();
+    assert_eq!(r.d.next_wake(), None);
+    assert!(!r.d.advance(&mut r.s, last + Duration::from_secs(1)));
+    assert_eq!(r.d.last_frame(), last);
+}
+
+#[test]
+fn animation_spacing_never_delays_input_redraw_or_due_deadlines() {
+    let mut r = Rig::new(Pad, (200, 200), 1.0);
+    assert!(r.step());
+    r.d.animating = true;
+    let frame = r.d.last_frame();
+    assert!(!r.d.advance(&mut r.s, frame + Duration::from_millis(1)));
+    assert_eq!(r.d.next_wake(), Some(frame + Duration::from_millis(7)));
+    r.d.ime(Ime::Commit("a".into()));
+    assert!(r.d.advance(&mut r.s, frame + Duration::from_millis(2)));
+    r.d.animating = true;
+    r.d.redraw();
+    assert!(r.d.advance(&mut r.s, frame + Duration::from_millis(3)));
+    r.d.animating = true;
+    r.d.wake_at = Some(frame + Duration::from_millis(4));
+    assert!(r.d.advance(&mut r.s, frame + Duration::from_millis(4)));
+}
+
+#[test]
+fn resize_quiet_window_defers_live_work_but_preserves_input_and_final_frame() {
+    let mut r = Rig::new(Knob::default(), (200, 200), 1.0);
+    assert!(r.step());
+    let now = r.d.last_frame() + Duration::from_millis(1);
+    r.d.resized_at((240, 220), 1.0, now);
+    assert!(r.d.advance(&mut r.s, now), "resize paints immediately");
+    r.s.view.changed = true;
+    r.d.animating = true;
+    assert!(!r.d.advance(&mut r.s, now + Duration::from_millis(8)));
+    r.d.ime(Ime::Commit("a".into()));
+    assert!(r.d.advance(&mut r.s, now + Duration::from_millis(9)));
+    assert!(
+        r.d.advance(&mut r.s, now + Duration::from_millis(36)),
+        "quiet resize owes final reconciliation even after input"
+    );
+    assert_eq!(r.d.size(), (240, 220));
+}
+
+#[test]
+fn initially_refused_layout_waits_for_a_real_retry_even_without_a_scene() {
+    let mut r = Rig::new(
+        Keys {
+            enters: 0,
+            refuse: true,
+        },
+        (200, 200),
+        1.0,
+    );
+    assert!(!r.step());
+    assert!(r.s.ui.scene().is_none());
+    assert_eq!(r.d.next_wake(), None);
+    r.d.enable_profiling(ProfileConfig::default());
+    assert!(!r.step());
+    assert_eq!(
+        r.d.profiler().unwrap().percentiles(Phase::ViewBuild).total,
+        0
+    );
+    r.s.view.refuse = false;
+    r.d.redraw();
+    assert!(r.step());
+}
+
+#[test]
+fn each_resize_extends_quiet_but_due_repaints_bypass_it() {
+    let mut r = Rig::new(Pad, (200, 200), 1.0);
+    assert!(r.step());
+    let start = r.d.last_frame();
+    r.d.resized_at((210, 200), 1.0, start);
+    assert!(r.d.advance(&mut r.s, start));
+    r.d.resized_at((220, 200), 1.0, start + Duration::from_millis(20));
+    assert!(r.d.advance(&mut r.s, start + Duration::from_millis(20)));
+    assert_eq!(r.d.next_wake(), Some(start + Duration::from_millis(55)));
+    assert!(!r.d.advance(&mut r.s, start + Duration::from_millis(36)));
+    r.d.wake_at = Some(start + Duration::from_millis(37));
+    assert!(r.d.advance(&mut r.s, start + Duration::from_millis(37)));
+    assert_eq!(r.d.next_wake(), Some(start + Duration::from_millis(55)));
+    assert!(r.d.advance(&mut r.s, start + Duration::from_millis(55)));
+    assert_eq!(r.d.next_wake(), None);
+}
+
+#[test]
+fn semantic_input_followup_bypasses_animation_and_resize_spacing() {
+    let mut r = Rig::new(Pad, (200, 200), 1.0);
+    assert!(r.step());
+    let now = r.d.last_frame();
+    r.d.resized_at((210, 200), 1.0, now);
+    assert!(r.d.advance(&mut r.s, now));
+    r.d.ime(Ime::Commit("a".into()));
+    assert!(r.d.advance(&mut r.s, now + Duration::from_millis(1)));
+    assert!(r.d.followup);
+    assert_eq!(r.d.next_wake(), Some(now + Duration::from_millis(1)));
+    assert!(r.d.advance(&mut r.s, now + Duration::from_millis(2)));
+    assert!(!r.d.followup);
+    assert!(!r.d.advance(&mut r.s, now + Duration::from_millis(3)));
+}
+
+#[test]
+fn queued_clicks_after_idle_use_host_time_not_the_last_events_animation_delta() {
+    struct Clicks(Vec<bool>);
+    impl View for Clicks {
+        fn build(&mut self, ui: &mut Ui, _: &Input) -> El {
+            if ui.get("click-clock").pressed {
+                self.0.push(ui.double_click("click-clock"));
+            }
+            crate::prelude::block(40., 40.).id("click-clock")
+        }
+        fn changed(&mut self) -> bool {
+            false
+        }
+        fn request_resize(&mut self, _: u32, _: u32) -> bool {
+            false
+        }
+    }
+    let mut rig = Rig::new(Clicks(Vec::new()), (100, 100), 1.);
+    let start = rig.d.last_frame();
+    rig.d.pointer_moved(at(10., 10.), Mods::default());
+    assert!(rig.d.advance(&mut rig.s, start + Duration::from_millis(16)));
+    for milliseconds in [100, 2100, 2200, 2300, 2400] {
+        // Press and release arrive in one native batch. Its press resolves
+        // with dt=0; the release carries the animation delta.
+        rig.d.button(Button::Primary, true, Mods::default());
+        rig.d.button(Button::Primary, false, Mods::default());
+        assert!(
+            rig.d
+                .advance(&mut rig.s, start + Duration::from_millis(milliseconds))
+        );
+        rig.d
+            .advance(&mut rig.s, start + Duration::from_millis(milliseconds + 16));
+    }
+    assert_eq!(rig.s.view.0, [false, false, true, false, true]);
 }

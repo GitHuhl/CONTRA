@@ -6,8 +6,8 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-contra-law = { path = "../../base/law" }
-contra-params = { path = "../params" }
+contra-law = {path = "../../base/law"}
+contra-params = {path = "../params"}
 
 [lints]
 workspace = true

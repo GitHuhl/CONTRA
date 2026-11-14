@@ -49,17 +49,18 @@ use clap_sys::events::{
 };
 use clap_sys::ext::audio_ports::{
     CLAP_AUDIO_PORT_IS_MAIN, CLAP_AUDIO_PORT_PREFERS_64BITS, CLAP_AUDIO_PORT_SUPPORTS_64BITS,
-    CLAP_AUDIO_PORTS_RESCAN_NAMES, CLAP_EXT_AUDIO_PORTS, CLAP_PORT_MONO, CLAP_PORT_STEREO,
-    clap_audio_port_info, clap_host_audio_ports, clap_plugin_audio_ports,
+    CLAP_EXT_AUDIO_PORTS, CLAP_PORT_MONO, CLAP_PORT_STEREO, clap_audio_port_info,
+    clap_plugin_audio_ports,
 };
 use clap_sys::ext::audio_ports_config::{
     CLAP_EXT_AUDIO_PORTS_CONFIG, clap_audio_ports_config, clap_plugin_audio_ports_config,
 };
-use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_plugin_latency};
+use clap_sys::ext::latency::{CLAP_EXT_LATENCY, clap_host_latency, clap_plugin_latency};
+#[cfg(feature = "mpe-input")]
+use clap_sys::ext::note_ports::CLAP_NOTE_DIALECT_MIDI_MPE;
 use clap_sys::ext::note_ports::{
-    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI,
-    CLAP_NOTE_DIALECT_MIDI_MPE, CLAP_NOTE_DIALECT_MIDI2, clap_note_port_info,
-    clap_plugin_note_ports,
+    CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI, CLAP_NOTE_DIALECT_MIDI2,
+    clap_note_port_info, clap_plugin_note_ports,
 };
 use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_ENUM,
@@ -81,7 +82,10 @@ use clap_sys::ext::remote_controls::{
 use clap_sys::ext::render::{
     CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, clap_plugin_render, clap_plugin_render_mode,
 };
-use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
+use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
+use clap_sys::ext::surround::{
+    CLAP_EXT_SURROUND, CLAP_EXT_SURROUND_COMPAT, CLAP_PORT_SURROUND, clap_plugin_surround,
+};
 use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_host_tail, clap_plugin_tail};
 use clap_sys::factory::preset_discovery::{
     CLAP_PRESET_DISCOVERY_LOCATION_FILE, clap_preset_discovery_location_kind,
@@ -105,9 +109,9 @@ use clap_sys::version::CLAP_VERSION;
 use moose_core::TransportSlot;
 use moose_core::buffer::AudioBuffer;
 use moose_core::bus::{BusConfig, BusKind, ChannelConfig};
-use moose_core::bus_routing::{BusActivation, BusRouting, bus_layouts_fit_routing};
+use moose_core::bus_routing::{BusActivation, BusRoute, BusRouting, bus_layouts_fit_routing};
 use moose_core::cast::{len_u32, size_of_u32};
-use moose_core::chunked_process::{ChunkedProcess, process_chunked_with_bus_routing};
+use moose_core::chunked_process::{ChunkedProcess, process_chunked_with_bus_routing_and_catalog};
 use moose_core::config::{AudioConfig, ProcessMode};
 use moose_core::editor::{
     ClosureBridge, Editor, EditorBuilder, PluginContext, RawWindowHandle, SendPtr, fit_logical_size,
@@ -126,7 +130,7 @@ use moose_core::midi::{
     PER_NOTE_VOLUME_MAX_GAIN, decode_short_message, denorm_7bit, downconvert_to_midi1,
     per_note_bend_from_semitones, pitch_bend_to_bytes,
 };
-use moose_core::plugin::PluginRuntime;
+use moose_core::plugin::{PluginRuntime, PreparationConfig, PreparationFrameBound};
 use moose_core::presets::parse_preset_file;
 use moose_core::process::ProcessStatus;
 use moose_core::rt::{RtSection, audit};
@@ -171,16 +175,21 @@ enum GuiParamChange {
 const GUI_QUEUE_CAPACITY: usize = 1024;
 type GuiChangeQueue = crossbeam_queue::ArrayQueue<GuiParamChange>;
 
-/// Single latest-wins restore slot, with bounded off-audio blob retirement.
-#[path = "../../moose-state-queue.rs"]
-mod state_queue;
-use state_queue::StateLoadQueue;
+/// Bounded handoff slot for state loads. Capacity 1: presets don't
+/// arrive faster than the audio thread completes a block, and on
+/// overflow we want most-recent-wins (`force_push`) so a rapid
+/// double-recall doesn't get the audio thread to apply a stale state
+/// after the host already moved on.
+type StateLoadQueue = state::StateLoadQueue;
 
 // ---------------------------------------------------------------------------
 // Internal wrapper struct held as plugin_data
 // ---------------------------------------------------------------------------
 
 struct ClapPluginData<P: PluginExport> {
+    persist_signal: Option<Arc<moose_params::PersistChangeSignal>>,
+    persist_pending: Arc<AtomicBool>,
+    host_state: *const clap_host_state,
     /// The user's plugin instance in the wrapper-standard ownership
     /// cell: the audio thread owns it per block, host lifecycle
     /// callbacks own it while processing is stopped, and the two never
@@ -234,12 +243,9 @@ struct ClapPluginData<P: PluginExport> {
     /// stopped - so the cell is never held twice at once.
     audio: PluginCell<ClapAudio<P>>,
     /// Cached parameter infos (built once at init).
-    param_infos: Vec<ParamInfo>,
+    param_infos: Arc<moose_params::ParamCatalog>,
     /// Visible CLAP indices; backing parameter IDs and storage stay fixed.
     exposed_param_indices: Mutex<Vec<usize>>,
-    /// IDs published as stepped by their runtime presentation; like the
-    /// index list, it changes only while deactivated.
-    stepped_ids: Mutex<Vec<u32>>,
     parameter_restart_pending: AtomicBool,
     /// Cached plugin info. Read by the chunker each block for
     /// `automation.min_subblock_samples` and otherwise unused; the
@@ -256,17 +262,12 @@ struct ClapPluginData<P: PluginExport> {
     host: *const clap_host,
     /// Host params extension (for `request_flush`).
     host_params: *const clap_host_params,
+    /// Host latency extension (for `changed`). Null if the host doesn't
+    /// expose `clap.latency`.
+    host_latency: *const clap_host_latency,
     /// Host tail extension (for `changed`). Null if the host doesn't
     /// expose `clap.tail`.
     host_tail: *const clap_host_tail,
-    /// Host audio-ports extension (for a names-only `rescan`). Null if the
-    /// host doesn't expose `clap.audio-ports`.
-    host_audio_ports: *const clap_host_audio_ports,
-    /// Last `Params::output_port_names_revision` seen by `process`.
-    port_names_revision: AtomicU64,
-    /// Set on the audio thread when the port names changed; drained on
-    /// the main thread, which asks the host to rescan the names.
-    port_names_dirty: AtomicBool,
     /// Set on the audio thread when `latency()` changes; drained on the
     /// main thread, which notifies the host. Coalesces a burst of
     /// changes into one host notification per main-thread callback.
@@ -289,6 +290,8 @@ struct ClapPluginData<P: PluginExport> {
     /// state). Main-thread-only (`activate` / `deactivate` / `state_load`
     /// are serialized by the host).
     active: AtomicBool,
+    /// True from a successful `start_processing` until `stop_processing` returns.
+    processing: AtomicBool,
     /// Current render mode as a [`ProcessMode`] discriminant. The host
     /// sets it through the `clap.render` extension on the main thread;
     /// the audio thread reads it each block. Most hosts deactivate
@@ -299,11 +302,15 @@ struct ClapPluginData<P: PluginExport> {
     render_mode: AtomicU8,
     /// Flag: GUI changed params, need rescan on main thread.
     needs_rescan: Arc<AtomicBool>,
+    floating_mode: AtomicBool,
+    floating_visible: Arc<AtomicBool>,
+    floating_closed: Arc<AtomicBool>,
     /// Last `Params::parameter_presentation_revision` the host saw.
     presentation_revision: AtomicU64,
-    /// Set by `process` when the presentation revision moved; drained on
-    /// the main thread, which rescans. One wake per change, not per block.
-    presentation_wake: AtomicBool,
+    /// Coalesces structural changed-ID notifications without a values rescan.
+    presentation_pending: Arc<AtomicBool>,
+    /// Main-thread discovery cache; audio processing never reads or locks it.
+    remote_pages: Mutex<Vec<(String, Vec<u32>)>>,
     /// Shared transport slot: audio thread writes each block, editor reads.
     transport_slot: Arc<TransportSlot>,
     /// Host-reported GUI scale (via `clap_plugin_gui::set_scale`).
@@ -397,20 +404,23 @@ struct ClapAudio<P: PluginExport> {
     bus_routing: BusRouting,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuiMode {
+    Embedded,
+    FloatingX11,
+    FloatingWayland,
+}
+
 /// Main/UI-thread-owned editor state (see [`ClapPluginData::gui`]).
 struct ClapGui {
     /// GUI editor (created by the plugin, if it implements `editor()`).
     editor: Option<Box<dyn Editor>>,
     /// Whether the GUI has been created via the gui extension.
     gui_created: bool,
-    /// Created floating: the editor's own top-level window, opened by `show`.
-    floating: bool,
+    mode: GuiMode,
+    visible: bool,
+    title: String,
 }
-
-/// The parent handle that asks an editor for a floating window. moose-core has
-/// no floating handle; `X11(0)` is never a real window, so `MuiEditor` reads it
-/// as "its own top-level". Linux only: the other platforms offer no floating GUI.
-const FLOATING_WINDOW: RawWindowHandle = RawWindowHandle::X11(0);
 
 impl<P: PluginExport> ClapPluginData<P> {
     /// The scale between the host's physical pixels and the editor's logical
@@ -471,6 +481,7 @@ unsafe fn input_channel_slice<S: Sample, H: Sample>(
     host_ptr: *const H,
     num_frames: usize,
     scratch: &mut Vec<S>,
+    copy: bool,
 ) -> &'static [S] {
     if host_ptr.is_null() {
         // Unconnected channel (an unrouted sidechain port). The plugin
@@ -483,18 +494,56 @@ unsafe fn input_channel_slice<S: Sample, H: Sample>(
         return unsafe { std::slice::from_raw_parts(scratch.as_ptr(), num_frames) };
     }
     unsafe {
-        if S::IS_F64 == H::IS_F64 {
+        if S::IS_F64 == H::IS_F64 && !copy {
             // SAFETY: sealed traits - equal IS_F64 means S == H.
             return std::slice::from_raw_parts(host_ptr.cast::<S>(), num_frames);
         }
         scratch.clear();
         scratch.reserve(num_frames);
-        let host = std::slice::from_raw_parts(host_ptr, num_frames);
-        for &h in host {
-            scratch.push(S::from_f64(h.to_f64()));
+        if S::IS_F64 == H::IS_F64 {
+            scratch.extend_from_slice(std::slice::from_raw_parts(host_ptr.cast::<S>(), num_frames));
+        } else {
+            let host = std::slice::from_raw_parts(host_ptr, num_frames);
+            for &h in host {
+                scratch.push(S::from_f64(h.to_f64()));
+            }
         }
         std::slice::from_raw_parts(scratch.as_ptr(), num_frames)
     }
+}
+
+// Detect overlap before creating any mutable output references.
+unsafe fn input_overlaps_outputs(input: *const u8, len: usize, process: &clap_process) -> bool {
+    if input.is_null() || len == 0 {
+        return false;
+    }
+    let start = input as usize;
+    let end = start.saturating_add(len);
+    for bus in 0..process.audio_outputs_count {
+        let output = unsafe { &*process.audio_outputs.add(bus as usize) };
+        for channel in 0..output.channel_count {
+            let (ptr, bytes) = if !output.data64.is_null() {
+                (
+                    unsafe { *output.data64.add(channel as usize) } as usize,
+                    size_of::<f64>(),
+                )
+            } else if !output.data32.is_null() {
+                (
+                    unsafe { *output.data32.add(channel as usize) } as usize,
+                    size_of::<f32>(),
+                )
+            } else {
+                continue;
+            };
+            if ptr != 0
+                && start < ptr.saturating_add((process.frames_count as usize).saturating_mul(bytes))
+                && ptr < end
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Output twin of [`input_channel_slice`]: zero-copy into host
@@ -675,18 +724,6 @@ unsafe fn data_from_plugin<P: PluginExport>(
     unsafe { &*(*plugin).plugin_data.cast::<ClapPluginData<P>>() }
 }
 
-/// Read an instance's shared params on the host main thread without borrowing
-/// the audio-owned plugin. Used by numeric diagnostic probes.
-///
-/// # Safety
-/// `plugin` must be a live instance exported by this library for exactly `P`.
-pub unsafe fn with_plugin_params<P: PluginExport, T>(
-    plugin: *const clap_plugin,
-    read: impl FnOnce(&P::Params) -> T,
-) -> T {
-    read(&unsafe { data_from_plugin::<P>(plugin) }.params_arc)
-}
-
 // ---------------------------------------------------------------------------
 // Plugin callbacks
 //
@@ -719,10 +756,7 @@ unsafe extern "C" fn clap_plugin_init<P: PluginExport>(plugin: *const clap_plugi
         {
             let mut instance = enter_plugin(&data.plugin);
             instance.init();
-            data.param_infos = instance.params().param_infos();
-            data.stepped_ids = Mutex::new(stepped_ids(&data.param_infos, |id| {
-                data.params_arc.parameter_presentation(id)
-            }));
+            data.param_infos = instance.params().param_catalog();
             data.exposed_param_indices = Mutex::new(parameter_indices(&data.param_infos, |id| {
                 data.params_arc.parameter_presentation(id)
             }));
@@ -735,14 +769,30 @@ unsafe extern "C" fn clap_plugin_init<P: PluginExport>(plugin: *const clap_plugi
             if !ext.is_null() {
                 data.host_params = ext.cast::<clap_host_params>();
             }
+            data.host_state = get_ext(data.host, CLAP_EXT_STATE.as_ptr()).cast::<clap_host_state>();
+            let lat_ext = get_ext(data.host, CLAP_EXT_LATENCY.as_ptr());
+            if !lat_ext.is_null() {
+                data.host_latency = lat_ext.cast::<clap_host_latency>();
+            }
             let tail_ext = get_ext(data.host, CLAP_EXT_TAIL.as_ptr());
             if !tail_ext.is_null() {
                 data.host_tail = tail_ext.cast::<clap_host_tail>();
             }
-            let ports_ext = get_ext(data.host, CLAP_EXT_AUDIO_PORTS.as_ptr());
-            if !ports_ext.is_null() {
-                data.host_audio_ports = ports_ext.cast::<clap_host_audio_ports>();
-            }
+        }
+        if data.params_arc.wants_persist_notifications() {
+            let host = SendPtr::new(data.host);
+            let pending = data.persist_pending.clone();
+            let signal = Arc::new(moose_params::PersistChangeSignal::new(move || {
+                if !pending.swap(true, Ordering::AcqRel)
+                    && !host.as_ptr().is_null()
+                    && let Some(request) = (*host.as_ptr()).request_callback
+                {
+                    request(host.as_ptr());
+                }
+            }));
+            data.params_arc
+                .set_persist_change_signal(Arc::downgrade(&signal));
+            data.persist_signal = Some(signal);
         }
         true
     })
@@ -765,6 +815,10 @@ unsafe extern "C" fn clap_plugin_destroy<P: PluginExport>(plugin: *const clap_pl
         let plugin_ptr = plugin.cast_mut();
         let data_ptr = (*plugin).plugin_data.cast::<ClapPluginData<P>>();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Gate workers before any host/instance handle can be released.
+            if let Some(signal) = &(*data_ptr).persist_signal {
+                signal.close();
+            }
             drop(Box::from_raw(data_ptr));
             drop(Box::from_raw(plugin_ptr));
         }));
@@ -817,7 +871,13 @@ unsafe extern "C" fn clap_plugin_activate<P: PluginExport>(
         let mode = ProcessMode::from_u8(data.render_mode.load(Ordering::Relaxed));
         {
             let mut instance = enter_plugin(&data.plugin);
-            instance.reset(&AudioConfig::new(sample_rate, max_block).with_process_mode(mode));
+            let config = PreparationConfig::new(
+                AudioConfig::new(sample_rate, max_block).with_process_mode(mode),
+                PreparationFrameBound::NegotiatedHost,
+            );
+            if instance.prepare(&config).is_err() {
+                return false;
+            }
             // Refresh the caches from the freshly-reset instance so the
             // host reads the real latency/tail before the first block -
             // not the placeholder-rate value from create. No dirty flag:
@@ -852,7 +912,7 @@ unsafe extern "C" fn clap_plugin_activate<P: PluginExport>(
             }
             for buf in &mut scr.input_widen {
                 if buf.capacity() < max_block {
-                    buf.reserve_exact(max_block - buf.capacity());
+                    buf.reserve_exact(max_block - buf.len());
                 }
             }
             while scr.output_narrow.len() < max_out {
@@ -860,7 +920,7 @@ unsafe extern "C" fn clap_plugin_activate<P: PluginExport>(
             }
             for buf in &mut scr.output_narrow {
                 if buf.capacity() < max_block {
-                    buf.reserve_exact(max_block - buf.capacity());
+                    buf.reserve_exact(max_block - buf.len());
                 }
             }
             while scr.host_out_ptrs.len() < max_out {
@@ -907,13 +967,21 @@ unsafe extern "C" fn clap_plugin_deactivate<P: PluginExport>(plugin: *const clap
 }
 
 unsafe extern "C" fn clap_plugin_start_processing<P: PluginExport>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
 ) -> bool {
+    // SAFETY: CLAP supplies a live instance for this factory's plugin type.
+    let data = unsafe { data_from_plugin::<P>(plugin) };
+    if !data.active.load(Ordering::Acquire) {
+        return false;
+    }
+    data.processing.store(true, Ordering::Release);
     true
 }
 
-unsafe extern "C" fn clap_plugin_stop_processing<P: PluginExport>(_plugin: *const clap_plugin) {
-    // Nothing to do.
+unsafe extern "C" fn clap_plugin_stop_processing<P: PluginExport>(plugin: *const clap_plugin) {
+    // SAFETY: CLAP supplies a live instance for this factory's plugin type.
+    let data = unsafe { data_from_plugin::<P>(plugin) };
+    data.processing.store(false, Ordering::Release);
 }
 
 unsafe extern "C" fn clap_plugin_reset<P: PluginExport>(plugin: *const clap_plugin) {
@@ -939,13 +1007,48 @@ unsafe extern "C" fn clap_plugin_reset<P: PluginExport>(plugin: *const clap_plug
 unsafe extern "C" fn clap_plugin_on_main_thread<P: PluginExport>(plugin: *const clap_plugin) {
     unsafe {
         let data = data_from_plugin::<P>(plugin);
-        data.pending_state.collect_retired();
+        if data.persist_pending.swap(false, Ordering::AcqRel)
+            && let Some((id, value)) = data.params_arc.take_persist_change()
+            && value.is_finite()
+            && (0.0..=1.0).contains(&value)
+            && data.params_arc.get_normalized(id).is_some()
+        {
+            // The ordinary gesture queue works independently of GUI creation.
+            let context = editor_context::<P>(plugin);
+            context.begin_edit(id);
+            context.set_param(id, value);
+            context.end_edit(id);
+            // State dirtiness must also reach an inactive host that does not
+            // implement params/request_flush. This is a main-thread-only API.
+            if !data.host.is_null()
+                && !data.host_state.is_null()
+                && let Some(mark_dirty) = (*data.host_state).mark_dirty
+            {
+                mark_dirty(data.host);
+            }
+        }
+        if data.floating_closed.swap(false, Ordering::AcqRel) {
+            data.gui.enter().visible = false;
+            if !data.host.is_null()
+                && let Some(get) = (*data.host).get_extension
+            {
+                let host_gui = get(data.host, CLAP_EXT_GUI.as_ptr()).cast::<clap_host_gui>();
+                if !host_gui.is_null()
+                    && let Some(closed) = (*host_gui).closed
+                {
+                    closed(data.host, false);
+                }
+            }
+        }
         // Runtime presentation metadata is re-read on RESCAN_INFO. A change
         // to the exposed list requests a restart and is published inactive.
-        data.presentation_wake.store(false, Ordering::Relaxed);
+        data.presentation_pending.store(false, Ordering::Release);
         let revision = data.params_arc.parameter_presentation_revision();
         let info_changed = data.presentation_revision.swap(revision, Ordering::Relaxed) != revision;
         let list_changed = info_changed && refresh_parameter_list(data);
+        if info_changed {
+            refresh_remote_control_pages(data);
+        }
         let values_changed = data.needs_rescan.swap(false, Ordering::Relaxed);
         if (values_changed || info_changed)
             && !data.host_params.is_null()
@@ -961,39 +1064,21 @@ unsafe extern "C" fn clap_plugin_on_main_thread<P: PluginExport>(plugin: *const 
                 flags |= CLAP_PARAM_RESCAN_VALUES;
             }
             if info_changed {
-                // Value text follows the presentation (units, labels).
                 flags |= CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_TEXT;
             }
             rescan(data.host, flags);
         }
 
-        // Output port names changed: a names-only rescan, which CLAP
-        // allows while active. A host without `clap.audio-ports` (or one
-        // that declines the flag) keeps the names it has until it asks
-        // for the ports again.
-        if data.port_names_dirty.swap(false, Ordering::Relaxed)
-            && !data.host.is_null()
-            && !data.host_audio_ports.is_null()
-            && let Some(rescan) = (*data.host_audio_ports).rescan
-        {
-            let supported = (*data.host_audio_ports)
-                .is_rescan_flag_supported
-                .is_none_or(|f| f(data.host, CLAP_AUDIO_PORTS_RESCAN_NAMES));
-            if supported {
-                rescan(data.host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+        if data.latency_dirty.swap(false, Ordering::Relaxed) && !data.host.is_null() {
+            if data.active.load(Ordering::Relaxed) {
+                if let Some(req_restart) = (*data.host).request_restart {
+                    req_restart(data.host);
+                }
+            } else if !data.host_latency.is_null()
+                && let Some(changed) = (*data.host_latency).changed
+            {
+                changed(data.host);
             }
-        }
-
-        // Latency changed on the audio thread: the host must reactivate
-        // to apply the new delay compensation. CLAP allows
-        // `clap_host_latency.changed` only inside `clap_plugin.activate`,
-        // so it is not called here; the restart makes the host activate
-        // again, and `activate` refreshes the cache it reads.
-        if data.latency_dirty.swap(false, Ordering::Relaxed)
-            && !data.host.is_null()
-            && let Some(req_restart) = (*data.host).request_restart
-        {
-            req_restart(data.host);
         }
     }
 }
@@ -1939,7 +2024,7 @@ unsafe fn emit_exact_clap(
 fn preflight_clap_output(
     events: &EventList,
     info: &PluginInfo,
-    param_infos: &[ParamInfo],
+    param_infos: &moose_params::ParamCatalog,
     frames_count: u32,
 ) -> OutputEventStatus {
     for replay in events.lossless_iter() {
@@ -1972,7 +2057,7 @@ fn preflight_clap_output(
             return OutputEventStatus::Invalid;
         }
         match &event.body {
-            EventBody::ParamChange { id, .. } if !param_infos.iter().any(|info| info.id == *id) => {
+            EventBody::ParamChange { id, .. } if param_infos.by_id(*id).is_none() => {
                 return OutputEventStatus::Invalid;
             }
             EventBody::SysEx { .. } => {
@@ -2600,6 +2685,9 @@ unsafe fn flush_gui_changes<P: PluginExport>(
                         value: plain,
                     };
                     if plain.is_finite() && !try_push(out_events, &raw const event.header) {
+                        // Popped and refused: the host never hears this
+                        // value as an event, so ask it to re-read values.
+                        request_value_rescan(data);
                         return false;
                     }
                 }
@@ -2628,11 +2716,35 @@ unsafe fn flush_gui_changes<P: PluginExport>(
 // Process callback
 // ---------------------------------------------------------------------------
 
+/// # Safety
+/// Non-null bus arrays must contain `count` readable CLAP buffers.
+unsafe fn audio_bus_channels_match(
+    buffers: *const clap_audio_buffer,
+    count: u32,
+    channels: impl Iterator<Item = usize>,
+) -> bool {
+    if count != 0 && buffers.is_null() {
+        return false;
+    }
+    let mut channels = channels.filter(|&count| count != 0);
+    for index in 0..count {
+        let Some(expected) = channels.next() else {
+            return false;
+        };
+        // SAFETY: the caller supplies a live array; excess buses are rejected above.
+        if unsafe { (*buffers.add(index as usize)).channel_count as usize } != expected {
+            return false;
+        }
+    }
+    channels.next().is_none()
+}
+
 #[allow(clippy::too_many_lines)]
 unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
     plugin: *const clap_plugin,
     process: *const clap_process,
 ) -> i32 {
+    let mut audio_buffers_valid = false;
     let result = run_audio_block_with::<P, i32>("CLAP", CLAP_PROCESS_ERROR, || unsafe {
         if process.is_null() {
             return CLAP_PROCESS_ERROR;
@@ -2643,26 +2755,28 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         let num_frames = proc.frames_count as usize;
 
         if num_frames == 0 {
-            // A zero-frame call still carries the host's parameter changes (a
-            // host may send them while stopped). Apply them as `params_flush`
-            // does, rather than dropping them with the audio.
-            if !proc.in_events.is_null() {
-                let mut audio = data.audio.enter();
-                let scr = &mut *audio;
-                convert_input_events::<P>(scr, &data.info, proc.in_events, false, false, None);
-                let params = data.params_arc.as_ref() as &dyn Params;
-                for ev in scr.event_list.iter() {
-                    if let EventBody::ParamChange { id, value } = ev.body {
-                        params.set_plain(id, value);
-                        defer_param_change(&mut scr.deferred_params, id, value);
-                    }
-                }
-            }
+            params_flush::<P>(plugin, proc.in_events, proc.out_events);
             return CLAP_PROCESS_CONTINUE;
         }
 
-        // Cover the entire valid callback, including deferred state application.
-        let _rt = RtSection::enter();
+        {
+            let audio = data.audio.enter();
+            if num_frames > audio.max_block_size
+                || !audio_bus_channels_match(
+                    proc.audio_inputs,
+                    proc.audio_inputs_count,
+                    audio.bus_routing.inputs().map(BusRoute::channel_count),
+                )
+                || !audio_bus_channels_match(
+                    proc.audio_outputs,
+                    proc.audio_outputs_count,
+                    audio.bus_routing.outputs().map(BusRoute::channel_count),
+                )
+            {
+                return CLAP_PROCESS_ERROR;
+            }
+        }
+        audio_buffers_valid = true;
 
         // Take ownership of the plugin for the whole block: an
         // uncontended `Acquire`, never a wait, since the host contract
@@ -2679,15 +2793,17 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         // single-slot queue means a rapid double-recall lands the
         // newest blob and the older one is dropped - preferred to
         // the audio thread chasing stale state across blocks.
-        let state_loaded = data.pending_state.apply_audio(|state| {
-            state::apply_state(&mut *instance, state);
+        let state_loaded = data.pending_state.pop().is_some_and(|state| {
+            state::apply_state(&mut *instance, &state);
+            true
         });
-        if state_loaded
-            && !data.host.is_null()
-            && let Some(request) = (*data.host).request_callback
-        {
-            request(data.host);
-        }
+
+        // Paranoid allocation check (the `rt-paranoid` feature): guard the
+        // wrapper's per-block glue - event conversion, transport, process,
+        // output encode, snapshot publish - as well as the plugin. Placed
+        // after the state-load apply above, since `load_state` legitimately
+        // allocates. No-op and zero-sized when the feature is off.
+        let _rt = RtSection::enter();
 
         // The audio scratch lives behind an ownership cell reached through the
         // shared `&data`, so a concurrent host-thread `&data` (param reads,
@@ -2734,13 +2850,6 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         //    pass-through must do `output.copy_from_slice(input)`
         //    themselves; auto-copying clobbers the previous-block tail
         //    that delay/reverb feedback paths read back from the output.
-        debug_assert!(
-            num_frames <= scr.max_block_size,
-            "host violated CLAP contract: process() got {num_frames} frames \
-             but activate() declared max {}",
-            scr.max_block_size
-        );
-
         // Build per-channel slices preserving channel index across
         // every bus. A null bus (neither data pointer set) emits
         // empty slices for each of its declared channels rather than
@@ -2764,31 +2873,46 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         for buf in &mut scr.input_widen {
             buf.clear();
         }
-        // The outer Vec is pre-sized in `clap_plugin_activate`; the
-        // while-loops below only run as a fallback if the pre-grow
-        // didn't cover the bus layout the host actually picked.
-        // `Vec::new()` keeps the fallback allocation-free; the inner
-        // scratch only allocates if that channel actually converts.
         let mut flat_in_idx = 0usize;
         let bus_routing = scr.bus_routing;
         for bus_idx in 0..proc.audio_inputs_count {
             let buf = &*proc.audio_inputs.add(bus_idx as usize);
             let bus_is_f64 = !buf.data64.is_null();
             for ch in 0..buf.channel_count {
-                while scr.input_widen.len() <= flat_in_idx {
-                    scr.input_widen.push(Vec::new());
-                }
                 let scratch = &mut scr.input_widen[flat_in_idx];
                 let slice: &'static [P::Sample] = if bus_is_f64 {
                     let host_ptr: *const f64 = *buf.data64.add(ch as usize);
-                    input_channel_slice::<P::Sample, f64>(host_ptr, num_frames, scratch)
+                    input_channel_slice::<P::Sample, f64>(
+                        host_ptr,
+                        num_frames,
+                        scratch,
+                        input_overlaps_outputs(
+                            host_ptr.cast(),
+                            num_frames * size_of::<f64>(),
+                            proc,
+                        ),
+                    )
                 } else if buf.data32.is_null() {
                     // Whole input port disconnected (null channel-pointer
                     // array): feed this channel block-length silence.
-                    input_channel_slice::<P::Sample, f32>(std::ptr::null(), num_frames, scratch)
+                    input_channel_slice::<P::Sample, f32>(
+                        std::ptr::null(),
+                        num_frames,
+                        scratch,
+                        false,
+                    )
                 } else {
                     let host_ptr: *const f32 = *buf.data32.add(ch as usize);
-                    input_channel_slice::<P::Sample, f32>(host_ptr, num_frames, scratch)
+                    input_channel_slice::<P::Sample, f32>(
+                        host_ptr,
+                        num_frames,
+                        scratch,
+                        input_overlaps_outputs(
+                            host_ptr.cast(),
+                            num_frames * size_of::<f32>(),
+                            proc,
+                        ),
+                    )
                 };
                 scr.input_slices.push(slice);
                 flat_in_idx += 1;
@@ -2807,9 +2931,6 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
             let buf = &mut *proc.audio_outputs.add(bus_idx as usize);
             let bus_is_f64 = !buf.data64.is_null();
             for ch in 0..buf.channel_count {
-                while scr.output_narrow.len() <= flat_out_idx {
-                    scr.output_narrow.push(Vec::new());
-                }
                 let scratch = &mut scr.output_narrow[flat_out_idx];
                 let slice: &'static mut [P::Sample] = if bus_is_f64 {
                     let host_ptr: *mut f64 = *buf.data64.add(ch as usize);
@@ -2863,6 +2984,14 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         // `plugin.process` exactly once - the splitting machinery is
         // inert. See `chunked_process` for the per-sub-block contract.
         let mut transport_snap = transport;
+        let request_latency_change = || {
+            if !data.latency_dirty.swap(true, Ordering::Relaxed)
+                && !data.host.is_null()
+                && let Some(request) = (*data.host).request_callback
+            {
+                request(data.host);
+            }
+        };
         let chunk_args = ChunkedProcess {
             events: &scr.event_list,
             sub_event_scratch: &mut scr.sub_event_scratch,
@@ -2872,16 +3001,22 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
             output_events: &mut scr.output_events,
             params_fn: None,
             meters_fn: None,
+            latency_change_request: Some(&request_latency_change),
             param_infos: &data.param_infos,
             min_subblock_samples: data.info.automation.min_subblock_samples,
         };
-        let status = process_chunked_with_bus_routing(
+        let status = process_chunked_with_bus_routing_and_catalog(
             &mut *instance,
             data.params_arc.as_ref() as &dyn Params,
             &mut audio_buffer,
             chunk_args,
             bus_routing,
+            &data.param_infos,
         );
+
+        // Parameters have reached their sample offsets before discovery is
+        // scheduled. No metadata lookup or catalog walk runs on audio.
+        request_changed_presentation(data, &scr.event_list);
 
         // Convert + copy back to host outputs for every channel that
         // rendered into scratch (wire precision differed from
@@ -2917,26 +3052,6 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
         // latency change, flag it and wake the main thread, which
         // notifies the host (`clap.latency` requires the call off the
         // audio thread).
-        // Port names are read on the main thread; here only a revision
-        // is compared (one atomic load) and the main thread woken.
-        let names = data.params_arc.output_port_names_revision();
-        if data.port_names_revision.swap(names, Ordering::Relaxed) != names
-            && !data.port_names_dirty.swap(true, Ordering::Relaxed)
-            && !data.host.is_null()
-            && let Some(req_cb) = (*data.host).request_callback
-        {
-            req_cb(data.host);
-        }
-        // Presentation (names, visibility) is likewise read on the main
-        // thread; one atomic compare here wakes it.
-        if data.params_arc.parameter_presentation_revision()
-            != data.presentation_revision.load(Ordering::Relaxed)
-            && !data.presentation_wake.swap(true, Ordering::Relaxed)
-            && !data.host.is_null()
-            && let Some(req_cb) = (*data.host).request_callback
-        {
-            req_cb(data.host);
-        }
         let new_latency = instance.latency();
         if data.latency_cache.swap(new_latency, Ordering::Relaxed) != new_latency
             && !data.latency_dirty.swap(true, Ordering::Relaxed)
@@ -3315,9 +3430,8 @@ unsafe extern "C" fn clap_plugin_process<P: PluginExport>(
     // the `CLAP_PROCESS_ERROR` fallback - but the plugin may have left the
     // output buffers half-written. Zero them so the host doesn't play stale
     // garbage for a block before it reacts to the error, matching VST3 / VST2
-    // / AAX. (`CLAP_PROCESS_ERROR` is otherwise only the null-process guard,
-    // where the zero is a no-op.)
-    if result == CLAP_PROCESS_ERROR {
+    // / AAX. An invalid host shape has no validated storage to clear.
+    if result == CLAP_PROCESS_ERROR && audio_buffers_valid {
         unsafe { zero_clap_output_buffers(process) };
     }
     result
@@ -3356,71 +3470,6 @@ unsafe fn zero_clap_output_buffers(process: *const clap_process) {
                 }
             }
         }
-    }
-}
-
-/// Test helper exercising hard resets through the exported CLAP lifecycle vtable.
-#[doc(hidden)]
-pub fn lifecycle_reset_smoke<P: PluginExport>(
-    seed: impl Fn(&P::Params),
-    cleared: impl Fn(&P::Params) -> bool,
-) -> [bool; 2] {
-    unsafe extern "C" fn no_extension(
-        _host: *const clap_host,
-        _id: *const c_char,
-    ) -> *const c_void {
-        ptr::null()
-    }
-    let descriptor = Box::leak(Box::new(clap_plugin_descriptor {
-        clap_version: CLAP_VERSION,
-        id: ptr::null(),
-        name: ptr::null(),
-        vendor: ptr::null(),
-        url: ptr::null(),
-        manual_url: ptr::null(),
-        support_url: ptr::null(),
-        version: ptr::null(),
-        description: ptr::null(),
-        features: ptr::null(),
-    }));
-    let host = Box::leak(Box::new(clap_host {
-        clap_version: CLAP_VERSION,
-        host_data: ptr::null_mut(),
-        name: ptr::null(),
-        vendor: ptr::null(),
-        url: ptr::null(),
-        version: ptr::null(),
-        get_extension: Some(no_extension),
-        request_restart: None,
-        request_process: None,
-        request_callback: None,
-    }));
-    // Same exported lifecycle vtable and ownership as the audio smoke below.
-    unsafe {
-        let plugin = create_plugin_instance::<P>(descriptor, host);
-        let api = &*plugin;
-        (api.init.unwrap())(plugin);
-        (api.activate.unwrap())(plugin, 48000., 1, 64);
-        {
-            let instance = enter_plugin(&data_from_plugin::<P>(plugin).plugin);
-            seed(instance.params());
-        }
-        (api.reset.unwrap())(plugin);
-        let reset = {
-            let instance = enter_plugin(&data_from_plugin::<P>(plugin).plugin);
-            cleared(instance.params())
-        };
-        {
-            let instance = enter_plugin(&data_from_plugin::<P>(plugin).plugin);
-            seed(instance.params());
-        }
-        (api.deactivate.unwrap())(plugin);
-        let deactivate = {
-            let instance = enter_plugin(&data_from_plugin::<P>(plugin).plugin);
-            cleared(instance.params())
-        };
-        (api.destroy.unwrap())(plugin);
-        [reset, deactivate]
     }
 }
 
@@ -3582,43 +3631,21 @@ fn parameter_indices(
         .collect()
 }
 
-/// IDs whose runtime presentation marks them stepped, sorted.
-fn stepped_ids(
-    infos: &[ParamInfo],
-    mut presentation: impl FnMut(u32) -> Option<moose_params::ParameterPresentation>,
-) -> Vec<u32> {
-    let mut ids: Vec<u32> = infos
-        .iter()
-        .filter(|info| presentation(info.id).is_some_and(|p| p.stepped))
-        .map(|info| info.id)
-        .collect();
-    ids.sort_unstable();
-    ids
-}
-
 // Main thread only. Active instances keep their published index list until
 // the host restarts them; the parameter IDs and backing storage never change.
 unsafe fn refresh_parameter_list<P: PluginExport>(data: &ClapPluginData<P>) -> bool {
     let next = parameter_indices(&data.param_infos, |id| {
         data.params_arc.parameter_presentation(id)
     });
-    let next_stepped = stepped_ids(&data.param_infos, |id| {
-        data.params_arc.parameter_presentation(id)
-    });
     let mut indices = data
         .exposed_param_indices
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut stepped = data
-        .stepped_ids
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if *indices == next && *stepped == next_stepped {
+    if *indices == next {
         return false;
     }
     if data.active.load(Ordering::Relaxed) {
         drop(indices);
-        drop(stepped);
         if !data.parameter_restart_pending.swap(true, Ordering::Relaxed)
             && !data.host.is_null()
             && let Some(restart) = unsafe { (*data.host).request_restart }
@@ -3628,22 +3655,11 @@ unsafe fn refresh_parameter_list<P: PluginExport>(data: &ClapPluginData<P>) -> b
         return false;
     }
     *indices = next;
-    *stepped = next_stepped;
     drop(indices);
-    drop(stepped);
     data.parameter_restart_pending
         .store(false, Ordering::Relaxed);
-    if !data.host.is_null()
-        && let Some(get_extension) = unsafe { (*data.host).get_extension }
-    {
-        let extension = unsafe { get_extension(data.host, CLAP_EXT_REMOTE_CONTROLS.as_ptr()) }
-            .cast::<clap_host_remote_controls>();
-        if !extension.is_null()
-            && let Some(changed) = unsafe { (*extension).changed }
-        {
-            unsafe { changed(data.host) };
-        }
-    }
+    // SAFETY: this helper is called on the host main thread with live instance data.
+    unsafe { refresh_remote_control_pages(data) };
     true
 }
 
@@ -3724,16 +3740,6 @@ unsafe extern "C" fn params_get_info<P: PluginExport>(
             }
             _ => {}
         }
-        // Stepped by presentation as last published while deactivated.
-        if data
-            .stepped_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .binary_search(&info.id)
-            .is_ok()
-        {
-            flags |= CLAP_PARAM_IS_STEPPED;
-        }
         let presentation = data.params_arc.parameter_presentation(info.id);
         out.flags = presented_flags(flags, presentation.as_ref());
 
@@ -3779,7 +3785,9 @@ mod presentation_tests {
     fn presentation_hidden_overrides_static_flag() {
         let shown = ParameterPresentation {
             name: "A".into(),
-            ..ParameterPresentation::default()
+            group: String::new(),
+            hidden: false,
+            available: true,
         };
         let hidden = ParameterPresentation {
             hidden: true,
@@ -3900,6 +3908,7 @@ unsafe extern "C" fn params_flush<P: PluginExport>(
                 defer_param_change(&mut scr.deferred_params, id, value);
             }
         }
+        request_changed_presentation(data, &scr.event_list);
         let _ = flush_gui_changes::<P>(data, out_events);
     });
 }
@@ -3944,6 +3953,7 @@ fn split_group(group: &str) -> (&str, &str) {
 /// param) and these slots - so grouping a hidden param for tidiness must
 /// not silently burn one of the user's knobs on something they can't
 /// see or move.
+#[cfg(test)]
 fn remote_control_pages<'a>(
     infos: impl IntoIterator<Item = &'a ParamInfo>,
 ) -> Vec<(&'a str, Vec<u32>)> {
@@ -3965,6 +3975,69 @@ fn remote_control_pages<'a>(
         }
     }
     pages
+}
+
+/// Resolve runtime names, groups and visibility before paginating. IDs and
+/// storage remain static; a hidden/unavailable control never consumes a knob.
+fn presented_remote_control_pages(
+    infos: impl IntoIterator<Item = impl std::borrow::Borrow<ParamInfo>>,
+    mut presentation: impl FnMut(u32) -> Option<moose_params::ParameterPresentation>,
+) -> Vec<(String, Vec<u32>)> {
+    let mut pages: Vec<(String, Vec<u32>)> = Vec::new();
+    for info in infos {
+        let info = info.borrow();
+        let runtime = presentation(info.id);
+        let group = runtime.as_ref().map_or(info.group, |p| p.group.as_str());
+        let hidden = runtime.as_ref().map_or_else(
+            || info.flags.contains(ParamFlags::HIDDEN),
+            |p| p.hidden || !p.available,
+        );
+        if group.is_empty() || hidden || info.flags.contains(ParamFlags::READONLY) {
+            continue;
+        }
+        if let Some(page) = pages
+            .iter_mut()
+            .rfind(|p| p.0 == group && p.1.len() < CLAP_REMOTE_CONTROLS_COUNT)
+        {
+            page.1.push(info.id);
+        } else {
+            pages.push((group.to_owned(), vec![info.id]));
+        }
+    }
+    pages
+}
+
+/// Only structural presentation revisions rebuild the cache, never value flushes.
+unsafe fn refresh_remote_control_pages<P: PluginExport>(data: &ClapPluginData<P>) {
+    let indices = data
+        .exposed_param_indices
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pages =
+        presented_remote_control_pages(indices.iter().map(|&i| &data.param_infos[i]), |id| {
+            data.params_arc.parameter_presentation(id)
+        });
+    drop(indices);
+    let mut current = data
+        .remote_pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current == pages {
+        return;
+    }
+    *current = pages;
+    drop(current);
+    if !data.host.is_null()
+        && let Some(get_extension) = unsafe { (*data.host).get_extension }
+    {
+        let extension = unsafe { get_extension(data.host, CLAP_EXT_REMOTE_CONTROLS.as_ptr()) }
+            .cast::<clap_host_remote_controls>();
+        if !extension.is_null()
+            && let Some(changed) = unsafe { (*extension).changed }
+        {
+            unsafe { changed(data.host) };
+        }
+    }
 }
 
 /// Deterministic page id from the group name and its chunk index among
@@ -3989,11 +4062,12 @@ fn remote_controls_page_id(group: &str, chunk_index: usize) -> clap_id {
 unsafe extern "C" fn remote_controls_count<P: PluginExport>(plugin: *const clap_plugin) -> u32 {
     unsafe {
         let data = data_from_plugin::<P>(plugin);
-        let indices = data
-            .exposed_param_indices
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        len_u32(remote_control_pages(indices.iter().map(|&i| &data.param_infos[i])).len())
+        len_u32(
+            data.remote_pages
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+        )
     }
 }
 
@@ -4004,16 +4078,15 @@ unsafe extern "C" fn remote_controls_get<P: PluginExport>(
 ) -> bool {
     unsafe {
         let data = data_from_plugin::<P>(plugin);
-        let indices = data
-            .exposed_param_indices
+        let pages = data
+            .remote_pages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pages = remote_control_pages(indices.iter().map(|&i| &data.param_infos[i]));
         let page_index = page_index as usize;
         if page_index >= pages.len() {
             return false;
         }
-        let group: &str = pages[page_index].0;
+        let group: &str = &pages[page_index].0;
         let ids: &[u32] = &pages[page_index].1;
 
         // Chunk index among pages sharing this group name, so two pages
@@ -4081,37 +4154,28 @@ unsafe extern "C" fn state_save<P: PluginExport>(
         // thread publishes each block. Never touches the plugin, so it
         // can't stall a block in flight.
         let extra = save_extra(&data.snapshot);
-        let persist = data.params_arc.serialize_persist();
-        let blob = state::serialize_state(data.plugin_id_hash, &ids, &values, &extra, &persist);
-
-        // Write to the CLAP output stream
+        let Ok(persist) = data.params_arc.prepare_persist_write() else {
+            return false;
+        };
         let Some(write_fn) = (*stream).write else {
             return false;
         };
-
-        let mut offset = 0usize;
-        while offset < blob.len() {
-            let written = write_fn(
-                stream,
-                blob[offset..].as_ptr().cast::<c_void>(),
-                (blob.len() - offset) as u64,
-            );
-            if written <= 0 {
-                return false;
-            }
-            // `written > 0` checked above; on 32-bit targets the cast
-            // narrows but blob.len() also fits in usize.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let n = written as usize;
-            offset += n;
-        }
-
-        true
+        state::write_state_stream_with_persist(
+            data.plugin_id_hash,
+            &ids,
+            &values,
+            &extra,
+            persist.byte_len(),
+            P::max_host_state_bytes(),
+            |output| moose_params::write_prepared_persist(persist.as_ref(), output),
+            |bytes| write_fn(stream, bytes.as_ptr().cast::<c_void>(), bytes.len() as u64),
+        )
     })
 }
 
 /// Largest state blob a host stream may hand us. Anything bigger is a
 /// misbehaving stream (or an unrelated file), not a moose state.
+#[cfg(test)]
 const MAX_HOST_STATE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Drain a host `clap_istream` into one bounded blob. `read` fills the
@@ -4119,6 +4183,7 @@ const MAX_HOST_STATE_BYTES: usize = 32 * 1024 * 1024;
 /// negative count is a read error. A count larger than the buffer, or a
 /// stream past [`MAX_HOST_STATE_BYTES`], fails the load before any
 /// further allocation.
+#[cfg(test)]
 fn read_host_state(mut read: impl FnMut(&mut [u8]) -> i64) -> Option<Vec<u8>> {
     let mut blob = Vec::new();
     let mut buf = [0u8; 4096];
@@ -4148,24 +4213,13 @@ unsafe extern "C" fn state_load<P: PluginExport>(
             return false;
         };
 
-        let Some(blob) = read_host_state(|buf| {
-            read_fn(stream, buf.as_mut_ptr().cast::<c_void>(), buf.len() as u64)
-        }) else {
-            return false;
-        };
-
-        if blob.is_empty() {
-            return false;
-        }
-
-        // Not this plugin's envelope? Offer the bytes to the plugin's
-        // `migrate_state` hook (legacy sessions from a pre-moose
-        // build); `None` fails the load honestly.
-        let Some(deserialized) = state::parse_or_migrate::<P>(
-            &blob,
+        let Some(deserialized) = state::read_and_apply_params::<P>(
+            |buf| read_fn(stream, buf.as_mut_ptr().cast::<c_void>(), buf.len() as u64),
             data.plugin_id_hash,
             state::PluginFormat::Clap,
             None,
+            &*data.params_arc,
+            P::max_host_state_bytes(),
         ) else {
             return false;
         };
@@ -4175,7 +4229,6 @@ unsafe extern "C" fn state_load<P: PluginExport>(
         // `clap_plugin_state.load` see the restored values without
         // first running a process block - clap-validator reads back
         // immediately after a load round-trip.
-        state::apply_params(&*data.params_arc, &deserialized);
 
         if data.active.load(Ordering::Relaxed) {
             // Active: the audio thread will drain `pending_state` at the
@@ -4183,8 +4236,12 @@ unsafe extern "C" fn state_load<P: PluginExport>(
             // under its exclusive `&mut plugin`. `force_push` overwrites
             // any older pending blob - see the `pending_state` field
             // comment for why "newest wins" is right.
-            let _ = data.pending_state.force_push(deserialized);
+            data.pending_state.force_push(deserialized);
         } else {
+            // A stopped-transport params.flush may have queued a value for
+            // the next block. Recall supersedes it just as active recall
+            // supersedes deferred events in convert_input_events.
+            data.audio.enter().deferred_params.clear();
             // Inactive: no `process` will run, so the queue would never
             // drain and the plugin's custom state would stay stale until
             // the next activate. Apply the full state (params + extra)
@@ -4204,6 +4261,33 @@ unsafe extern "C" fn state_load<P: PluginExport>(
 
         true
     })
+}
+
+/// Metadata work belongs on the host main thread, including when an active
+/// plugin receives `params.flush` on its audio thread (CLAP 1.2.7 params.h).
+unsafe fn request_presentation_refresh(pending: &AtomicBool, host: *const clap_host) {
+    // SAFETY: the wrapper retains the host for this instance's full lifetime.
+    unsafe {
+        if !pending.swap(true, Ordering::AcqRel)
+            && !host.is_null()
+            && let Some(request) = (*host).request_callback
+        {
+            request(host);
+        }
+    }
+}
+
+unsafe fn request_changed_presentation<P: PluginExport>(
+    data: &ClapPluginData<P>,
+    events: &EventList,
+) {
+    if events.iter().any(|event| {
+        matches!(event.body, EventBody::ParamChange { id, .. }
+            if data.params_arc.parameter_affects_presentation(id))
+    }) {
+        // SAFETY: data owns the pending flag and retains its CLAP host.
+        unsafe { request_presentation_refresh(&data.presentation_pending, data.host) };
+    }
 }
 
 /// A recalled state may change every parameter behind the host's back, and
@@ -4280,7 +4364,7 @@ unsafe extern "C" fn preset_load_from_location<P: PluginExport>(
         // keeps offline preset browsing from stranding the custom-state
         // blob (sample buffers, wavetables) on the queue.
         if data.active.load(Ordering::Relaxed) {
-            let _ = data.pending_state.force_push(deserialized);
+            data.pending_state.force_push(deserialized);
         } else {
             let mut instance = enter_plugin(&data.plugin);
             state::apply_state(&mut *instance, &deserialized);
@@ -4332,12 +4416,13 @@ unsafe fn selected_layout_index<P: PluginExport>(
     (data.selected_config.load(Ordering::Relaxed) as usize).min(layouts_len - 1)
 }
 
-/// The CLAP main-port-type string for a channel config (`null` for a
-/// custom count, which CLAP leaves untyped).
+/// The CLAP main-port-type string for a channel config. Unsupported custom
+/// counts remain untyped.
 fn clap_port_type_ptr(channels: ChannelConfig) -> *const c_char {
     match channels {
         ChannelConfig::Mono => CLAP_PORT_MONO.as_ptr(),
         ChannelConfig::Stereo => CLAP_PORT_STEREO.as_ptr(),
+        ChannelConfig::Custom(4 | 6 | 8) => CLAP_PORT_SURROUND.as_ptr(),
         ChannelConfig::Custom(_) => ptr::null(),
     }
 }
@@ -4395,14 +4480,7 @@ unsafe extern "C" fn audio_ports_get<P: PluginExport>(
         let out = &mut *info;
         out.id = index;
         out.name = [0; CLAP_NAME_SIZE];
-        let named = if is_input {
-            None
-        } else {
-            data_from_plugin::<P>(plugin)
-                .params_arc
-                .output_port_name(index)
-        };
-        copy_str_to_buf(&mut out.name, named.as_deref().unwrap_or(bus.name));
+        copy_str_to_buf(&mut out.name, bus.name);
         out.channel_count = bus.channels.channel_count();
         out.flags = audio_port_main_flag(index, bus.kind);
         // f64 plugins take the host's 64-bit wire directly (zero
@@ -4411,15 +4489,68 @@ unsafe extern "C" fn audio_ports_get<P: PluginExport>(
         if <P as PluginRuntime>::Sample::IS_F64 {
             out.flags |= CLAP_AUDIO_PORT_SUPPORTS_64BITS | CLAP_AUDIO_PORT_PREFERS_64BITS;
         }
-        out.port_type = match bus.channels {
-            ChannelConfig::Mono => CLAP_PORT_MONO.as_ptr(),
-            ChannelConfig::Stereo => CLAP_PORT_STEREO.as_ptr(),
-            ChannelConfig::Custom(_) => ptr::null(),
-        };
+        out.port_type = clap_port_type_ptr(bus.channels);
         out.in_place_pair = CLAP_INVALID_ID;
 
         true
     }
+}
+
+// Match the canonical channel arrangements exposed by the VST3 adapter.
+fn surround_channels(channels: ChannelConfig) -> &'static [u8] {
+    match channels {
+        ChannelConfig::Custom(4) => &[0, 1, 4, 5],
+        ChannelConfig::Custom(6) => &[0, 1, 2, 3, 4, 5],
+        ChannelConfig::Custom(8) => &[0, 1, 2, 3, 4, 5, 9, 10],
+        _ => &[],
+    }
+}
+
+unsafe extern "C" fn surround_mask<P: PluginExport>(_: *const clap_plugin, mask: u64) -> bool {
+    P::bus_layouts()
+        .iter()
+        .flat_map(|layout| layout.inputs.iter().chain(&layout.outputs))
+        .filter(|bus| bus.enabled)
+        .any(|bus| {
+            let channels = surround_channels(bus.channels);
+            !channels.is_empty()
+                && channels
+                    .iter()
+                    .fold(0u64, |bits, channel| bits | (1u64 << channel))
+                    == mask
+        })
+}
+
+unsafe extern "C" fn surround_map<P: PluginExport>(
+    plugin: *const clap_plugin,
+    is_input: bool,
+    port: u32,
+    destination: *mut u8,
+    capacity: u32,
+) -> u32 {
+    let layouts = P::bus_layouts();
+    // SAFETY: CLAP supplies a live plugin instance for this main-thread callback.
+    let index = unsafe { selected_layout_index::<P>(plugin, layouts.len()) };
+    let Some(layout) = layouts.get(index) else {
+        return 0;
+    };
+    let buses = if is_input {
+        &layout.inputs
+    } else {
+        &layout.outputs
+    };
+    let Some(bus) = buses.iter().filter(|bus| bus.enabled).nth(port as usize) else {
+        return 0;
+    };
+    let channels = surround_channels(bus.channels);
+    if channels.is_empty() || destination.is_null() || (capacity as usize) < channels.len() {
+        return 0;
+    }
+    // SAFETY: CLAP supplies a writable buffer of capacity bytes, checked above.
+    unsafe {
+        ptr::copy_nonoverlapping(channels.as_ptr(), destination, channels.len());
+    }
+    len_u32(channels.len())
 }
 
 fn make_audio_ports_extension<P: PluginExport>() -> clap_plugin_audio_ports {
@@ -4463,7 +4594,7 @@ unsafe extern "C" fn audio_ports_config_get<P: PluginExport>(
             layout.total_input_channels(),
             layout.total_output_channels()
         );
-        copy_str_to_buf(&mut out.name, &name);
+        copy_str_to_buf(&mut out.name, layout.name.unwrap_or(&name));
         out.input_port_count = len_u32(layout.inputs.iter().filter(|bus| bus.enabled).count());
         out.output_port_count = len_u32(layout.outputs.iter().filter(|bus| bus.enabled).count());
         // The main port is the first enabled bus, and only if it is Main.
@@ -4555,12 +4686,11 @@ unsafe extern "C" fn note_ports_get<P: PluginExport>(
         // preferring MIDI would also pull host input through the
         // raw-MIDI path.
         out.supported_dialects = CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI;
-        out.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
-        // Explicit consumer capability, independent of MIDI2 or current zone.
-        // Output remains ordinary MIDI unless it has its own MPE contract.
-        if is_input && cfg!(feature = "mpe-input") {
+        #[cfg(feature = "mpe-input")]
+        if is_input {
             out.supported_dialects |= CLAP_NOTE_DIALECT_MIDI_MPE;
         }
+        out.preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
         // A port that opted into MIDI 2.0 also carries UMP: advertise
         // the MIDI2 dialect so the host routes `CLAP_EVENT_MIDI2` to us
         // (in) and reads it back (out). Still CLAP-preferred - MIDI2 is
@@ -4608,53 +4738,80 @@ fn make_note_ports_extension<P: PluginExport>() -> clap_plugin_note_ports {
 use clap_sys::ext::gui::CLAP_WINDOW_API_COCOA;
 #[cfg(target_os = "windows")]
 use clap_sys::ext::gui::CLAP_WINDOW_API_WIN32;
-#[cfg(target_os = "linux")]
-use clap_sys::ext::gui::CLAP_WINDOW_API_X11;
 use clap_sys::ext::gui::{
     CLAP_EXT_GUI, clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window,
 };
+#[cfg(target_os = "linux")]
+use clap_sys::ext::gui::{CLAP_WINDOW_API_WAYLAND, CLAP_WINDOW_API_X11};
 
 unsafe extern "C" fn gui_is_api_supported<P: PluginExport>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
     api: *const c_char,
     is_floating: bool,
 ) -> bool {
-    unsafe { gui_api_supported(api, is_floating) }
-}
-
-#[cfg_attr(
-    target_os = "linux",
-    expect(unused_variables, reason = "X11 is offered embedded and floating alike")
-)]
-unsafe fn gui_api_supported(api: *const c_char, is_floating: bool) -> bool {
-    unsafe {
-        if api.is_null() {
+    #[cfg(not(target_os = "linux"))]
+    let _ = plugin;
+    if api.is_null() {
+        return false;
+    }
+    run_extern_callback_with::<P, bool>("CLAP", "gui_is_api_supported", false, || unsafe {
+        let api = CStr::from_ptr(api);
+        #[cfg(target_os = "linux")]
+        if api == CLAP_WINDOW_API_WAYLAND {
+            if !is_floating {
+                return false;
+            }
+            let data = data_from_plugin::<P>(plugin);
+            let mut gui = data.gui.enter();
+            if gui.editor.is_none() {
+                gui.editor = (data.editor_builder)(data.params_arc.clone());
+            }
+            return gui
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.supports_floating_wayland());
+        }
+        #[cfg(target_os = "linux")]
+        if api == CLAP_WINDOW_API_X11 && is_floating {
+            let data = data_from_plugin::<P>(plugin);
+            let mut gui = data.gui.enter();
+            if gui.editor.is_none() {
+                gui.editor = (data.editor_builder)(data.params_arc.clone());
+            }
+            return gui
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.supports_floating_x11());
+        }
+        if is_floating {
             return false;
         }
-        let api = CStr::from_ptr(api);
         #[cfg(target_os = "macos")]
         if api == CLAP_WINDOW_API_COCOA {
-            return !is_floating;
+            return true;
         }
         #[cfg(target_os = "windows")]
         if api == CLAP_WINDOW_API_WIN32 {
-            return !is_floating;
+            return true;
         }
-        // X11 is embedded in a host's X window (XWayland included), or floating
-        // as the editor's own top-level for a host that cannot embed (Wayland).
         #[cfg(target_os = "linux")]
         if api == CLAP_WINDOW_API_X11 {
             return true;
         }
         false
-    }
+    })
 }
 
 unsafe extern "C" fn gui_get_preferred_api<P: PluginExport>(
-    _plugin: *const clap_plugin,
+    plugin: *const clap_plugin,
     api: *mut *const c_char,
     is_floating: *mut bool,
 ) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    let _ = plugin;
+    if api.is_null() || is_floating.is_null() {
+        return false;
+    }
     unsafe {
         #[cfg(target_os = "macos")]
         {
@@ -4670,6 +4827,18 @@ unsafe extern "C" fn gui_get_preferred_api<P: PluginExport>(
         }
         #[cfg(target_os = "linux")]
         {
+            // Embedded X11 whenever an X server (incl. XWayland) is reachable:
+            // embedding hosts such as Bitwig follow this preference and never
+            // show a floating window. Floating Wayland stays available to
+            // hosts that request it, and is preferred only without X11.
+            if std::env::var_os("DISPLAY").is_none()
+                && std::env::var_os("WAYLAND_DISPLAY").is_some()
+                && gui_is_api_supported::<P>(plugin, CLAP_WINDOW_API_WAYLAND.as_ptr(), true)
+            {
+                *api = CLAP_WINDOW_API_WAYLAND.as_ptr();
+                *is_floating = true;
+                return true;
+            }
             *api = CLAP_WINDOW_API_X11.as_ptr();
             *is_floating = false;
             return true;
@@ -4687,21 +4856,33 @@ unsafe extern "C" fn gui_create<P: PluginExport>(
     // The editor builder is author code; firewall its construction so a
     // panic can't unwind across the C ABI (false = "no editor created").
     run_extern_callback_with::<P, bool>("CLAP", "gui_create", false, || unsafe {
-        let data = data_from_plugin::<P>(plugin);
-        let mut gui = data.gui.enter();
-        if gui.gui_created {
-            return true;
-        }
-        // Refuse a window API or mode this plug-in does not offer. Accepting
-        // it would build an editor no `set_parent` or `show` can ever open.
-        if !gui_api_supported(api, is_floating) {
+        if !gui_is_api_supported::<P>(plugin, api, is_floating) {
             return false;
         }
-        gui.floating = is_floating;
+        let data = data_from_plugin::<P>(plugin);
+        let mut gui = data.gui.enter();
+        let mode = if !is_floating {
+            GuiMode::Embedded
+        } else if CStr::from_ptr(api).to_bytes() == b"x11" {
+            GuiMode::FloatingX11
+        } else {
+            GuiMode::FloatingWayland
+        };
+        if gui.gui_created {
+            return gui.mode == mode;
+        }
         // Built through the cached lock-free editor factory, so opening
         // the GUI never stalls the audio thread (and `--shell` rebuilds
         // from the reloaded dylib).
-        gui.editor = (data.editor_builder)(data.params_arc.clone());
+        if gui.editor.is_none() {
+            gui.editor = (data.editor_builder)(data.params_arc.clone());
+        }
+        gui.mode = mode;
+        data.floating_mode.store(is_floating, Ordering::Release);
+        if is_floating {
+            data.host_scale.store(0, Ordering::Relaxed);
+        }
+        gui.title = resolved_name(&data.info).into();
         // Each `create` builds a fresh editor, but the host's scale lives
         // on the instance and outlives `destroy`. A host that sets it only
         // once, or calls `set_scale` before `create`, would leave the new
@@ -4723,8 +4904,10 @@ unsafe extern "C" fn gui_destroy<P: PluginExport>(plugin: *const clap_plugin) {
         // cell (e.g. a stray `request_resize`).
         let editor = {
             let mut gui = data.gui.enter();
+            data.floating_visible.store(false, Ordering::Release);
+            data.floating_closed.store(false, Ordering::Release);
+            gui.visible = false;
             gui.gui_created = false;
-            gui.floating = false;
             gui.editor.take()
         };
         // Both `editor.close()` and the `Box<dyn Editor>` drop run author
@@ -4753,6 +4936,9 @@ unsafe extern "C" fn gui_set_scale<P: PluginExport>(
             return false;
         }
         let data = data_from_plugin::<P>(plugin);
+        if data.gui.enter().mode != GuiMode::Embedded {
+            return false;
+        }
         data.set_host_scale(scale);
         if let Some(ref mut editor) = data.gui.enter().editor {
             editor.set_scale_factor(scale);
@@ -4799,6 +4985,7 @@ unsafe extern "C" fn gui_get_size<P: PluginExport>(
             apply_physical_resize(editor.as_mut(), pw, ph, data.host_scale());
         }
         if let Some(ref editor) = gui.editor {
+            data.note_window_scale(editor.as_ref());
             let (w, h) = editor.size();
             // Like VST3, the CLAP spec describes gui size as pixels, but
             // macOS AppKit handles Retina backing automatically. On macOS
@@ -4855,9 +5042,67 @@ unsafe extern "C" fn gui_set_parent<P: PluginExport>(
     })
 }
 
-/// The editor's side of this plug-in: the closures it reads and writes
-/// parameters, state and transport through. Embedded and floating windows share it.
-unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> PluginContext {
+unsafe fn gui_set_parent_inner<P: PluginExport>(
+    plugin: *const clap_plugin,
+    window: *const clap_window,
+) -> bool {
+    unsafe {
+        if window.is_null() || !gui_is_api_supported::<P>(plugin, (*window).api, false) {
+            return false;
+        }
+        let data = data_from_plugin::<P>(plugin);
+        let mut gui = data.gui.enter();
+        if !gui.gui_created || gui.mode != GuiMode::Embedded {
+            return false;
+        }
+        let Some(editor) = gui.editor.as_mut() else {
+            return false;
+        };
+
+        #[cfg(target_os = "macos")]
+        let parent_ptr = (*window).specific.cocoa;
+        #[cfg(target_os = "windows")]
+        let parent_ptr = (*window).specific.win32;
+        #[cfg(target_os = "linux")]
+        let parent_ptr = (*window).specific.ptr;
+
+        if parent_ptr.is_null() {
+            return false;
+        }
+
+        let context = editor_context::<P>(plugin);
+
+        #[cfg(target_os = "macos")]
+        let handle = RawWindowHandle::AppKit(parent_ptr);
+        #[cfg(target_os = "windows")]
+        let handle = RawWindowHandle::Win32(parent_ptr);
+        #[cfg(target_os = "linux")]
+        let handle = RawWindowHandle::X11(parent_ptr as u64);
+
+        editor.open(handle, context);
+        // baseview attaches its child NSView at the parent's
+        // `(0, 0)`. NSView's coordinate system is unflipped, so
+        // `(0, 0)` is the parent's bottom-left - which renders the
+        // editor anchored to the bottom-left of Reaper's plugin
+        // area when Reaper opens the window at a size larger than
+        // the editor's natural dimensions (the common case for
+        // backends whose `editor.set_size` doesn't actually apply,
+        // e.g. vizia: Reaper falls back to a default plugin-window
+        // size and our child sits in the corner of all that extra
+        // space). Re-anchor the child to the parent's top with a
+        // fully-fixed autoresize mask (`0`) - the parent grows the
+        // empty space below/right of the child rather than dragging
+        // the child along. We re-pin per-frame from the editor
+        // (`reanchor_to_superview_top` in `on_frame`) since
+        // baseview's `setFrameSize:` notifications during embed can
+        // override the origin we set here.
+        #[cfg(target_os = "macos")]
+        anchor_child_to_top(parent_ptr);
+        true
+    }
+}
+
+unsafe fn editor_context<P: PluginExport>(plugin: *const clap_plugin) -> PluginContext {
     unsafe {
         let data = data_from_plugin::<P>(plugin);
         let params = Arc::clone(&data.params_arc);
@@ -4886,6 +5131,7 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
         let request_flush2 = request_flush;
         let request_flush3 = request_flush;
         let needs_rescan = data.needs_rescan.clone();
+        let presentation_pending = data.presentation_pending.clone();
         let host_for_callback = SendPtr::new(data.host);
         let params_for_set = params.clone();
         let params_for_get = params.clone();
@@ -4901,16 +5147,27 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
                     // Push can fail only if the audio thread hasn't
                     // drained for `GUI_QUEUE_CAPACITY` gestures.
                     // request_flush below pokes the host to call
-                    // back; needs_rescan in set_param ensures the
-                    // param tree picks up the latest plain values
-                    // even if a begin/end pair gets dropped.
+                    // back; a value the queue drops falls back to a
+                    // values rescan in set_param.
                     let _ = gui_changes.push(GuiParamChange::GestureBegin(id));
                     request_flush();
                 }),
                 set_param: Box::new(move |id, value| {
                     let plain = params_for_set.set_normalized_returning_plain(id, value);
-                    let _ = gui_changes2.push(GuiParamChange::Value(id, plain));
+                    if params_for_set.parameter_affects_presentation(id) {
+                        request_presentation_refresh(
+                            &presentation_pending,
+                            host_for_callback.as_ptr(),
+                        );
+                    }
+                    let queued = gui_changes2.push(GuiParamChange::Value(id, plain)).is_ok();
                     request_flush2();
+                    // The queued PARAM_VALUE event is how the host hears
+                    // this edit. A values rescan per drag frame made hosts
+                    // (Bitwig) re-read every parameter on the main thread
+                    // mid-gesture, so it is only the fallback for a value
+                    // the full queue dropped.
+                    //
                     // Symmetry with the host-pointer null guards at
                     // `:297, :365, :1404`. CLAP guarantees a valid
                     // host on init, but a host that creates a plugin
@@ -4919,7 +5176,8 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
                     // null; the deref below would crash inside the
                     // GUI thread.
                     let host_ptr = host_for_callback.as_ptr();
-                    if !needs_rescan.swap(true, Ordering::Relaxed)
+                    if !queued
+                        && !needs_rescan.swap(true, Ordering::Relaxed)
                         && !host_ptr.is_null()
                         && let Some(req_cb) = (*host_ptr).request_callback
                     {
@@ -4937,7 +5195,11 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
                         // Read `host_scale` live (it's atomic) so a
                         // `gui_set_scale` after the editor opened is reflected
                         // instead of using a stale snapshot.
-                        let host_scale = data_from_plugin::<P>(plugin_ptr.as_ptr()).host_scale();
+                        let data = data_from_plugin::<P>(plugin_ptr.as_ptr());
+                        if data.floating_mode.load(Ordering::Acquire) {
+                            return false;
+                        }
+                        let host_scale = data.host_scale();
                         request_host_resize(host_ptr.as_ptr(), host_scale, lw, lh)
                     }
                 }),
@@ -4972,7 +5234,7 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
                     // drains the queue while active; while inactive the main
                     // thread drains it in `state_save` / `deactivate`, so an
                     // edit made in that window is neither lost nor stranded.
-                    let _ = pending_state_for_set.force_push(state::DeserializedState {
+                    pending_state_for_set.force_push(state::DeserializedState {
                         params: Vec::new(),
                         extra: Some(bytes),
                         persist: Vec::new(),
@@ -4983,77 +5245,7 @@ unsafe fn gui_plugin_context<P: PluginExport>(plugin: *const clap_plugin) -> Plu
             params_for_ctx,
         )
         .with_tasks(task_spawner_for_ctx)
-    }
-}
-
-unsafe fn gui_set_parent_inner<P: PluginExport>(
-    plugin: *const clap_plugin,
-    window: *const clap_window,
-) -> bool {
-    unsafe {
-        let Some(parent_ptr) = gui_parent_pointer(window) else {
-            return false;
-        };
-        let data = data_from_plugin::<P>(plugin);
-        let mut gui = data.gui.enter();
-        // A floating GUI is its own window: the host does not parent it.
-        if gui.floating {
-            return false;
-        }
-        let Some(editor) = gui.editor.as_mut() else {
-            return false;
-        };
-        let context = gui_plugin_context::<P>(plugin);
-
-        #[cfg(target_os = "macos")]
-        let handle = RawWindowHandle::AppKit(parent_ptr);
-        #[cfg(target_os = "windows")]
-        let handle = RawWindowHandle::Win32(parent_ptr);
-        #[cfg(target_os = "linux")]
-        let handle = RawWindowHandle::X11(parent_ptr as u64);
-
-        editor.open(handle, context);
-        // baseview attaches its child NSView at the parent's
-        // `(0, 0)`. NSView's coordinate system is unflipped, so
-        // `(0, 0)` is the parent's bottom-left - which renders the
-        // editor anchored to the bottom-left of Reaper's plugin
-        // area when Reaper opens the window at a size larger than
-        // the editor's natural dimensions (the common case for
-        // backends whose `editor.set_size` doesn't actually apply,
-        // e.g. vizia: Reaper falls back to a default plugin-window
-        // size and our child sits in the corner of all that extra
-        // space). Re-anchor the child to the parent's top with a
-        // fully-fixed autoresize mask (`0`) - the parent grows the
-        // empty space below/right of the child rather than dragging
-        // the child along. We re-pin per-frame from the editor
-        // (`reanchor_to_superview_top` in `on_frame`) since
-        // baseview's `setFrameSize:` notifications during embed can
-        // override the origin we set here.
-        #[cfg(target_os = "macos")]
-        anchor_child_to_top(parent_ptr);
-        // `open` returns nothing. On Linux the window's own report says whether
-        // it opened: a parent that is not a window leaves none, and the host must hear it.
-        #[cfg(target_os = "linux")]
-        return editor.window_scale().is_some();
-        #[cfg(not(target_os = "linux"))]
-        true
-    }
-}
-
-/// Validate the declared native representation before reading its union member
-/// or entering the editor. The pointer is still host-owned, never dereferenced here.
-unsafe fn gui_parent_pointer(window: *const clap_window) -> Option<*mut c_void> {
-    unsafe {
-        if window.is_null() || !gui_api_supported((*window).api, false) {
-            return None;
-        }
-        #[cfg(target_os = "macos")]
-        let parent = (*window).specific.cocoa;
-        #[cfg(target_os = "windows")]
-        let parent = (*window).specific.win32;
-        #[cfg(target_os = "linux")]
-        let parent = (*window).specific.ptr;
-        (!parent.is_null()).then_some(parent)
+        .with_notification_delivery(moose_core::editor::EditorNotificationDelivery::QueuedEdits)
     }
 }
 
@@ -5129,48 +5321,69 @@ unsafe fn anchor_child_to_top(parent: *mut c_void) {
     }
 }
 
-/// A floating GUI's window opens here. An embedded one is opened by `set_parent`
-/// and is already shown, so there is nothing to do.
 unsafe extern "C" fn gui_show<P: PluginExport>(plugin: *const clap_plugin) -> bool {
-    // `Editor::open` and `window_scale` are author code; firewall them (false = "not shown").
     run_extern_callback_with::<P, bool>("CLAP", "gui_show", false, || unsafe {
         let data = data_from_plugin::<P>(plugin);
         let mut gui = data.gui.enter();
-        if !gui.floating {
+        if !gui.gui_created {
+            return false;
+        }
+        if gui.mode == GuiMode::Embedded
+            || (gui.visible && data.floating_visible.load(Ordering::Acquire))
+        {
             return true;
         }
-        let context = gui_plugin_context::<P>(plugin);
+        gui.visible = false;
+        let title = gui.title.clone();
+        let mode = gui.mode;
         let Some(editor) = gui.editor.as_mut() else {
             return false;
         };
-        // The window's own state is the truth: a window the user closed with its
-        // close button is no longer open, and is reopened here.
-        if editor.window_scale().is_some() {
-            return true;
-        }
-        // `open` returns nothing, so the window's own report says whether it opened.
-        editor.open(FLOATING_WINDOW, context);
-        editor.window_scale().is_some()
+        let visible = data.floating_visible.clone();
+        let closed = data.floating_closed.clone();
+        let host = SendPtr::new(data.host);
+        visible.store(true, Ordering::Release);
+        let on_close: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if visible.swap(false, Ordering::AcqRel) {
+                closed.store(true, Ordering::Release);
+                let host = host.as_ptr();
+                if !host.is_null()
+                    && let Some(request) = (*host).request_callback
+                {
+                    request(host);
+                }
+            }
+        });
+        let opened = match mode {
+            GuiMode::FloatingX11 => {
+                editor.open_floating_x11(editor_context::<P>(plugin), &title, on_close)
+            }
+            GuiMode::FloatingWayland => {
+                editor.open_floating_wayland(editor_context::<P>(plugin), &title, on_close)
+            }
+            GuiMode::Embedded => false,
+        };
+        data.floating_visible.store(opened, Ordering::Release);
+        data.note_window_scale(editor.as_ref());
+        gui.visible = opened;
+        opened
     })
 }
 
-/// Closes a floating window. The editor keeps its state and reopens on `show`.
 unsafe extern "C" fn gui_hide<P: PluginExport>(plugin: *const clap_plugin) -> bool {
-    // The editor leaves the cell while it closes, as `gui_destroy` does, so its
-    // teardown cannot re-enter the cell.
     run_extern_callback_with::<P, bool>("CLAP", "gui_hide", false, || unsafe {
         let data = data_from_plugin::<P>(plugin);
-        let mut editor = {
-            let mut gui = data.gui.enter();
-            if !gui.floating {
-                return true;
-            }
-            gui.editor.take()
-        };
-        if let Some(editor) = editor.as_mut() {
-            editor.close();
+        let mut gui = data.gui.enter();
+        if !gui.gui_created {
+            return false;
         }
-        data.gui.enter().editor = editor;
+        if gui.mode != GuiMode::Embedded {
+            data.floating_visible.store(false, Ordering::Release);
+            if let Some(editor) = gui.editor.as_mut() {
+                editor.close();
+            }
+            gui.visible = false;
+        }
         true
     })
 }
@@ -5208,10 +5421,9 @@ unsafe extern "C" fn gui_get_resize_hints<P: PluginExport>(
     })
 }
 
-/// Not supported: a floating window is its own top-level and is not made
-/// transient for the host's window, so the host gets `false` and carries on.
-/// Present as `Some` for the same Bitwig probe-quirk described on
-/// `gui_get_resize_hints`.
+/// CLAP defines no exported Wayland parent token/connection. A host-owned
+/// `wl_surface` cannot be used on our independent display connection. Return false
+/// rather than treating a foreign proxy pointer as our own Wayland object.
 unsafe extern "C" fn gui_set_transient<P: PluginExport>(
     _plugin: *const clap_plugin,
     _window: *const clap_window,
@@ -5219,13 +5431,25 @@ unsafe extern "C" fn gui_set_transient<P: PluginExport>(
     false
 }
 
-/// Stub: the editor renders its own title bar; we don't need the host's
-/// hint. Present as `Some` for the same Bitwig probe-quirk described
-/// on `gui_get_resize_hints`.
+/// Retain a floating title before show and apply changes to an open toplevel.
 unsafe extern "C" fn gui_suggest_title<P: PluginExport>(
-    _plugin: *const clap_plugin,
-    _title: *const c_char,
+    plugin: *const clap_plugin,
+    title: *const c_char,
 ) {
+    if title.is_null() {
+        return;
+    }
+    run_extern_callback_with::<P, ()>("CLAP", "gui_suggest_title", (), || unsafe {
+        let data = data_from_plugin::<P>(plugin);
+        let mut gui = data.gui.enter();
+        gui.title = CStr::from_ptr(title).to_string_lossy().into_owned();
+        let title = gui.title.clone();
+        if gui.mode != GuiMode::Embedded
+            && let Some(editor) = gui.editor.as_mut()
+        {
+            editor.set_floating_title(&title);
+        }
+    });
 }
 
 /// Ask the host to resize its window to a logical size via
@@ -5437,6 +5661,7 @@ struct Extensions<P: PluginExport> {
     preset_load: clap_plugin_preset_load,
     audio_ports: clap_plugin_audio_ports,
     audio_ports_config: clap_plugin_audio_ports_config,
+    surround: clap_plugin_surround,
     note_ports: clap_plugin_note_ports,
     gui: clap_plugin_gui,
     latency: clap_plugin_latency,
@@ -5495,6 +5720,10 @@ impl<P: PluginExport> Extensions<P> {
             preset_load: make_preset_load_extension::<P>(),
             audio_ports: make_audio_ports_extension::<P>(),
             audio_ports_config: make_audio_ports_config_extension::<P>(),
+            surround: clap_plugin_surround {
+                is_channel_mask_supported: Some(surround_mask::<P>),
+                get_channel_map: Some(surround_map::<P>),
+            },
             note_ports: make_note_ports_extension::<P>(),
             gui: make_gui_extension::<P>(),
             latency: clap_plugin_latency {
@@ -5517,7 +5746,7 @@ unsafe extern "C" fn clap_plugin_get_extension<P: PluginExport>(
     id: *const c_char,
 ) -> *const c_void {
     unsafe {
-        if id.is_null() {
+        if id.is_null() || plugin.is_null() {
             return ptr::null();
         }
         let ext_id = CStr::from_ptr(id);
@@ -5528,7 +5757,16 @@ unsafe extern "C" fn clap_plugin_get_extension<P: PluginExport>(
             return (&raw const extensions.params).cast::<c_void>();
         }
         if ext_id == CLAP_EXT_REMOTE_CONTROLS || ext_id == CLAP_EXT_REMOTE_CONTROLS_COMPAT {
-            return (&raw const extensions.remote_controls).cast::<c_void>();
+            let generated = (&raw const extensions.remote_controls).cast::<c_void>();
+            return run_extern_callback_with::<P, *const c_void>(
+                "CLAP",
+                "remote controls",
+                generated,
+                || {
+                    P::clap_extension(CLAP_EXT_REMOTE_CONTROLS)
+                        .map_or(generated, moose_core::export::CustomClapExtension::as_ptr)
+                },
+            );
         }
         if ext_id == CLAP_EXT_STATE {
             return (&raw const extensions.state).cast::<c_void>();
@@ -5542,8 +5780,15 @@ unsafe extern "C" fn clap_plugin_get_extension<P: PluginExport>(
         // Only advertise config switching when there's more than one
         // layout to switch between; a single-layout plugin is fully
         // described by `audio_ports` alone.
-        if ext_id == CLAP_EXT_AUDIO_PORTS_CONFIG && P::bus_layouts().len() > 1 {
-            return (&raw const extensions.audio_ports_config).cast::<c_void>();
+        if ext_id == CLAP_EXT_AUDIO_PORTS_CONFIG {
+            return if P::bus_layouts().len() > 1 {
+                (&raw const extensions.audio_ports_config).cast::<c_void>()
+            } else {
+                ptr::null()
+            };
+        }
+        if ext_id == CLAP_EXT_SURROUND || ext_id == CLAP_EXT_SURROUND_COMPAT {
+            return (&raw const extensions.surround).cast::<c_void>();
         }
         if ext_id == CLAP_EXT_NOTE_PORTS {
             return (&raw const extensions.note_ports).cast::<c_void>();
@@ -5560,8 +5805,111 @@ unsafe extern "C" fn clap_plugin_get_extension<P: PluginExport>(
         if ext_id == CLAP_EXT_RENDER {
             return (&raw const extensions.render).cast::<c_void>();
         }
-        ptr::null()
+        run_extern_callback_with::<P, *const c_void>(
+            "CLAP",
+            "custom extension",
+            ptr::null(),
+            || {
+                P::clap_extension(ext_id)
+                    .map_or(ptr::null(), moose_core::export::CustomClapExtension::as_ptr)
+            },
+        )
     }
+}
+
+/// Read an instance's shared parameter store without taking the DSP cell.
+///
+/// This remains available while processing. Panics are contained. The callback
+/// must follow the thread and realtime rules of the operations it performs.
+///
+/// # Safety
+/// `plugin` must be null or a live CLAP instance created for `P`. The host must
+/// not destroy the instance until this call returns.
+pub unsafe fn try_with_params<P: PluginExport, R>(
+    plugin: *const clap_plugin,
+    callback: impl FnOnce(&P::Params) -> R,
+) -> Option<R> {
+    if plugin.is_null() {
+        return None;
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: The caller guarantees the pointer and its lifetime.
+        let data = unsafe { data_from_plugin::<P>(plugin) };
+        callback(&data.params_arc)
+    }))
+    .ok()
+}
+
+/// Access an inactive instance's concrete DSP state without blocking.
+///
+/// The callback must run on the CLAP main thread. Active, busy, dynamic-shell,
+/// and mismatched-state instances return `None`. Panics are contained.
+///
+/// # Safety
+/// `plugin` must be null or a live CLAP instance created for `P`. The host must
+/// serialize this call with its main-thread lifecycle callbacks and destruction.
+pub unsafe fn try_with_dsp_state<P: PluginExport, T: 'static, R>(
+    plugin: *const clap_plugin,
+    callback: impl FnOnce(&mut T) -> R,
+) -> Option<R> {
+    // SAFETY: the caller supplies the matching live instance and serialization.
+    unsafe { access_dsp_state::<P, T, R>(plugin, DspAccess::Inactive, callback) }
+}
+
+/// Access concrete DSP state while processing is stopped, without blocking.
+///
+/// Active instances are accepted after `stop_processing`, allowing worker
+/// settlement before a same-activation reset. Running, busy, dynamic-shell,
+/// and mismatched-state instances return `None`. Panics are contained.
+///
+/// # Safety
+/// `plugin` must be null or a live CLAP instance created for `P`. Call on the
+/// CLAP main thread, serialized with every lifecycle callback and destruction.
+/// The host must not restart processing until the callback returns.
+pub unsafe fn try_with_stopped_dsp_state<P: PluginExport, T: 'static, R>(
+    plugin: *const clap_plugin,
+    callback: impl FnOnce(&mut T) -> R,
+) -> Option<R> {
+    // SAFETY: the caller supplies the matching live instance and serialization.
+    unsafe { access_dsp_state::<P, T, R>(plugin, DspAccess::Stopped, callback) }
+}
+
+#[derive(Clone, Copy)]
+enum DspAccess {
+    Inactive,
+    Stopped,
+}
+
+unsafe fn access_dsp_state<P: PluginExport, T: 'static, R>(
+    plugin: *const clap_plugin,
+    access: DspAccess,
+    callback: impl FnOnce(&mut T) -> R,
+) -> Option<R> {
+    if plugin.is_null() {
+        return None;
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: The caller guarantees the pointer and host lifecycle contract.
+        let data = unsafe { data_from_plugin::<P>(plugin) };
+        let unavailable = match access {
+            DspAccess::Inactive => data.active.load(Ordering::Acquire),
+            DspAccess::Stopped => data.processing.load(Ordering::Acquire),
+        };
+        if unavailable {
+            return None;
+        }
+        let mut instance = data.plugin.try_enter()?;
+        let mut callback = Some(callback);
+        let mut result = None;
+        instance.with_dsp_state(&mut |state| {
+            if let (Some(state), Some(callback)) = (state.downcast_mut::<T>(), callback.take()) {
+                result = Some(callback(state));
+            }
+        });
+        result
+    }))
+    .ok()
+    .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -5595,13 +5943,13 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
         let instance = P::create();
         let info = P::info();
         let plugin_id_hash = state::hash_plugin_id(info.clap_id);
-        let param_infos = instance.params().param_infos();
+        let param_infos = instance.params().param_catalog();
         let param_count = param_infos.len();
         let params_arc = instance.params_arc();
         let exposed_param_indices = Mutex::new(parameter_indices(&param_infos, |id| {
             params_arc.parameter_presentation(id)
         }));
-        let stepped_ids = Mutex::new(stepped_ids(&param_infos, |id| {
+        let remote_pages = Mutex::new(presented_remote_control_pages(param_infos.iter(), |id| {
             params_arc.parameter_presentation(id)
         }));
         let meter_store = instance.meter_store();
@@ -5630,6 +5978,9 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
             .unwrap_or(0);
 
         let data = Box::new(ClapPluginData::<P> {
+            persist_signal: None,
+            persist_pending: Arc::new(AtomicBool::new(false)),
+            host_state: ptr::null(),
             plugin: shared_plugin(instance),
             params_arc,
             meter_store,
@@ -5641,24 +5992,26 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
             selected_config: AtomicU32::new(0),
             param_infos,
             exposed_param_indices,
-            stepped_ids,
             parameter_restart_pending: AtomicBool::new(false),
             info,
             plugin_id_hash,
             host,
             host_params: ptr::null(),
+            host_latency: ptr::null(),
             host_tail: ptr::null(),
-            host_audio_ports: ptr::null(),
-            port_names_revision: AtomicU64::new(0),
-            port_names_dirty: AtomicBool::new(false),
             latency_dirty: AtomicBool::new(false),
             gui_changes: Arc::new(GuiChangeQueue::new(GUI_QUEUE_CAPACITY)),
             pending_state: Arc::new(StateLoadQueue::new(1)),
             active: AtomicBool::new(false),
+            processing: AtomicBool::new(false),
             render_mode: AtomicU8::new(ProcessMode::Realtime.as_u8()),
             needs_rescan: Arc::new(AtomicBool::new(false)),
+            floating_mode: AtomicBool::new(false),
+            floating_visible: Arc::new(AtomicBool::new(false)),
+            floating_closed: Arc::new(AtomicBool::new(false)),
             presentation_revision: AtomicU64::new(0),
-            presentation_wake: AtomicBool::new(false),
+            presentation_pending: Arc::new(AtomicBool::new(false)),
+            remote_pages,
             transport_slot: TransportSlot::new(),
             host_scale: AtomicU64::new(0),
             window_scale: AtomicU64::new(0),
@@ -5682,7 +6035,9 @@ pub unsafe fn create_plugin_instance<P: PluginExport>(
             gui: PluginCell::new(ClapGui {
                 editor: None,
                 gui_created: false,
-                floating: false,
+                mode: GuiMode::Embedded,
+                visible: false,
+                title: String::new(),
             }),
         });
 
@@ -5778,7 +6133,10 @@ macro_rules! export_clap {
                 host: *const clap_host,
                 plugin_id: *const c_char,
             ) -> *const clap_plugin {
-                if plugin_id.is_null() {
+                if plugin_id.is_null()
+                    || host.is_null()
+                    || !clap_sys::version::clap_version_is_compatible((*host).clap_version)
+                {
                     return ptr::null();
                 }
                 let requested_id = CStr::from_ptr(plugin_id);
@@ -5836,55 +6194,6 @@ macro_rules! export_clap {
 }
 
 #[cfg(test)]
-mod gui_parent_tests {
-    use super::*;
-    use clap_sys::ext::gui::clap_window_handle;
-
-    #[test]
-    fn parent_api_is_validated_before_native_union_interpretation() {
-        #[cfg(target_os = "macos")]
-        let native = CLAP_WINDOW_API_COCOA;
-        #[cfg(target_os = "windows")]
-        let native = CLAP_WINDOW_API_WIN32;
-        #[cfg(target_os = "linux")]
-        let native = CLAP_WINDOW_API_X11;
-        let mut token = 0u8;
-        let parent = (&mut token as *mut u8).cast::<c_void>();
-        let mut window = clap_window {
-            api: native.as_ptr(),
-            specific: clap_window_handle { ptr: parent },
-        };
-        // No native window or renderer is created: the exact parser used by
-        // set_parent must return the unchanged host-owned pointer only for
-        // the current platform's declared representation.
-        unsafe {
-            assert!(gui_api_supported(native.as_ptr(), false));
-            // Floating is offered only where a host cannot embed: X11 on Linux.
-            assert_eq!(gui_api_supported(native.as_ptr(), true), cfg!(target_os = "linux"));
-            assert!(!gui_api_supported(c"wayland".as_ptr(), true));
-            assert!(!gui_api_supported(c"wayland".as_ptr(), false));
-            assert_eq!(gui_parent_pointer(&window), Some(parent));
-            for api in [c"cocoa", c"win32", c"x11", c"wayland", c"unknown", c"COCOA"] {
-                window.api = api.as_ptr();
-                assert_eq!(
-                    gui_parent_pointer(&window),
-                    (api == native).then_some(parent)
-                );
-            }
-            window.api = ptr::null();
-            assert_eq!(gui_parent_pointer(&window), None);
-            assert!(!gui_api_supported(ptr::null(), false));
-            window.api = native.as_ptr();
-            window.specific = clap_window_handle {
-                ptr: ptr::null_mut(),
-            };
-            assert_eq!(gui_parent_pointer(&window), None);
-            assert_eq!(gui_parent_pointer(ptr::null()), None);
-        }
-    }
-}
-
-#[cfg(test)]
 mod transport_tests {
     use super::{
         CLAP_SECTIME_FACTOR, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, build_transport_info,
@@ -5925,9 +6234,48 @@ mod channel_slice_tests {
         let mut scratch = Vec::<f32>::new();
         // SAFETY: the null pointer is the unconnected-port case under test;
         // `scratch` outlives the returned slice within this call.
-        let slice = unsafe { input_channel_slice::<f32, f32>(std::ptr::null(), nf, &mut scratch) };
+        let slice =
+            unsafe { input_channel_slice::<f32, f32>(std::ptr::null(), nf, &mut scratch, false) };
         assert_eq!(slice.len(), nf);
         assert!(slice.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn in_place_host_input_survives_output_writes() {
+        use super::{clap_audio_buffer, clap_process, input_overlaps_outputs};
+        let mut samples = [0.25_f32, -0.75, 0.5];
+        let input_ptr = samples.as_mut_ptr();
+        let mut outputs = [input_ptr];
+        let mut bus = clap_audio_buffer {
+            data32: outputs.as_mut_ptr(),
+            data64: std::ptr::null_mut(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        // SAFETY: all-zero is valid for the unused CLAP fields, which are not read here.
+        let mut process: clap_process = unsafe { std::mem::zeroed() };
+        process.audio_outputs = &raw mut bus;
+        process.audio_outputs_count = 1;
+        process.frames_count = u32::try_from(samples.len()).unwrap();
+        let mut scratch = Vec::with_capacity(samples.len());
+        // SAFETY: the bus, channel pointer, and sample array are alive for this call.
+        let copy = unsafe {
+            input_overlaps_outputs(input_ptr.cast(), std::mem::size_of_val(&samples), &process)
+        };
+        let input = unsafe {
+            input_channel_slice::<f32, f32>(input_ptr, samples.len(), &mut scratch, copy)
+        };
+        // SAFETY: input now refers to scratch, not the host output array.
+        let output =
+            unsafe { output_channel_slice::<f32, f32>(input_ptr, samples.len(), &mut Vec::new()) };
+        for (dst, src) in output.iter_mut().zip(input) {
+            *dst = *src * 2.0;
+        }
+        assert_eq!(
+            samples.map(f32::to_bits),
+            [0.5_f32, -1.5, 1.0].map(f32::to_bits)
+        );
     }
 
     /// A null output channel is a block-length discard buffer the plugin
@@ -6057,7 +6405,7 @@ mod sounding_notes_tests {
         // Drained notes are cleared - a second wildcard finds nothing.
         hits.clear();
         s.drain_matching(0, Some(3), None, |ch, k| hits.push((ch, k)));
-        assert!(hits.is_empty());
+        assert_eq!(hits, []);
 
         // Channel wildcard, concrete key.
         s.set(0, 5, 60);
@@ -6084,7 +6432,7 @@ mod sounding_notes_tests {
         s.clear(0, 0, 60);
         let mut hits = Vec::new();
         s.drain_matching(0, None, None, |ch, k| hits.push((ch, k)));
-        assert!(hits.is_empty());
+        assert_eq!(hits, []);
     }
 
     #[test]
@@ -6157,9 +6505,30 @@ mod remote_controls_tests {
     }
 
     #[test]
+    fn runtime_pages_use_live_groups_and_visibility_without_changing_ids() {
+        let infos = std::sync::Arc::new(moose_params::ParamCatalog::new(vec![
+            info(7, "OLD"),
+            info(8, "OLD"),
+            info(9, "OLD"),
+        ]));
+        let pages = super::presented_remote_control_pages(infos.iter(), |id| {
+            Some(ParameterPresentation {
+                name: format!("Control {id}"),
+                group: "Modulators/LFO 1".into(),
+                hidden: id == 8,
+                available: id != 9,
+            })
+        });
+        assert_eq!(pages, vec![("Modulators/LFO 1".into(), vec![7])]);
+        assert_eq!(infos.iter().map(|p| p.id).collect::<Vec<_>>(), [7, 8, 9]);
+        let pages = super::presented_remote_control_pages(infos.iter(), |_| None);
+        assert_eq!(pages, vec![("OLD".into(), vec![7, 8, 9])]);
+    }
+
+    #[test]
     fn ungrouped_params_produce_no_page() {
         let infos = vec![info(0, ""), info(1, "")];
-        assert!(remote_control_pages(&infos).is_empty());
+        assert_eq!(remote_control_pages(&infos), []);
     }
 
     #[test]
@@ -6316,7 +6685,7 @@ mod deferred_param_tests {
             })
             .collect();
         assert_eq!(seen, vec![(0, 7, 0.6), (0, 8, 0.1), (32, 7, 0.7)]);
-        assert!(deferred.is_empty());
+        assert_eq!(deferred, []);
     }
 
     #[test]
@@ -6325,7 +6694,7 @@ mod deferred_param_tests {
         let mut list = EventList::with_capacity(8);
         replay_deferred_params(&mut list, &mut deferred, true);
         assert_eq!(list.iter().count(), 0);
-        assert!(deferred.is_empty());
+        assert_eq!(deferred, []);
     }
 }
 
@@ -6345,6 +6714,894 @@ mod bus_kind_tests {
     }
 }
 
+// The derive's umbrella paths resolve locally for this shared test fixture.
 #[cfg(test)]
-#[path = "../../moose-state-queue-tests.rs"]
-mod state_retirement_tests;
+extern crate self as moose;
+#[cfg(test)]
+use moose_core as core;
+#[cfg(test)]
+use moose_params as params;
+#[cfg(test)]
+#[path = "../../../test-support/host_value_fixture.rs"]
+mod host_value_fixture;
+
+#[cfg(test)]
+mod host_value_tests {
+    use super::host_value_fixture::TestPlugin;
+    use super::*;
+    use moose_params::Params;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static RESCAN: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "C" fn rescan(_: *const clap_host, flags: u32) {
+        RESCAN.fetch_or(flags, Ordering::Relaxed);
+    }
+    unsafe extern "C" fn extension(_: *const clap_host, id: *const c_char) -> *const c_void {
+        static PARAMS: clap_host_params = clap_host_params {
+            rescan: Some(rescan),
+            clear: None,
+            request_flush: None,
+        };
+        // SAFETY: host extensions are queried with a terminated CLAP identifier.
+        if unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+            (&raw const PARAMS).cast::<c_void>()
+        } else {
+            ptr::null()
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "unchanged storage values must compare exactly"
+    )]
+    fn ffi_text_hooks_and_rescan_preserve_declared_slot_range() {
+        // SAFETY: own the plugin, descriptor, host, and all callback buffers.
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.get_extension = Some(extension);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let plugin = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(!plugin.is_null());
+            assert!(clap_plugin_init::<TestPlugin>(plugin));
+            let params = data_from_plugin::<TestPlugin>(plugin).params_arc.clone();
+            let mut info: clap_param_info = std::mem::zeroed();
+            assert!(params_get_info::<TestPlugin>(plugin, 1, &raw mut info));
+            assert_eq!((info.id, info.min_value, info.max_value), (1, 0., 1.));
+            let normalized = 49. / 96.;
+            params.set_plain(1, normalized);
+            let mut stored = 0.;
+            assert!(params_get_value::<TestPlugin>(plugin, 1, &raw mut stored));
+            assert_eq!(stored, normalized);
+            let mut buffer = [0_i8; 128];
+            assert!(params_value_to_text::<TestPlugin>(
+                plugin,
+                1,
+                stored,
+                buffer.as_mut_ptr(),
+                128
+            ));
+            assert_eq!(CStr::from_ptr(buffer.as_ptr()).to_str().unwrap(), "+1 st");
+            let mut parsed = -999.;
+            assert!(params_text_to_value::<TestPlugin>(
+                plugin,
+                1,
+                c"+1 st".as_ptr(),
+                &raw mut parsed
+            ));
+            assert_eq!(parsed, normalized);
+            for invalid in [c"0.5", c"nan"] {
+                assert!(!params_text_to_value::<TestPlugin>(
+                    plugin,
+                    1,
+                    invalid.as_ptr(),
+                    &raw mut parsed
+                ));
+            }
+            assert!(params_text_to_value::<TestPlugin>(
+                plugin,
+                0,
+                c"-6 dB".as_ptr(),
+                &raw mut parsed
+            ));
+            assert_eq!(parsed, -6.);
+            RESCAN.store(0, Ordering::Relaxed);
+            params.rebound.store(true, Ordering::Relaxed);
+            params.generation.fetch_add(1, Ordering::Relaxed);
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            assert_eq!(
+                RESCAN.load(Ordering::Relaxed),
+                CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_TEXT
+            );
+            assert!(params_value_to_text::<TestPlugin>(
+                plugin,
+                1,
+                stored,
+                buffer.as_mut_ptr(),
+                128
+            ));
+            assert_eq!(CStr::from_ptr(buffer.as_ptr()).to_str().unwrap(), "51%");
+            assert!(params_text_to_value::<TestPlugin>(
+                plugin,
+                1,
+                c"25%".as_ptr(),
+                &raw mut parsed
+            ));
+            assert_eq!(parsed, 0.25);
+            assert_eq!(params.get_plain(1), Some(normalized));
+            clap_plugin_destroy::<TestPlugin>(plugin);
+        }
+    }
+
+    static PUSHED: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "C" fn accept(_: *const clap_output_events, _: *const clap_event_header) -> bool {
+        PUSHED.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+    unsafe extern "C" fn refuse(_: *const clap_output_events, _: *const clap_event_header) -> bool {
+        false
+    }
+
+    #[test]
+    #[allow(
+        unused_assignments,
+        reason = "the ABI reader follows ctx after each event write"
+    )]
+    fn structural_flush_and_gui_edits_request_discovery_without_numeric_rescans() {
+        #[derive(Default)]
+        struct Calls {
+            callbacks: AtomicU32,
+            rescans: AtomicU32,
+        }
+        unsafe extern "C" fn request(host: *const clap_host) {
+            // SAFETY: the test retains Calls until after plugin destruction.
+            let calls = unsafe { &*((*host).host_data.cast::<Calls>()) };
+            calls.callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe extern "C" fn rescan(host: *const clap_host, flags: u32) {
+            // SAFETY: same owned host/counter lifetime as request.
+            let calls = unsafe { &*((*host).host_data.cast::<Calls>()) };
+            calls.rescans.fetch_or(flags, Ordering::Relaxed);
+        }
+        unsafe extern "C" fn extension(_: *const clap_host, name: *const c_char) -> *const c_void {
+            static PARAMS: clap_host_params = clap_host_params {
+                rescan: Some(rescan),
+                clear: None,
+                request_flush: None,
+            };
+            // SAFETY: the wrapper supplies a terminated CLAP identifier.
+            if unsafe { CStr::from_ptr(name) } == CLAP_EXT_PARAMS {
+                (&raw const PARAMS).cast()
+            } else {
+                ptr::null()
+            }
+        }
+        unsafe extern "C" fn count(_: *const clap_input_events) -> u32 {
+            1
+        }
+        unsafe extern "C" fn event(
+            events: *const clap_input_events,
+            _: u32,
+        ) -> *const clap_event_header {
+            // SAFETY: ctx points to the value event retained through flush.
+            unsafe { (*events).ctx.cast() }
+        }
+        // SAFETY: this test owns every ABI pointer and destroys the instance
+        // before its descriptor, host, counters and event buffers go away.
+        unsafe {
+            let calls = Calls::default();
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.host_data = (&raw const calls).cast_mut().cast();
+            host.get_extension = Some(extension);
+            host.request_callback = Some(request);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let plugin = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<TestPlugin>(plugin));
+            let params = data_from_plugin::<TestPlugin>(plugin).params_arc.clone();
+            params.set_plain(0, -60.);
+            params.structural_gain.store(true, Ordering::Relaxed);
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            let mut value = clap_event_param_value {
+                header: clap_event_header {
+                    size: size_of_u32::<clap_event_param_value>(),
+                    time: 0,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_PARAM_VALUE,
+                    flags: 0,
+                },
+                param_id: 1,
+                cookie: ptr::null_mut(),
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value: 0.25,
+            };
+            let inputs = clap_input_events {
+                ctx: (&raw mut value).cast(),
+                size: Some(count),
+                get: Some(event),
+            };
+            for _ in 0..128 {
+                params_flush::<TestPlugin>(plugin, &raw const inputs, ptr::null());
+            }
+            assert_eq!(calls.callbacks.load(Ordering::Relaxed), 0);
+            assert_eq!(calls.rescans.load(Ordering::Relaxed), 0);
+            value.param_id = 0;
+            value.value = -12.;
+            params_flush::<TestPlugin>(plugin, &raw const inputs, ptr::null());
+            value.value = -6.;
+            params_flush::<TestPlugin>(plugin, &raw const inputs, ptr::null());
+            assert_eq!(
+                calls.callbacks.load(Ordering::Relaxed),
+                1,
+                "coalesced without metadata polling"
+            );
+            assert_eq!(
+                calls.rescans.load(Ordering::Relaxed),
+                0,
+                "host notification waits for main"
+            );
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            assert!(params.rebound.load(Ordering::Relaxed));
+            assert_eq!(
+                calls.rescans.swap(0, Ordering::Relaxed),
+                CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_TEXT
+            );
+            let context = editor_context::<TestPlugin>(plugin);
+            context.set_param(0_u32, 0.);
+            assert_eq!(calls.callbacks.load(Ordering::Relaxed), 2);
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            assert!(!params.rebound.load(Ordering::Relaxed));
+            assert_eq!(
+                calls.rescans.load(Ordering::Relaxed),
+                CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_TEXT
+            );
+            drop(context);
+            clap_plugin_destroy::<TestPlugin>(plugin);
+        }
+    }
+
+    /// GUI values reach the host as events. A values rescan is only the
+    /// fallback for a value the host refused, never a per-edit request.
+    #[test]
+    fn gui_values_flush_as_events_and_rescan_only_when_refused() {
+        // SAFETY: own the plugin, descriptor, host, and output-event shims.
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.get_extension = Some(extension);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let plugin = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<TestPlugin>(plugin));
+            let data = data_from_plugin::<TestPlugin>(plugin);
+            for value in [0.25, 0.5] {
+                data.gui_changes
+                    .push(GuiParamChange::Value(1, value))
+                    .unwrap_or_else(|_| panic!("queue full"));
+            }
+            let out = clap_output_events {
+                ctx: ptr::null_mut(),
+                try_push: Some(accept),
+            };
+            PUSHED.store(0, Ordering::Relaxed);
+            assert!(flush_gui_changes::<TestPlugin>(data, &raw const out));
+            assert_eq!(PUSHED.load(Ordering::Relaxed), 2);
+            assert!(!data.needs_rescan.load(Ordering::Relaxed));
+            data.gui_changes
+                .push(GuiParamChange::Value(1, 0.75))
+                .unwrap_or_else(|_| panic!("queue full"));
+            let full = clap_output_events {
+                ctx: ptr::null_mut(),
+                try_push: Some(refuse),
+            };
+            assert!(!flush_gui_changes::<TestPlugin>(data, &raw const full));
+            assert!(data.needs_rescan.load(Ordering::Relaxed));
+            clap_plugin_destroy::<TestPlugin>(plugin);
+        }
+    }
+
+    // Exercise the actual editor bridge as well as the queue-draining helper.
+    // A fake X11 parent is safe because this editor never calls a window API.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gui_set_param_keeps_rescans_fallback_only_and_epochs_instance_local() {
+        use moose_core::editor::{Editor, PluginContext, RawWindowHandle};
+        use std::sync::Mutex;
+
+        struct CaptureEditor(Arc<Mutex<Option<PluginContext>>>);
+        struct DefaultScaleEditor;
+        impl Editor for DefaultScaleEditor {
+            fn size(&self) -> (u32, u32) {
+                (100, 100)
+            }
+            fn open(&mut self, _: RawWindowHandle, _: PluginContext) {}
+            fn close(&mut self) {}
+        }
+        impl Editor for CaptureEditor {
+            fn size(&self) -> (u32, u32) {
+                (100, 100)
+            }
+            fn open(&mut self, _: RawWindowHandle, context: PluginContext) {
+                *self.0.lock().unwrap() = Some(context);
+            }
+            fn close(&mut self) {}
+        }
+        #[derive(Default)]
+        struct Calls {
+            callbacks: AtomicU32,
+            rescans: AtomicU32,
+            flushes: AtomicU32,
+        }
+        unsafe fn calls<'a>(host: *const clap_host) -> &'a Calls {
+            // SAFETY: each shim receives the live host owned below.
+            unsafe { &*((*host).host_data.cast::<Calls>()) }
+        }
+        unsafe extern "C" fn callback(host: *const clap_host) {
+            unsafe { calls(host) }
+                .callbacks
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe extern "C" fn flush(host: *const clap_host) {
+            unsafe { calls(host) }
+                .flushes
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe extern "C" fn rescan(host: *const clap_host, flags: u32) {
+            assert_eq!(flags, CLAP_PARAM_RESCAN_VALUES);
+            unsafe { calls(host) }
+                .rescans
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        unsafe extern "C" fn extension(_: *const clap_host, id: *const c_char) -> *const c_void {
+            static PARAMS: clap_host_params = clap_host_params {
+                rescan: Some(rescan),
+                clear: None,
+                request_flush: Some(flush),
+            };
+            if unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+                (&raw const PARAMS).cast()
+            } else {
+                ptr::null()
+            }
+        }
+        unsafe extern "C" fn accept(
+            _: *const clap_output_events,
+            _: *const clap_event_header,
+        ) -> bool {
+            true
+        }
+
+        // SAFETY: all host/plugin/window/event pointers remain live until destruction.
+        unsafe {
+            let calls = Calls::default();
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.host_data = (&raw const calls).cast_mut().cast();
+            host.get_extension = Some(extension);
+            host.request_callback = Some(callback);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let a = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            let b = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<TestPlugin>(a));
+            assert!(clap_plugin_init::<TestPlugin>(b));
+            let data = data_from_plugin::<TestPlugin>(a);
+            let other = data_from_plugin::<TestPlugin>(b);
+            data.gui.enter().editor = Some(Box::new(DefaultScaleEditor));
+            let gui =
+                &*((*a).get_extension.unwrap()(a, CLAP_EXT_GUI.as_ptr()).cast::<clap_plugin_gui>());
+            assert!(!gui.create.unwrap()(a, ptr::null(), false));
+            assert!(gui.create.unwrap()(a, CLAP_WINDOW_API_X11.as_ptr(), false));
+            let mut window: clap_window = std::mem::zeroed();
+            window.api = CLAP_WINDOW_API_X11.as_ptr();
+            window.specific.ptr = ptr::dangling_mut::<c_void>();
+            assert!(!gui.set_parent.unwrap()(a, ptr::null()));
+            assert!(gui.set_parent.unwrap()(a, &raw const window));
+            gui.destroy.unwrap()(a);
+            let captured = Arc::new(Mutex::new(None));
+            data.gui.enter().editor = Some(Box::new(CaptureEditor(captured.clone())));
+            assert!(gui_create::<TestPlugin>(
+                a,
+                CLAP_WINDOW_API_X11.as_ptr(),
+                false
+            ));
+            assert!(gui_set_parent::<TestPlugin>(a, &raw const window));
+            let context = captured.lock().unwrap().take().unwrap();
+            let out = clap_output_events {
+                ctx: ptr::null_mut(),
+                try_push: Some(accept),
+            };
+            let epoch = data.params_arc.parameter_edit_epoch();
+            let foreign_epoch = other.params_arc.parameter_edit_epoch();
+            for i in 0..128 {
+                context.set_param(1_u32, if i % 2 == 0 { 0.25 } else { 0.75 });
+                assert!(flush_gui_changes::<TestPlugin>(data, &raw const out));
+            }
+            assert_eq!(data.params_arc.parameter_edit_epoch(), epoch + 128);
+            assert_eq!(other.params_arc.parameter_edit_epoch(), foreign_epoch);
+            assert_eq!(calls.flushes.load(Ordering::Relaxed), 128);
+            assert_eq!(calls.callbacks.load(Ordering::Relaxed), 0);
+            clap_plugin_on_main_thread::<TestPlugin>(a);
+            assert_eq!(calls.rescans.load(Ordering::Relaxed), 0);
+
+            context.set_param(1_u32, 0.5);
+            let full = clap_output_events {
+                ctx: ptr::null_mut(),
+                try_push: Some(refuse),
+            };
+            assert!(!flush_gui_changes::<TestPlugin>(data, &raw const full));
+            assert_eq!(calls.callbacks.load(Ordering::Relaxed), 1);
+            clap_plugin_on_main_thread::<TestPlugin>(a);
+            assert_eq!(calls.rescans.load(Ordering::Relaxed), 1);
+
+            for _ in 0..GUI_QUEUE_CAPACITY + 2 {
+                context.set_param(1_u32, 0.25);
+            }
+            assert_eq!(
+                calls.callbacks.load(Ordering::Relaxed),
+                2,
+                "overflow callbacks coalesce"
+            );
+            assert!(flush_gui_changes::<TestPlugin>(data, &raw const out));
+            clap_plugin_on_main_thread::<TestPlugin>(a);
+            assert_eq!(calls.rescans.load(Ordering::Relaxed), 2);
+            assert_eq!(other.params_arc.parameter_edit_epoch(), foreign_epoch);
+            drop(context);
+            clap_plugin_destroy::<TestPlugin>(a);
+            clap_plugin_destroy::<TestPlugin>(b);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod floating_gui_tests {
+    use super::host_value_fixture::TestPlugin;
+    use super::*;
+    type Close = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+    struct Probe(Close);
+    impl Editor for Probe {
+        fn size(&self) -> (u32, u32) {
+            (320, 240)
+        }
+        fn open(&mut self, _: RawWindowHandle, _: PluginContext) {
+            panic!("must not embed Wayland");
+        }
+        fn close(&mut self) {
+            if let Some(closed) = self.0.lock().unwrap().take() {
+                closed();
+            }
+        }
+        fn supports_floating_x11(&self) -> bool {
+            true
+        }
+        fn open_floating_x11(
+            &mut self,
+            _: PluginContext,
+            _: &str,
+            closed: Arc<dyn Fn() + Send + Sync>,
+        ) -> bool {
+            *self.0.lock().unwrap() = Some(closed);
+            true
+        }
+        fn supports_floating_wayland(&self) -> bool {
+            true
+        }
+        fn open_floating_wayland(
+            &mut self,
+            _: PluginContext,
+            _: &str,
+            closed: Arc<dyn Fn() + Send + Sync>,
+        ) -> bool {
+            *self.0.lock().unwrap() = Some(closed);
+            true
+        }
+    }
+    unsafe extern "C" fn request(host: *const clap_host) {
+        // SAFETY: test retains its two counters through plugin destruction.
+        unsafe {
+            (&*(*host).host_data.cast::<[AtomicU32; 2]>())[0].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    unsafe extern "C" fn closed(host: *const clap_host, destroyed: bool) {
+        assert!(!destroyed);
+        // SAFETY: test retains its two counters through plugin destruction.
+        unsafe {
+            (&*(*host).host_data.cast::<[AtomicU32; 2]>())[1].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    unsafe extern "C" fn extension(_: *const clap_host, name: *const c_char) -> *const c_void {
+        static GUI: clap_host_gui = clap_host_gui {
+            resize_hints_changed: None,
+            request_resize: None,
+            request_show: None,
+            request_hide: None,
+            closed: Some(closed),
+        };
+        // SAFETY: CLAP passes a valid extension name.
+        if unsafe { CStr::from_ptr(name) } == CLAP_EXT_GUI {
+            (&raw const GUI).cast()
+        } else {
+            ptr::null()
+        }
+    }
+    #[test]
+    fn wayland_negotiation_and_close_work_with_a_deferred_host() {
+        let counters = [AtomicU32::new(0), AtomicU32::new(0)];
+        // SAFETY: own host, descriptor, plugin and fake editor; callbacks retain
+        // no native resources and all borrowed test state outlives the instance.
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.host_data = (&raw const counters).cast_mut().cast();
+            host.get_extension = Some(extension);
+            host.request_callback = Some(request);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let plugin = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<TestPlugin>(plugin));
+            let data = data_from_plugin::<TestPlugin>(plugin);
+            assert!(!gui_is_api_supported::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_WAYLAND.as_ptr(),
+                true
+            ));
+            let hook: Close = Arc::default();
+            data.gui.enter().editor = Some(Box::new(Probe(hook.clone())));
+            assert!(gui_is_api_supported::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_WAYLAND.as_ptr(),
+                true
+            ));
+            assert!(!gui_is_api_supported::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_WAYLAND.as_ptr(),
+                false
+            ));
+            assert!(gui_is_api_supported::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_X11.as_ptr(),
+                false
+            ));
+            assert!(gui_is_api_supported::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_X11.as_ptr(),
+                true
+            ));
+            assert!(!gui_create::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_WAYLAND.as_ptr(),
+                false
+            ));
+            assert!(!gui_create::<TestPlugin>(plugin, ptr::null(), true));
+            assert!(gui_create::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_WAYLAND.as_ptr(),
+                true
+            ));
+            assert!(!gui_create::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_X11.as_ptr(),
+                true
+            ));
+            assert!(!gui_set_scale::<TestPlugin>(plugin, 2.));
+            assert!(gui_show::<TestPlugin>(plugin));
+            let close = hook.lock().unwrap().take().unwrap();
+            close();
+            assert_eq!(counters[0].load(Ordering::Relaxed), 1);
+            assert_eq!(counters[1].load(Ordering::Relaxed), 0);
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            assert_eq!(counters[1].load(Ordering::Relaxed), 1);
+            assert!(gui_show::<TestPlugin>(plugin));
+            assert!(gui_hide::<TestPlugin>(plugin));
+            assert_eq!(
+                counters[0].load(Ordering::Relaxed),
+                1,
+                "programmatic hide must not notify close"
+            );
+            gui_destroy::<TestPlugin>(plugin);
+            data.gui.enter().editor = Some(Box::new(Probe(hook.clone())));
+            assert!(gui_create::<TestPlugin>(
+                plugin,
+                CLAP_WINDOW_API_X11.as_ptr(),
+                true
+            ));
+            assert!(gui_show::<TestPlugin>(plugin));
+            assert!(gui_hide::<TestPlugin>(plugin));
+            assert!(gui_show::<TestPlugin>(plugin));
+            hook.lock().unwrap().take().unwrap()();
+            clap_plugin_on_main_thread::<TestPlugin>(plugin);
+            assert_eq!(counters[1].load(Ordering::Relaxed), 2);
+            gui_destroy::<TestPlugin>(plugin);
+            clap_plugin_destroy::<TestPlugin>(plugin);
+        }
+    }
+}
+
+#[cfg(test)]
+mod inactive_recall_tests {
+    use super::host_value_fixture::TestPlugin;
+    use super::*;
+    struct Stream {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+    unsafe extern "C" fn write(stream: *const clap_ostream, bytes: *const c_void, len: u64) -> i64 {
+        // SAFETY: the test retains its stream storage and CLAP supplies len bytes.
+        unsafe {
+            let stream = &mut *(*stream).ctx.cast::<Stream>();
+            stream.bytes.extend_from_slice(std::slice::from_raw_parts(
+                bytes.cast(),
+                usize::try_from(len).expect("test buffer length fits usize"),
+            ));
+            i64::try_from(len).expect("test byte count fits i64")
+        }
+    }
+    unsafe extern "C" fn read(stream: *const clap_istream, bytes: *mut c_void, len: u64) -> i64 {
+        // SAFETY: the test retains its stream storage; CLAP supplies len writable bytes.
+        unsafe {
+            let stream = &mut *(*stream).ctx.cast::<Stream>();
+            let len = (usize::try_from(len).expect("test buffer length fits usize"))
+                .min(stream.bytes.len() - stream.offset);
+            ptr::copy_nonoverlapping(stream.bytes.as_ptr().add(stream.offset), bytes.cast(), len);
+            stream.offset += len;
+            i64::try_from(len).expect("test byte count fits i64")
+        }
+    }
+    unsafe extern "C" fn no_extension(_: *const clap_host, _: *const c_char) -> *const c_void {
+        ptr::null()
+    }
+    #[test]
+    fn inactive_recall_discards_a_stopped_transport_flush() {
+        // SAFETY: own the plugin, host, descriptor and stream through destruction.
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            host.get_extension = Some(no_extension);
+            let descriptor = DescriptorHolder::new(&TestPlugin::info());
+            let plugin = create_plugin_instance::<TestPlugin>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<TestPlugin>(plugin));
+            let data = data_from_plugin::<TestPlugin>(plugin);
+            let original = data.params_arc.get_plain(0).unwrap();
+            let mut storage = Stream {
+                bytes: Vec::new(),
+                offset: 0,
+            };
+            let output = clap_ostream {
+                ctx: (&raw mut storage).cast(),
+                write: Some(write),
+            };
+            assert!(state_save::<TestPlugin>(plugin, &raw const output));
+            data.params_arc.set_plain(0, 6.);
+            defer_param_change(&mut data.audio.enter().deferred_params, 0, 6.);
+            let input = clap_istream {
+                ctx: (&raw mut storage).cast(),
+                read: Some(read),
+            };
+            assert!(state_load::<TestPlugin>(plugin, &raw const input));
+            assert_eq!(data.params_arc.get_plain(0), Some(original));
+            assert!(
+                data.audio.enter().deferred_params.is_empty(),
+                "stale flush would overwrite recall on the next block"
+            );
+            clap_plugin_destroy::<TestPlugin>(plugin);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../test-support/large_state_fixture.rs"]
+mod large_state_fixture;
+#[cfg(test)]
+mod large_state_tests {
+    use super::large_state_fixture::{LargePlugin, payload};
+    use super::*;
+    type Large = LargePlugin<{ 64 * 1024 * 1024 }>;
+    struct Stream {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+    unsafe extern "C" fn write(s: *const clap_ostream, bytes: *const c_void, size: u64) -> i64 {
+        let s = unsafe { &mut *((*s).ctx.cast::<Stream>()) };
+        let n = (usize::try_from(size).expect("test buffer length fits usize")).min(317);
+        s.bytes
+            .extend_from_slice(unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), n) });
+        i64::try_from(n).expect("test byte count fits i64")
+    }
+    unsafe extern "C" fn read(s: *const clap_istream, dst: *mut c_void, size: u64) -> i64 {
+        let s = unsafe { &mut *((*s).ctx.cast::<Stream>()) };
+        let n = (usize::try_from(size).expect("test buffer length fits usize"))
+            .min(311)
+            .min(s.bytes.len() - s.offset);
+        unsafe { std::ptr::copy_nonoverlapping(s.bytes.as_ptr().add(s.offset), dst.cast(), n) };
+        s.offset += n;
+        i64::try_from(n).expect("test byte count fits i64")
+    }
+    #[test]
+    fn large_host_state_roundtrips_and_default_bound_rejects() {
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            let descriptor = DescriptorHolder::new(&Large::info());
+            let plugin =
+                create_plugin_instance::<Large>(&raw const descriptor.descriptor, &raw const host);
+            assert!(clap_plugin_init::<Large>(plugin));
+            let data = data_from_plugin::<Large>(plugin);
+            *data.params_arc.payload.lock().unwrap() = payload();
+            let mut s = Stream {
+                bytes: Vec::new(),
+                offset: 0,
+            };
+            let out = clap_ostream {
+                ctx: (&raw mut s).cast(),
+                write: Some(write),
+            };
+            assert!(state_save::<Large>(plugin, &raw const out));
+            assert!(s.bytes.len() > 32 * 1024 * 1024);
+            data.params_arc.payload.lock().unwrap().clear();
+            let input = clap_istream {
+                ctx: (&raw mut s).cast(),
+                read: Some(read),
+            };
+            assert!(state_load::<Large>(plugin, &raw const input));
+            assert_eq!(*data.params_arc.payload.lock().unwrap(), payload());
+            s.offset = 0;
+            s.bytes.pop();
+            assert!(!state_load::<Large>(plugin, &raw const input));
+            clap_plugin_destroy::<Large>(plugin);
+        }
+    }
+}
+
+#[cfg(test)]
+mod persist_notify_tests;
+
+#[cfg(test)]
+mod lifecycle_tests;
+
+#[cfg(test)]
+mod surround_tests {
+    use super::host_value_fixture::{TestParams, TestPlugin};
+    use super::*;
+    use moose_core::bus::BusLayout;
+
+    struct Surround(TestPlugin);
+    impl PluginExport for Surround {
+        type Params = TestParams;
+        fn create() -> Self {
+            Self(TestPlugin::create())
+        }
+        fn params(&self) -> &TestParams {
+            self.0.params()
+        }
+        fn params_arc(&self) -> Arc<TestParams> {
+            self.0.params_arc()
+        }
+        fn meter_store(&self) -> Arc<MeterStore> {
+            self.0.meter_store()
+        }
+        fn snapshot_slot(&self) -> Arc<SnapshotSlot> {
+            self.0.snapshot_slot()
+        }
+    }
+    impl PluginRuntime for Surround {
+        type Sample = f32;
+        fn reset(&mut self, _: &AudioConfig) {}
+        fn info() -> PluginInfo {
+            TestPlugin::info()
+        }
+        fn bus_layouts() -> Vec<BusLayout> {
+            [4, 6, 8, 5]
+                .into_iter()
+                .map(|count| {
+                    BusLayout::new()
+                        .with_optional_sidechain_input("disabled", ChannelConfig::Stereo, false)
+                        .with_input("main", ChannelConfig::Custom(count))
+                        .with_output("main", ChannelConfig::Custom(count))
+                })
+                .collect()
+        }
+        fn process(
+            &mut self,
+            _: &mut AudioBuffer,
+            _: &EventList,
+            _: &mut moose_core::process::ProcessContext,
+        ) -> ProcessStatus {
+            ProcessStatus::Normal
+        }
+    }
+
+    #[test]
+    fn host_reads_selected_canonical_surround_maps() {
+        unsafe {
+            let mut host: clap_host = std::mem::zeroed();
+            host.clap_version = clap_sys::version::CLAP_VERSION;
+            let descriptor = DescriptorHolder::new(&Surround::info());
+            let plugin = create_plugin_instance::<Surround>(
+                &raw const descriptor.descriptor,
+                &raw const host,
+            );
+            assert!(clap_plugin_init::<Surround>(plugin));
+            let ext = clap_plugin_get_extension::<Surround>(plugin, CLAP_EXT_SURROUND.as_ptr())
+                .cast::<clap_plugin_surround>();
+            assert!(!ext.is_null());
+            let map = (*ext).get_channel_map.unwrap();
+            let supported = (*ext).is_channel_mask_supported.unwrap();
+            for (index, expected) in [
+                &[0, 1, 4, 5][..],
+                &[0, 1, 2, 3, 4, 5],
+                &[0, 1, 2, 3, 4, 5, 9, 10],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(audio_ports_config_select::<Surround>(
+                    plugin,
+                    len_u32(index)
+                ));
+                let mut port_info: clap_audio_port_info = std::mem::zeroed();
+                assert!(audio_ports_get::<Surround>(
+                    plugin,
+                    0,
+                    false,
+                    &raw mut port_info
+                ));
+                assert_eq!(CStr::from_ptr(port_info.port_type), CLAP_PORT_SURROUND);
+                let mask = expected
+                    .iter()
+                    .fold(0u64, |bits, channel| bits | (1 << channel));
+                assert!(supported(plugin, mask));
+                for is_input in [true, false] {
+                    let mut output = [255; 8];
+                    assert_eq!(
+                        map(plugin, is_input, 0, output.as_mut_ptr(), 8),
+                        len_u32(expected.len())
+                    );
+                    assert_eq!(&output[..expected.len()], expected);
+                    assert_eq!(
+                        map(
+                            plugin,
+                            is_input,
+                            0,
+                            output.as_mut_ptr(),
+                            len_u32(expected.len() - 1)
+                        ),
+                        0
+                    );
+                    assert_eq!(map(plugin, is_input, 1, output.as_mut_ptr(), 8), 0);
+                }
+            }
+            assert!(!supported(plugin, 0));
+            assert!(!supported(
+                plugin,
+                (1 << 0) | (1 << 1) | (1 << 9) | (1 << 10)
+            ));
+            assert!(audio_ports_config_select::<Surround>(plugin, 3));
+            let mut output = [255; 8];
+            assert_eq!(map(plugin, true, 0, output.as_mut_ptr(), 8), 0);
+            assert_eq!(map(plugin, true, 0, ptr::null_mut(), 8), 0);
+            clap_plugin_destroy::<Surround>(plugin);
+        }
+    }
+}

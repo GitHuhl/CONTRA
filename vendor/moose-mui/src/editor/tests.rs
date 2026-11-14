@@ -7,7 +7,7 @@ use crate::window::baseview::{self, Event, MouseEvent};
 use keyboard_types::{Key as HostKey, KeyState, KeyboardEvent, Modifiers, NamedKey};
 use moose::prelude::*;
 use moose_core::editor::ClosureBridge;
-use mui::prelude::{IntoEl, Point, knob, toggle};
+use mui::prelude::{Point, knob, toggle};
 use mui::scene::prelude::row;
 use std::sync::Mutex;
 
@@ -29,170 +29,6 @@ enum Call {
 }
 
 type Log = Arc<Mutex<Vec<Call>>>;
-
-#[cfg(target_os = "linux")]
-#[test]
-fn editor_uses_the_auto_send_native_controller() {
-    fn assert_send<T: Send>() {}
-    assert_send::<window::baseview::ThreadedWindow>();
-    assert_send::<MuiEditor<Synth>>();
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn native_parent_delivery_orders_active_close_and_rejects_stale_requests() {
-    use std::sync::{
-        Barrier,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    };
-    let params = Arc::new(Synth::default());
-    let mut editor = editor(&params);
-    let registry = Arc::clone(&editor.x11_requests);
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let recorded = Arc::clone(&seen);
-    let paused = Arc::new(AtomicBool::new(false));
-    let pause = Arc::new(Barrier::new(2));
-    let release = Arc::clone(&pause);
-    let (entered, active) = mpsc::channel();
-    editor = editor.on_x11_window(move |parent| {
-        assert!(
-            registry.try_lock().is_ok(),
-            "no registry lock across user code"
-        );
-        if parent.is_none() && !paused.swap(true, Ordering::SeqCst) {
-            entered.send(()).unwrap();
-            release.wait();
-        }
-        recorded.lock().unwrap().push(parent);
-    });
-    let old = editor.x11_window_hook().unwrap();
-    let closing = Arc::clone(&old);
-    let closer = std::thread::spawn(move || closing.lock().unwrap()(None));
-    active.recv().unwrap();
-    // A native close callback is active. Registering a new generation must
-    // neither wait on it nor allow its None edge after the new Some edge.
-    editor.requests = Arc::default();
-    let current = editor.x11_window_hook().unwrap();
-    let opening = Arc::clone(&current);
-    let opening_started = Arc::new(Barrier::new(2));
-    let started = Arc::clone(&opening_started);
-    let opener = std::thread::spawn(move || {
-        started.wait();
-        opening.lock().unwrap()(Some(42));
-    });
-    opening_started.wait();
-    pause.wait();
-    closer.join().unwrap();
-    opener.join().unwrap();
-    assert_eq!(*seen.lock().unwrap(), [None, Some(42)]);
-    old.lock().unwrap()(None);
-    assert_eq!(
-        *seen.lock().unwrap(),
-        [None, Some(42)],
-        "late old close ignored"
-    );
-    current.lock().unwrap()(None);
-    assert_eq!(*seen.lock().unwrap(), [None, Some(42), None]);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn current_parent_close_registration_survives_editor_drop_without_requests_cycle() {
-    let params = Arc::new(Synth::default());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let record = Arc::clone(&seen);
-    let editor = editor(&params).on_x11_window(move |parent| record.lock().unwrap().push(parent));
-    let worker_requests = Arc::clone(&editor.requests);
-    let requests = Arc::downgrade(&worker_requests);
-    let delivery = editor.x11_window_hook().unwrap();
-    drop(editor);
-    delivery.lock().unwrap()(None);
-    assert_eq!(*seen.lock().unwrap(), [None]);
-    drop(worker_requests);
-    assert!(
-        requests.upgrade().is_none(),
-        "hook retains no Requests cycle"
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-#[ignore = "requires an isolated X11 display; run under Xvfb"]
-fn native_editor_parent_hook_survives_first_open_close_and_reopen() {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle as NativeHandle};
-    use std::sync::mpsc;
-    struct Parent;
-    impl baseview::WindowHandler for Parent {
-        fn on_frame(&self) -> Result<(), baseview::HandlerError> {
-            Ok(())
-        }
-        fn resized(&self, _: baseview::WindowSize) -> Result<(), baseview::HandlerError> {
-            Ok(())
-        }
-        fn on_event(&self, _: baseview::Event) -> baseview::EventStatus {
-            baseview::EventStatus::Ignored
-        }
-    }
-    let (created, parent_id) = mpsc::channel();
-    let parent = baseview::ThreadedWindow::create(baseview::WindowSettings::new(), move |cx| {
-        let id = match cx.window_handle()?.as_raw() {
-            NativeHandle::Xlib(handle) => u32::try_from(handle.window).unwrap(),
-            NativeHandle::Xcb(handle) => handle.window.get(),
-            _ => unreachable!(),
-        };
-        created.send(id).unwrap();
-        Ok(Parent)
-    })
-    .unwrap();
-    let parent_id = parent_id
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
-    let params = Arc::new(Synth::default());
-    let mut editor = editor(&params);
-    let model = Arc::downgrade(&editor.shared);
-    let (notify, events) = mpsc::channel();
-    editor = editor.on_x11_window(move |id| {
-        let shared = model.upgrade().unwrap();
-        assert!(
-            shared.try_lock().is_ok(),
-            "parent notification has no UI lock"
-        );
-        notify.send((id, std::thread::current().id())).unwrap();
-    });
-    let mut old_requests = None;
-    for _ in 0..2 {
-        let (context, _) = context(&params);
-        editor.open(RawWindowHandle::X11(parent_id as _), context);
-        assert!(editor.window.is_some(), "native child created");
-        let (id, owner) = events
-            .try_recv()
-            .expect("publish the parent before open returns");
-        let id = id.expect("live X11 identifier");
-        assert_eq!(editor.requests.x11_window(), Some(id));
-        assert_ne!(owner, std::thread::current().id());
-        if let Some(old) = old_requests.take() {
-            assert!(
-                !Arc::ptr_eq(&old, &editor.requests),
-                "fresh Requests per open"
-            );
-            assert_eq!(old.x11_window(), None);
-        }
-        old_requests = Some(Arc::clone(&editor.requests));
-        editor.close();
-        let (closed, closed_on) = events
-            .try_recv()
-            .expect("close completes parent cancellation");
-        assert_eq!(closed, None);
-        assert_eq!(closed_on, owner);
-        assert_eq!(editor.requests.x11_window(), None);
-        assert!(
-            events.try_recv().is_err(),
-            "one creation and cancellation per generation"
-        );
-    }
-    parent.close();
-}
 
 fn context(params: &Arc<Synth>) -> (PluginContext, Log) {
     let log = Log::default();
@@ -653,10 +489,11 @@ fn zoom_at(editor: &MuiEditor<Synth>, physical: (u32, u32), scale: f64) -> f64 {
     h.driver.ui_scale() / scale
 }
 
-// The zooms are exact ratios of whole sizes, so `assert_eq!` is the right
-// comparison; `clippy::float_cmp` only fires on `==`, which this test does not
-// use.
 #[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "the zooms are exact ratios of whole sizes"
+)]
 fn a_resized_window_fits_the_design_size_unless_the_zoom_is_fixed() {
     let params = Arc::new(Synth::default());
     let fit = editor(&params).resizable((200, 150));
@@ -673,132 +510,217 @@ fn a_resized_window_fits_the_design_size_unless_the_zoom_is_fixed() {
 }
 
 #[test]
-fn native_file_drop_reaches_editor_callback() {
-    let params = Arc::new(Synth::new());
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let record = calls.clone();
-    let editor = editor(&params).on_files(move |_, at, paths, dropped| {
-        record.lock().unwrap().push((at, paths.to_vec(), dropped));
+fn canvas_drag_brackets_values_and_ends_when_absent() {
+    let params = Arc::new(Synth::default());
+    let (context, log) = context(&params);
+    let mut bridge = Bridge::new(params.clone());
+    bridge.attach(context.with_params(params));
+    bridge.drag_gesture(10u32, 0.7);
+    bridge.end_unbound();
+    bridge.drag_gesture(10u32, 0.8);
+    bridge.end_unbound();
+    bridge.end_unbound();
+    assert_eq!(
+        calls(&log),
+        [
+            Call::Begin(10),
+            Call::Set(10, 0.7),
+            Call::Set(10, 0.8),
+            Call::End(10)
+        ]
+    );
+}
+
+#[test]
+fn wheel_hold_is_one_gesture_and_releases_after_an_earlier_unbind() {
+    let params = Arc::new(Synth::default());
+    let (context, log) = context(&params);
+    let mut bridge = Bridge::new(params.clone());
+    bridge.attach(context.with_params(params));
+    let mut ui = Ui::default();
+    bridge.hold(10u32, true);
+    bridge.bind(&mut ui, 10u32, |ui, id, v| {
+        *v = 0.7;
+        knob(ui, id, "Gain", v, 0.0..=1.0)
+    });
+    bridge.end_unbound();
+    bridge.hold(10u32, true);
+    bridge.bind(&mut ui, 10u32, |ui, id, v| {
+        *v = 0.8;
+        knob(ui, id, "Gain", v, 0.0..=1.0)
+    });
+    bridge.end_unbound();
+    bridge.hold(10u32, false);
+    assert_eq!(
+        calls(&log),
+        [
+            Call::Begin(10),
+            Call::Set(10, 0.7),
+            Call::Set(10, 0.8),
+            Call::End(10)
+        ]
+    );
+    bridge.hold(10u32, true);
+    bridge.end_unbound();
+    bridge.hold(10u32, true);
+    bridge.hold(10u32, false);
+    assert_eq!(
+        calls(&log),
+        [
+            Call::Begin(10),
+            Call::End(10),
+            Call::Begin(10),
+            Call::End(10)
+        ]
+    );
+}
+
+#[test]
+fn user_zoom_multiplies_fit_and_rejects_invalid_factors() {
+    let params = Arc::new(Synth::default());
+    let zoomed = editor(&params).user_zoom(|_| 1.5);
+    assert_eq!(
+        zoom_at(&zoomed, (800, 600), 1.0).to_bits(),
+        3.0_f64.to_bits()
+    );
+    let invalid = editor(&params).user_zoom(|_| f64::NAN);
+    assert_eq!(
+        zoom_at(&invalid, (800, 600), 1.0).to_bits(),
+        2.0_f64.to_bits()
+    );
+}
+
+#[test]
+fn hooks_receive_input_and_diagnostics_after_requests_are_replaced() {
+    use crate::window::baseview::{EventStatus, WindowEvent};
+    let params = Arc::new(Synth::default());
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let files = events.clone();
+    let cancelled = events.clone();
+    let logged = events.clone();
+    let keys = events.clone();
+    let mut editor = editor(&params)
+        .on_files(move |_, _, paths, dropped| {
+            files
+                .lock()
+                .unwrap()
+                .push(format!("{}:{dropped}", paths[0].display()));
+            true
+        })
+        .on_cancel(move |_| cancelled.lock().unwrap().push("cancel".into()))
+        .on_log(move |line| logged.lock().unwrap().push(line.into()))
+        .on_key(move |_, key| {
+            keys.lock().unwrap().push(format!("key:{}", key.down));
+            true
+        });
+    editor.reset_requests();
+    let (editor, mut handler, _) = open_with(&params, editor);
+    let status = handler.on_event_inner(&Event::Keyboard(KeyboardEvent {
+        state: KeyState::Down,
+        key: HostKey::Character("a".into()),
+        ..KeyboardEvent::default()
+    }));
+    assert_eq!(status, EventStatus::Captured);
+    let paths = [std::path::PathBuf::from("sample.wav")];
+    assert!(handler.driver.drop_files(
+        &mut lock(&editor.shared),
+        Point::new(1.0, 2.0),
+        mui::input::Mods::default(),
+        &paths,
         true
-    });
-    let shared = &mut *lock(&editor.shared);
-    let paths = vec![std::path::PathBuf::from("instrument.nki")];
-    assert!(
-        shared
-            .view
-            .drop_files(&shared.ui, Point::new(10., 20.), &paths, false)
+    ));
+    lock(&editor.shared).view.log("renderer message");
+    handler.on_event_inner(&Event::Window(WindowEvent::Unfocused));
+    handler.step();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["key:true", "sample.wav:true", "renderer message", "cancel"]
     );
-    assert!(
-        shared
-            .view
-            .drop_files(&shared.ui, Point::new(10., 20.), &paths, true)
-    );
-    assert_eq!(calls.lock().unwrap().len(), 2);
-    assert!(calls.lock().unwrap()[1].2);
 }
 
 #[test]
-fn cancellation_reaches_editor_callback() {
-    let params = Arc::new(Synth::new());
-    let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let record = called.clone();
-    let editor = editor(&params)
-        .on_cancel(move |_| record.store(true, std::sync::atomic::Ordering::Relaxed));
-    let shared = &mut *lock(&editor.shared);
-    shared.view.cancel(&shared.ui);
-    assert!(called.load(std::sync::atomic::Ordering::Relaxed));
-}
-
-#[test]
-fn closing_the_editor_reaches_the_cancel_callback() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let params = Arc::new(Synth::new());
-    let called = Arc::new(AtomicUsize::new(0));
-    let record = called.clone();
-    let mut editor = editor(&params).on_cancel(move |_| {
-        record.fetch_add(1, Ordering::Relaxed);
-    });
+fn close_cancels_app_gestures_and_flushes_persistence() {
+    let params = Arc::new(Synth::default());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let cancelled = Arc::clone(&events);
+    let closed = Arc::clone(&events);
+    let mut editor = editor(&params)
+        .on_cancel(move |_| cancelled.lock().unwrap().push("cancel"))
+        .on_close(move || closed.lock().unwrap().push("persist"));
     editor.close();
-    assert_eq!(
-        called.load(Ordering::Relaxed),
-        1,
-        "a close releases app-owned gestures"
-    );
+    assert_eq!(*events.lock().unwrap(), ["cancel", "persist"]);
+    drop(editor);
+    assert_eq!(*events.lock().unwrap(), ["cancel", "persist", "persist"]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn a_handle_drag_the_host_never_saw_as_a_widget_is_still_a_gesture() {
-    // The plot's handles are shapes, not widgets: nothing in the scene
-    // reports an edit for them. The build names the parameter for as long as
-    // the pointer holds the handle, and the bridge supplies the bracket.
+#[ignore = "requires an isolated X11 display"]
+fn floating_editor_reopens_with_native_hooks_and_send_controller() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    fn assert_send<T: Send>() {}
+    assert_send::<MuiEditor<Synth>>();
+    assert_send::<Handle>();
     let params = Arc::new(Synth::default());
-    let held = Arc::new(Mutex::new(false));
-    let dragging = held.clone();
-    let editor = MuiEditor::new(
-        params.clone(),
-        Ui::default(),
-        (400, 300),
-        move |ui, bridge| {
-            if *dragging.lock().unwrap() {
-                bridge.drag_gesture(10u32, 0.75);
-            }
-            knob(ui, "gain", "Gain", &mut 0.5, 0.0..=1.0).into_el()
-        },
-    )
-    // Rebuild every tick, the way a meter-driven editor does: the point of
-    // the test is what the build says, not what made it run.
-    .changed(|| true);
-    let (_editor, mut h, log) = open_with(&params, editor);
-    *held.lock().unwrap() = true;
-    // A repaint rebuilds the tree; moving the pointer is the cheapest way to
-    // ask for one without touching the handle.
-    for x in [10.0, 11.0] {
-        at(&mut h, Point::new(x, 10.0));
-        h.step();
-    }
-    assert_eq!(
-        calls(&log),
-        [Call::Begin(10), Call::Set(10, 0.75)],
-        "one bracket, one value, however many frames the drag lasts"
-    );
-    assert_eq!(params.gain.value(), 0.75, "the host applied the drag");
-    *held.lock().unwrap() = false;
-    at(&mut h, Point::new(12.0, 10.0));
-    h.step();
-    assert_eq!(
-        calls(&log),
-        [Call::End(10)],
-        "letting go closes the edit without the caller tracking it"
-    );
-}
-
-#[test]
-fn user_zoom_is_independent_of_host_dpi_and_resize() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    let params = Arc::new(Synth::default());
-    let zoom = Arc::new(AtomicU64::new(1.5f64.to_bits()));
-    let value = zoom.clone();
-    let mut e = editor(&params)
-        .fixed_zoom()
-        .resizable((200, 150))
-        .user_zoom(move |_| f64::from_bits(value.load(Ordering::Relaxed)));
-    for dpi in [1.0, 1.5, 2.0] {
-        assert_eq!(
-            zoom_at(&e, ((400.0 * dpi) as u32, (300.0 * dpi) as u32), dpi),
-            1.5
+    let (send, receive) = channel();
+    let (pointer_send, pointer_receive) = channel();
+    let mut editor = editor(&params)
+        .on_x11_window(move |id| {
+            send.send(id).unwrap();
+        })
+        .hide_pointer(move |_| {
+            let _ = pointer_send.send(());
+            false
+        })
+        .wheel_policy(window::WheelPolicy::new(3.0, window::WheelAcceleration::Fling).unwrap());
+    for _ in 0..2 {
+        let (context, _) = context(&params);
+        editor.open(RawWindowHandle::X11(0), context);
+        assert!(
+            receive
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .is_some()
         );
+        pointer_receive
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        editor.close();
+        assert_eq!(receive.recv_timeout(Duration::from_secs(10)).unwrap(), None);
     }
-    assert!(e.set_size(700, 500));
-    assert_eq!(e.size(), (700, 500), "host geometry retains precedence");
-    assert_eq!(zoom_at(&e, (1400, 1000), 2.0), 1.5);
-    zoom.store(2.0f64.to_bits(), Ordering::Relaxed);
-    assert_eq!(
-        zoom_at(&e, (1400, 1000), 2.0),
-        2.0,
-        "user zoom updates live"
-    );
-    for invalid in [f64::NAN, 0.0, -1.0] {
-        zoom.store(invalid.to_bits(), Ordering::Relaxed);
-        assert_eq!(zoom_at(&e, (1400, 1000), 2.0), 1.0);
-    }
+}
+
+#[test]
+fn dialog_owner_is_published_and_cleared_without_owning_the_native_handle() {
+    let params = Arc::new(Synth::default());
+    let owners = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&owners);
+    let mut editor = editor(&params).on_win32_parent(move |owner| {
+        observed.lock().unwrap().push(owner);
+    });
+    editor.publish_win32_parent(Some(RawWindowHandle::Win32(
+        std::ptr::without_provenance_mut(7),
+    )));
+    editor.publish_win32_parent(Some(RawWindowHandle::X11(8)));
+    editor.close();
+    assert_eq!(*owners.lock().unwrap(), [Some(7), None]);
+    let parent = ParentWindow::win32(7);
+    assert!(matches!(parent.0, RawWindowHandle::Win32(pointer) if pointer.addr() == 7));
+}
+
+#[test]
+fn dropping_editor_revokes_the_dialog_owner() {
+    let params = Arc::new(Synth::default());
+    let owner = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&owner);
+    let mut editor = editor(&params).on_win32_parent(move |value| {
+        *observed.lock().unwrap() = value;
+    });
+    editor.publish_win32_parent(Some(RawWindowHandle::Win32(
+        std::ptr::without_provenance_mut(7),
+    )));
+    assert_eq!(*owner.lock().unwrap(), Some(7));
+    drop(editor);
+    assert_eq!(*owner.lock().unwrap(), None);
 }

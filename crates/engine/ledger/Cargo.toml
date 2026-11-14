@@ -9,10 +9,10 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-behaviour = { path = "../behaviour" }
-contra-events = { path = "../../model/events" }
-contra-ir = { path = "../../model/ir" }
-contra-plan = { path = "../plan" }
-contra-time = { path = "../../base/time" }
-contra-vm = { path = "../vm" }
-contra-voice = { path = "../voice" }
+contra-behaviour = {path = "../behaviour"}
+contra-events = {path = "../../model/events"}
+contra-ir = {path = "../../model/ir"}
+contra-plan = {path = "../plan"}
+contra-time = {path = "../../base/time"}
+contra-vm = {path = "../vm"}
+contra-voice = {path = "../voice"}

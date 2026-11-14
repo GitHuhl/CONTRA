@@ -13,8 +13,7 @@ moose port of MUI's `mui-truce`; enable it through the facade with
 - `HostScale` / `ParentWindow` turn moose's scale calls and parent handle into
   what `mui-baseview` opens with. The last host scale survives a reopened
   editor (MUI#48).
-- `window` re-exports CONTRA's `contra-native-host` through the stable
-  `mui_baseview` dependency alias; `mui` is the toolkit itself.
+- `window` is `mui-baseview` re-exported, `mui` is the toolkit itself.
 
 ```rust
 use moose::mui::MuiEditor;
@@ -36,9 +35,8 @@ works when the cdylib unwinds.
 
 ## Dependencies
 
-The MUI toolkit and public native bridges remain Git dependencies. This local
-moose adapter uses CONTRA's distinct custom host package rather than overriding
-upstream `mui-baseview`. The custom host retains CONTRA's wheel/pointer, dialog
-parent and diagnostic hooks while consuming the upstream accessibility/IME
-bridge. The root Cargo.lock pins MUI, and its MUI-source moose-baseview patch
-provides the same native window types to both hosts.
+The MUI crates are git dependencies, so this crate is `publish = false`.
+`mui`, `mui-baseview`, and the window backend use one MUI commit selected in
+the workspace dependencies. The lockfile records that source for all editor
+backends. Update these workspace pins together and run both model and native
+editor tests before promoting a new stack.

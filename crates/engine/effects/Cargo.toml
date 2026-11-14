@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-dsp = { path = "../../dsp/registry" }
-contra-ir = { path = "../../model/ir" }
-contra-stream = { path = "../stream" }
-contra-voice = { path = "../voice" }
+contra-dsp = {path = "../../dsp/registry"}
+contra-ir = {path = "../../model/ir"}
+contra-stream = {path = "../stream"}
+contra-voice = {path = "../voice"}

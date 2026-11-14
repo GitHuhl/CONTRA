@@ -19,6 +19,7 @@ pub use resolved::{
     Layer, LocalPose, Painted, PlacedPath, ResolvedScene, ResolvedSurface, Text, TextGlyph,
 };
 pub use spec::{SceneError, SceneSpec};
+pub use text::FallbackSource;
 pub(crate) use text::TextState;
 
 use rustc_hash::FxHashMap as HashMap;
@@ -436,6 +437,22 @@ impl Resolver {
     pub fn layout_stats(&self) -> mui_layout::LayoutStats {
         self.text.layout_stats()
     }
+    pub fn trace_layout_requests(&mut self, enabled: bool) {
+        self.text.layout.trace_requests(enabled);
+    }
+    pub fn take_layout_request_trace(&mut self) -> Option<mui_layout::LayoutRequestTrace> {
+        self.text.layout.take_request_trace()
+    }
+    /// Where to find faces for text the fonts have no glyph for; asked
+    /// once per newly shaped string that drew a `.notdef`.
+    pub fn set_fallback_source(&mut self, source: Option<FallbackSource>) {
+        self.text.discover.source = source;
+    }
+    /// The faces the [`FallbackSource`] found since the last call. Append
+    /// them to the spec's fallback fonts: the next resolve reshapes with them.
+    pub fn take_found_fallbacks(&mut self) -> Vec<mui_text::Font> {
+        std::mem::take(&mut self.text.discover.found)
+    }
     /// Shaped text runs held: one per (string, size, face, axes) variant.
     pub fn text_runs(&self) -> usize {
         self.text.len()
@@ -525,18 +542,21 @@ fn resolve_with(
         breaks: &mut text.breaks,
         coords: &mut text.coords,
         last_coords: &mut text.last_coords,
+        discover: &mut text.discover,
     };
     let th = &spec.theme;
     // Every paragraph wraps in this one pass: mui-layout hands a flex item's
     // final main size back to the measurer, so there is no share left to learn
     // afterwards.
-    let layout = mui_layout::resolve_cached_with(
+    let layout = mui_layout::resolve_cached_retained(
         &spec.root,
         spec.offered,
         spec.limits,
         th.spacing,
         &mut text.layout,
         |e, out| layout_key(e, th, spec.device_scale, out),
+        // A reused memo is the subtree last resolve laid out, untouched.
+        |e| e.extras().memo.map(|m| (m.id, m.reused)),
         |e, room| fit(&mut runs, th, e, room),
     )?;
     let nodes = layout.all().len();

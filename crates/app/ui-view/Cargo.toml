@@ -9,10 +9,10 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-ui-model = { path = "../../model/ui-model" }
-contra-ui-pictures = { path = "../ui-pictures" }
-mui = { workspace = true }
+contra-ui-model = {path = "../../model/ui-model"}
+contra-ui-pictures = {path = "../ui-pictures"}
+mui = {workspace = true}
 
 [dev-dependencies]
-mui-headless = { workspace = true }
+mui-headless = {workspace = true}
 png = "0.18"

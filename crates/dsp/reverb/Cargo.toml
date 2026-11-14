@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-dsp-core = { path = "../core" }
-contra-law = { path = "../../base/law" }
-contra-params = { path = "../../model/params" }
+contra-dsp-core = {path = "../core"}
+contra-law = {path = "../../base/law"}
+contra-params = {path = "../../model/params"}
 realfft = "3.5"

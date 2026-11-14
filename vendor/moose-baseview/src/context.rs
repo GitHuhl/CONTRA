@@ -6,16 +6,48 @@ use raw_window_handle::{
 };
 use std::fmt::Debug;
 
+/// A drag could not be registered with its owning window and live pointer gesture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MatariScheduleError {
+    /// The primary pointer gesture no longer has native event authority.
+    AuthorityUnavailable,
+    /// Another queued or active drag already owns this window's pointer events.
+    Busy,
+    /// The live window did not expose a usable native window handle.
+    MissingWindowHandle,
+}
+
+impl std::fmt::Display for MatariScheduleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::AuthorityUnavailable => "drag requires the current primary pointer gesture",
+            Self::Busy => "a drag is already active for this window",
+            Self::MissingWindowHandle => "the window does not expose a valid native window handle",
+        })
+    }
+}
+
+impl std::error::Error for MatariScheduleError {}
+
 /// A handle to the window given to a [`WindowHandler`](crate::WindowHandler), which it can then
 /// use to perform various operations on the window itself.
 #[derive(Clone)]
 pub struct WindowContext {
     inner: platform::WindowContext,
+    pub(crate) work: std::sync::Arc<crate::work::WindowWork>,
 }
 
 impl WindowContext {
     pub(crate) fn new(inner: platform::WindowContext) -> Self {
-        Self { inner }
+        Self { inner, work: Default::default() }
+    }
+
+    /// Native output names accepted by `DockOptions::with_output`.
+    /// Query on the GUI owner thread, for example when opening a display picker.
+    /// An empty list means enumeration is unavailable; automatic placement still works.
+    pub fn dock_outputs(&self) -> Vec<String> {
+        self.inner.dock_outputs()
     }
 
     /// Sets the [`MouseCursor`] icon to be displayed when the mouse cursor hovers this window.
@@ -31,7 +63,31 @@ impl WindowContext {
     /// However, it is guaranteed to only get closed after all [`WindowHandler`](crate::WindowHandler)
     /// methods are completed, and soon enough to be perceived as instantaneous by the user.
     pub fn request_close(&self) {
+        self.work.close();
         self.inner.request_close();
+    }
+
+    /// Requests a new frame at the next native frame interval.
+    pub fn request_redraw(&self) {
+        self.waker().request_redraw();
+    }
+
+    /// Requests a frame after a delay; earlier pending requests take precedence.
+    pub fn request_redraw_after(&self, duration: std::time::Duration) {
+        self.waker().request_redraw_after(duration);
+    }
+
+    /// Returns a thread-safe weak wake handle that is inert after close.
+    pub fn waker(&self) -> WindowWaker {
+        self.work.waker()
+    }
+
+    /// Creates a repeating GUI timer, coalesced on the native frame/poll cadence.
+    /// Timers pause while hidden and are revoked on close. Dropping the weak
+    /// handle does not cancel a timer. These timers are unsuitable for MIDI or
+    /// hardware synchronization. Zero and overflowing intervals are rejected.
+    pub fn create_timer(&self, interval: std::time::Duration) -> Result<TimerHandle, Error> {
+        self.work.create_timer(interval)
     }
 
     /// Returns `true` if this window currently has keyboard focus, `false` otherwise.
@@ -107,6 +163,47 @@ impl WindowContext {
         PlatformHandle { inner: self.inner.platform_handle() }
     }
 
+    /// Begin native edge/corner resizing for a detached top-level window.
+    /// Embedded editors must ask their host to resize instead.
+    pub fn drag_resize(&self, edge: crate::ResizeEdge) -> Result<(), crate::DragResizeError> {
+        self.inner.drag_resize(edge)
+    }
+
+    /// Whether this window currently owns an available primary pointer gesture.
+    pub fn can_schedule_matari_drag(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.can_schedule_matari_x11_drag()
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            self.inner.can_schedule_matari_drag()
+        }
+    }
+    /// Schedule a ticket on the owning native thread, retaining gesture authority.
+    pub fn schedule_matari_drag(
+        &self, ticket: matari_audio_drag_and_drop::StartTicket,
+    ) -> Result<(), matari_audio_drag_and_drop::RejectedStart<MatariScheduleError>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.schedule_matari_drag(ticket)
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            self.inner.schedule_matari_drag(ticket)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub fn can_schedule_matari_x11_drag(&self) -> bool {
+        self.can_schedule_matari_drag()
+    }
+    #[cfg(target_os = "linux")]
+    pub fn schedule_matari_x11_drag(
+        &self, ticket: matari_audio_drag_and_drop::StartTicket,
+    ) -> Result<(), matari_audio_drag_and_drop::RejectedStart<MatariScheduleError>> {
+        self.schedule_matari_drag(ticket)
+    }
+
     /// Returns the [`GlContext`](crate::gl::GlContext) associated to this window.
     ///
     /// If the window was not created with a GL context, this will return [`None`].
@@ -177,5 +274,70 @@ impl HasDisplayHandle for PlatformHandle {
 impl Debug for PlatformHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.inner.fmt(f)
+    }
+}
+
+/// Compatibility name for the X11 scheduler.
+#[cfg(target_os = "linux")]
+pub type MatariX11ScheduleError = MatariScheduleError;
+
+/// Shared event-thread adapter for embedded and detached product editors.
+pub struct MatariDragAdapter<'a> {
+    window: &'a WindowContext,
+    parented: bool,
+}
+impl<'a> MatariDragAdapter<'a> {
+    pub fn new(window: &'a WindowContext, parented: bool) -> Self {
+        Self { window, parented }
+    }
+    /// Platform route; authority is checked by schedule, never inferred from this value.
+    pub fn route(parented: bool) -> matari_audio_drag_and_drop::SessionRoute {
+        use matari_audio_drag_and_drop as dnd;
+        #[cfg(target_os = "linux")]
+        let route = (
+            dnd::x11_outbound_protocol(),
+            dnd::SourceContext::EmbeddedX11,
+            dnd::SourceContext::DetachedX11,
+        );
+        #[cfg(target_os = "windows")]
+        let route = (
+            dnd::NativeProtocol::Ole,
+            dnd::SourceContext::EmbeddedWin32,
+            dnd::SourceContext::DetachedWin32,
+        );
+        #[cfg(target_os = "macos")]
+        let route = (
+            dnd::NativeProtocol::AppKit,
+            dnd::SourceContext::EmbeddedAppKit,
+            dnd::SourceContext::DetachedAppKit,
+        );
+        dnd::SessionRoute { protocol: route.0, source: if parented { route.1 } else { route.2 } }
+    }
+}
+impl matari_audio_drag_and_drop::ToolkitAdapter for MatariDragAdapter<'_> {
+    type Error = MatariScheduleError;
+    fn outbound_route(&self) -> Option<matari_audio_drag_and_drop::SessionRoute> {
+        #[cfg(target_os = "linux")]
+        if self
+            .window
+            .window_handle()
+            .is_ok_and(|h| matches!(h.as_raw(), raw_window_handle::RawWindowHandle::Wayland(_)))
+        {
+            return Some(matari_audio_drag_and_drop::SessionRoute {
+                protocol: matari_audio_drag_and_drop::NativeProtocol::WaylandDataDevice,
+                source: matari_audio_drag_and_drop::SourceContext::Wayland,
+            });
+        }
+        Some(Self::route(self.parented))
+    }
+    fn schedule_outbound(
+        &mut self, ticket: matari_audio_drag_and_drop::StartTicket,
+    ) -> Result<(), matari_audio_drag_and_drop::RejectedStart<Self::Error>> {
+        self.window.schedule_matari_drag(ticket)
+    }
+    fn drive_inbound(
+        &mut self, _: &mut dyn matari_audio_drag_and_drop::InboundHandler,
+    ) -> Result<matari_audio_drag_and_drop::InboundDisposition, Self::Error> {
+        Ok(matari_audio_drag_and_drop::InboundDisposition::Unhandled)
     }
 }

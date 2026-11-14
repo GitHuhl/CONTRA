@@ -12,7 +12,43 @@ pub struct TextInputState {
     pub marked: Option<std::ops::Range<usize>>,
 }
 
+// A first press becomes a double-click candidate only after an actual click
+// release. A paired second press never seeds the next pair on release.
+pub(super) struct ClickPress {
+    pub(super) id: String,
+    button: Button,
+    at: Point,
+    time: ClickTime,
+    role: Option<std::mem::Discriminant<A11y>>,
+    paired: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ClickTime {
+    Frame(f64),
+    Host(std::time::Instant),
+}
+
+impl ClickTime {
+    fn within(self, previous: Self, window: f64) -> bool {
+        let elapsed = match (self, previous) {
+            (Self::Frame(now), Self::Frame(before)) => Some(now - before),
+            (Self::Host(now), Self::Host(before)) => now
+                .checked_duration_since(before)
+                .map(|elapsed| elapsed.as_secs_f64()),
+            _ => None,
+        };
+        elapsed.is_some_and(|elapsed| elapsed >= 0. && elapsed < window)
+    }
+}
+
 impl Ui {
+    // Driver batches advance animation time on their LAST event. Clicks
+    // need the real tick timestamp even on the FIRST queued press after idle.
+    pub(crate) fn set_pointer_time(&mut self, time: std::time::Instant) {
+        self.pointer_time = Some(time);
+    }
+
     /// The displayed focused edit buffer, including marked composition. Its
     /// selection and geometry come from the same resolved frame as `Frame::ime`.
     pub fn text_input_state(&self) -> Option<TextInputState> {
@@ -175,6 +211,37 @@ impl Ui {
         self.preedit = None;
         self.focus = None;
     }
+    /// Discard input delivered to the outgoing view before intentionally
+    /// changing its owner, for example when switching tabs. Call this before
+    /// building or focusing the incoming view, so it cannot receive the old
+    /// view's keys, text, paste, native edits, wheel, or outside-click press.
+    /// Pointer capture, composition, and drag are cancelled as by [`Ui::cancel`];
+    /// an owed [`Edit::End`] is still delivered exactly once.
+    ///
+    /// Focus is unchanged: the caller decides whether to blur or restore it.
+    /// Persistent editor state and caller-owned values, outbound clipboard
+    /// text, and queued host edits/actions are preserved. This scans retained
+    /// nodes to discard pending native edits; it is not a constant-time API.
+    ///
+    /// This only clears `Ui`'s delivered input. It cannot change a caller's raw
+    /// [`Input`]; consumers of that input must separately check the view owner.
+    /// Native file clipboard offers and application worker/job mailboxes are
+    /// outside `Ui` and are neither cancelled nor discarded by this method.
+    pub fn discard_input_for_view_change(&mut self) {
+        self.cancel();
+        self.keys.clear();
+        self.typed.clear();
+        self.pasted = None;
+        for state in self.nodes.values_mut() {
+            if let Some(edit) = state.text_edit.as_mut() {
+                edit.native.clear();
+            }
+        }
+        self.wheel = Vec2::ZERO;
+        self.wheel_claims.clear();
+        self.press_at = None;
+        self.ime_caret = None;
+    }
     /// Focus `id` from code. No check that it exists: it may not have been
     /// built yet.
     pub fn focus(&mut self, id: impl Into<Id>) {
@@ -183,12 +250,22 @@ impl Ui {
         self.focus = Some(id.into().as_str().to_owned());
         self.focus_visible = true;
     }
+    // The presented tree can have disabled a target after input was matched
+    // against the preceding hit map. Do not deliver that stale input to the
+    // next build; its End edit is still delivered separately to the host.
+    pub(super) fn disabled_target(&self, id: &str) -> bool {
+        self.scene
+            .as_ref()
+            .and_then(|scene| scene.surface(id))
+            .is_some_and(|surface| surface.disabled)
+    }
+
     /// The keys this frame, if `id` is focused. Empty otherwise, so a widget
     /// may loop over it unconditionally.
     pub fn keys(&self, id: impl Into<Id>) -> &[KeyPress] {
         let id: Id = id.into();
         let id = id.as_str();
-        if self.focused(Id::runtime(id)) {
+        if self.focused(Id::runtime(id)) && !self.disabled_target(id) {
             &self.keys
         } else {
             &[]
@@ -533,6 +610,30 @@ impl Ui {
         let id = id.as_str();
         self.double.as_deref() == Some(id)
     }
+    pub(super) fn retire_clicks(&mut self, scene: &ResolvedScene) {
+        let live = |press: &ClickPress| {
+            scene.surface(&press.id).is_some_and(|surface| {
+                !surface.disabled
+                    && surface
+                        .semantics
+                        .as_ref()
+                        .map(|s| std::mem::discriminant(&s.role))
+                        == press.role
+            })
+        };
+        if self.last_click.as_ref().is_some_and(|press| !live(press)) {
+            self.last_click = None;
+        }
+        if self
+            .pending_click
+            .as_ref()
+            .is_some_and(|press| !live(press))
+        {
+            self.pending_click = None;
+            self.double = None;
+        }
+    }
+
     /// The text the input method is composing, for the focused field to
     /// paint. It is never part of a value.
     pub fn preedit(&self) -> Option<(&str, Option<(usize, usize)>)> {
@@ -554,6 +655,58 @@ impl Ui {
     }
     /// Move the focus to the next (or previous) focusable surface in z-order,
     /// wrapping. Nothing focused yet starts at either end.
+    /// The innermost open modal, which holds the keyboard.
+    pub(super) fn focus_trap(&self) -> Option<&Id> {
+        self.focus_traps.last().map(|(t, _)| t)
+    }
+    /// After a resolve: a modal that went gives focus back to what had it
+    /// when it opened, if that is still there; the innermost modal still up
+    /// holds focus on one of its stops. True when focus moved.
+    pub(super) fn settle_focus_trap(&mut self) -> bool {
+        let Some(scene) = self.scene.clone() else {
+            return false;
+        };
+        let was = self.focus.clone();
+        // Innermost first, so stacked modals unwind in order.
+        while let Some((trap, before)) = self.focus_traps.last().cloned() {
+            if scene.surface(trap.as_str()).is_some() {
+                break;
+            }
+            self.focus_traps.pop();
+            if !self
+                .focus
+                .as_deref()
+                .is_some_and(|f| scene.surface(f).is_some())
+                || self.in_group(trap.as_str(), self.focus.as_deref())
+            {
+                self.focus = before.filter(|f| scene.surface(f).is_some());
+            }
+        }
+        // A modal that closed under an open one leaves it in place.
+        self.focus_traps
+            .retain(|(t, _)| scene.surface(t.as_str()).is_some());
+        if let Some(trap) = self.focus_trap().cloned()
+            && !self.in_group(trap.as_str(), self.focus.as_deref())
+        {
+            self.focus = scene
+                .surfaces()
+                .filter(|s| s.focusable && !s.disabled)
+                .map(|s| s.key.to_string())
+                .find(|k| self.in_group(trap.as_str(), Some(k)));
+            self.focus_visible = false;
+        }
+        if self.focus == was {
+            return false;
+        }
+        // Reused memos would keep the old caret: rebuild both fields.
+        for k in [self.focus.as_deref(), was.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            self.hot.extend(scene.memos_at(k).map(|(id, _)| id));
+        }
+        true
+    }
     pub(super) fn cycle_focus(&mut self, back: bool) {
         let Some(scene) = self.scene.as_ref() else {
             return;
@@ -562,6 +715,10 @@ impl Ui {
             .surfaces()
             .filter(|s| s.focusable && !s.disabled)
             .map(|s| s.key.to_string())
+            .filter(|k| {
+                let trap = self.focus_trap().map(Id::as_str);
+                trap.is_none_or(|t| self.in_group(t, Some(k)))
+            })
             .collect();
         if stops.is_empty() {
             return;
@@ -607,7 +764,7 @@ impl Ui {
         self.drag_with_fine(id, value, range, px, vertical, fine)
     }
 
-    /// A validated semantic value in the surface's advertised units.
+    /// Return a validated semantic value requested for this control.
     pub fn requested_value(&self, id: impl Into<Id>) -> Option<f64> {
         let id: Id = id.into();
         self.actions.iter().rev().find_map(|a| match a {
@@ -616,8 +773,7 @@ impl Ui {
         })
     }
 
-    /// The same drag engine with a caller-selected fine modifier.
-    #[allow(clippy::too_many_arguments)]
+    /// Drag with a caller-selected fine adjustment modifier.
     pub fn drag_with_fine(
         &self,
         id: impl Into<Id>,
@@ -629,7 +785,7 @@ impl Ui {
     ) -> bool {
         let id: Id = id.into();
         let id = id.as_str();
-        if !(range.start().is_finite() && range.end().is_finite()) {
+        if self.disabled_target(id) || !(range.start().is_finite() && range.end().is_finite()) {
             return false;
         }
         if let Some(value_from_action) = self.requested_value(Id::runtime(id)) {
@@ -646,7 +802,7 @@ impl Ui {
             return false;
         }
         let delta = r.drag_delta;
-        let d = if vertical { -delta.y } else { delta.x } * if fine { FINE_DRAG } else { 1. };
+        let d = (if vertical { -delta.y } else { delta.x }) * if fine { FINE_DRAG } else { 1.0 };
         if !d.is_finite() {
             return false;
         }
@@ -665,18 +821,17 @@ impl Ui {
     /// Which memos the next build must run again: the ones holding a key
     /// whose state moved this frame, or all of them after discrete input.
     /// `was` is the hovered, held and tagged keys before this frame.
-    /// Returns whether a memo needs another frame to settle glyph hinting.
-    pub(super) fn heat(&mut self, scene: &ResolvedScene, was: &[Option<Id>; 3], buttons: bool) -> bool {
-        // Only a successful resolve consumes recovery. After an error, equal
-        // committed coordinates cannot prove a false hint is deliberate.
-        let recovery = std::mem::take(&mut self.glyph_recovery);
+    pub(super) fn heat(&mut self, scene: &ResolvedScene, was: &[Option<Id>; 3], buttons: bool) {
         self.hot.clear();
         let me = self.me;
         let ids = &mut self.memo_ids;
         self.kept.retain(|id, k| {
             let live = std::mem::take(&mut k.live);
             if !live {
-                TREES.with(|t| t.borrow_mut().remove(&(me, *id)));
+                let old = TREES.with(|t| t.borrow_mut().remove(&(me, *id)));
+                if let Some(old) = old {
+                    Self::retire_tree(old);
+                }
                 ids.remove(&k.id);
             }
             live
@@ -687,31 +842,8 @@ impl Ui {
             || self.pasted.is_some()
             || self.preedit.is_some()
             || !self.delivered.is_empty();
-        if self.kept.is_empty() {
-            return false;
-        }
-        // A changed axis paints one unhinted frame. Copying that scene span
-        // would keep it unhinted: wake only its memo ancestors to settle it.
-        // Stable unhinted runs (e.g. icons) must not request frames forever.
-        let mut settling = false;
-        if scene.paint.iter().any(|p| p.text.as_ref().is_some_and(|t| !t.hint)) {
-            let previous: HashMap<_, _> = self.scene.iter().flat_map(|s| &s.paint)
-                .filter_map(|p| p.text.as_ref().map(|t| (p.key.as_str(), &t.font_coords)))
-                .collect();
-            for p in &scene.paint {
-                if let Some(t) = &p.text
-                    && !t.hint
-                    && (recovery || previous.get(p.key.as_str()).is_none_or(|coords| *coords != &t.font_coords))
-                {
-                    for (id, _) in scene.memos_at(p.key.as_str()) {
-                        self.hot.insert(id);
-                        settling = true;
-                    }
-                }
-            }
-        }
-        if self.hot_all {
-            return settling;
+        if self.kept.is_empty() || self.hot_all {
+            return;
         }
         let now = [
             self.interaction.hovered(),
@@ -749,8 +881,11 @@ impl Ui {
         for k in keys {
             self.hot.extend(scene.memos_at(k).map(|(id, _)| id));
         }
-        self.hot.extend(scene.memos_floating());
-        settling
+        self.hot.extend(
+            scene
+                .memos_floating()
+                .filter(|id| self.kept.get(id).is_none_or(|k| !k.layout_floats)),
+        );
     }
 
     /// Focus follows a press on a focusable surface, and a press on anything
@@ -765,21 +900,63 @@ impl Ui {
         ime: Vec<Ime>,
     ) {
         self.double = None;
+        let click_time = self
+            .pointer_time
+            .map_or(ClickTime::Frame(self.time), ClickTime::Host);
+        if self
+            .last_click
+            .as_ref()
+            .is_some_and(|press| !click_time.within(press.time, self.double_click))
+        {
+            self.last_click = None;
+        }
+        if let Some(press) = self.pending_click.as_ref() {
+            let response = self.interaction.get(&press.id);
+            if response.dragged {
+                self.pending_click = None;
+            } else if response.released
+                && let Some(press) = self.pending_click.take()
+            {
+                self.last_click = (response.clicked && !press.paired).then_some(press);
+            }
+        }
         let went_down = [Button::Primary, Button::Secondary, Button::Middle]
             .into_iter()
             .any(|b| self.pointer.buttons.contains(b) && !was.contains(b));
         if went_down && self.interaction.held().is_none() {
             self.focus = None;
+            self.last_click = None;
         }
         self.press_at = self.pointer.pos.filter(|_| went_down);
         if let Some(id) = self.interaction.pressed().map(str::to_owned) {
-            if let Some((prev, t)) = self.last_press.take()
-                && prev == id
-                && self.time - t < self.double_click
-            {
-                self.double = Some(id.clone());
+            let response = self.interaction.get(&id);
+            if let (Some(button), Some(at)) = (response.button, self.pointer.pos) {
+                let role = self
+                    .scene
+                    .as_ref()
+                    .and_then(|s| s.surface(&id))
+                    .and_then(|s| s.semantics.as_ref())
+                    .map(|s| std::mem::discriminant(&s.role));
+                let time = click_time;
+                let paired = self.last_click.take().is_some_and(|previous| {
+                    previous.id == id
+                        && previous.button == button
+                        && previous.role == role
+                        && time.within(previous.time, self.double_click)
+                        && at.distance(previous.at) <= mui_input::DRAG_THRESHOLD
+                });
+                if paired {
+                    self.double = Some(id.clone());
+                }
+                self.pending_click = Some(ClickPress {
+                    id: id.clone(),
+                    button,
+                    at,
+                    time,
+                    role,
+                    paired,
+                });
             }
-            self.last_press = Some((id.clone(), self.time));
             let keeps = self
                 .scene
                 .as_ref()
@@ -787,6 +964,12 @@ impl Ui {
                 .is_some_and(|s| s.focusable);
             self.focus = keeps.then_some(id);
             self.focus_visible = false;
+        }
+        // Nothing outside a modal hears the keyboard while it is up.
+        if let Some(trap) = self.focus_trap()
+            && !self.in_group(trap.as_str(), self.focus.as_deref())
+        {
+            self.focus = None;
         }
         for k in &keys {
             match k.key {

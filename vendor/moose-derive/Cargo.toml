@@ -1,12 +1,11 @@
-# Vendored from moose bffa467 with CONTRA's output port name patch; see vendor/MOOSE-PATCHES.md.
 [package]
 name = "moose-derive"
+description = "Proc macros for moose plugins, providing plugin_info!() to generate metadata from moose.toml at compile time"
 version = "7.0.0"
 repository = "https://github.com/Matari-Audio/moose"
 homepage = "https://github.com/Matari-Audio/moose"
 edition = "2024"
 license = "LicenseRef-TruceLicense-1.0"
-description = "Proc macros for moose plugins, providing plugin_info!() to generate metadata from moose.toml at compile time"
 
 [lib]
 proc-macro = true
@@ -15,8 +14,8 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = {version = "2", features = ["full"]}
-toml = "1"
-moose-build = {path = "../moose-build"}
-moose-params = {path = "../moose-params"}
-moose-utils = {path = "../moose-utils"}
+toml = {version = "1"}
+moose-build = {version = "7.0.0", path = "../moose-build"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
+moose-utils = {version = "7.0.0", path = "../moose-utils"}
 

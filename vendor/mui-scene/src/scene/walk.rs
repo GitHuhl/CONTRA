@@ -289,7 +289,11 @@ impl<'a> Walk<'a> {
     ) -> Result<(Option<Rect>, Size), SceneError> {
         let e = n.payload();
         let content = self.content_size(n, at, frame);
-        let bounds = contour.bounds()?.map(|b| b + contour.offset.to_vec2());
+        let bounds = self
+            .caches
+            .outlines
+            .bounds(contour)?
+            .map(|b| b + contour.offset.to_vec2());
         let (hit_path, hit_offset) = self.caches.outlines.rotated(
             (key.clone(), 0),
             &contour.path,
@@ -360,6 +364,9 @@ impl<'a> Walk<'a> {
             disabled: inner.disabled,
             semantics,
             semantic_label_implicit,
+            description: e.extras().description.clone(),
+            value_description: e.extras().value_description.clone(),
+            numeric_step: e.extras().numeric_step,
             text_geometry,
             text_value: match &e.content {
                 Content::Text(t) => Some(t.clone()),
@@ -418,11 +425,11 @@ impl<'a> Walk<'a> {
             // The plates painted inside this node, so only its entries are
             // scanned, not everything painted before it.
             let start = o.start;
-            let own = self.out.paint.split_off(start);
-            let all = own.len();
+            let all = self.out.paint.len() - start;
             self.out
                 .paint
-                .extend(own.into_iter().filter(|p| !m.consumes(&p.key, p.layer)));
+                .extract_if(start.., |p| m.consumes(&p.key, p.layer))
+                .for_each(drop);
             if self.out.paint.len() - start != all {
                 // What a memo inside painted has been thinned: not copyable.
                 for s in self
@@ -654,7 +661,7 @@ impl<'a> Walk<'a> {
                                 draw.path.validate(100_000)?;
                                 Ok(draw.path.clone())
                             })
-                            .collect::<Result<Vec<_>, SceneError>>()?;
+                            .collect::<Result<Arc<[_]>, SceneError>>()?;
                         self.caches
                             .outlines
                             .canvases
@@ -664,19 +671,20 @@ impl<'a> Walk<'a> {
                 };
                 // Hits are local to the surface's offset, the outline's.
                 let d = origin - contour.offset;
-                for ((k, draw), local) in draws.iter().enumerate().zip(paths) {
+                for ((k, draw), local) in draws.iter().enumerate().zip(paths.iter()) {
                     let d = d + draw.at.to_vec2();
                     if let Some(tag) = &draw.tag {
                         let hit = if d == Vec2::ZERO {
                             local.clone()
                         } else {
-                            let mut p = Path::clone(&local);
+                            let mut p = Path::clone(local);
                             p.translate(d);
                             Arc::new(p)
                         };
                         hits.push((Arc::clone(tag), hit));
                     }
-                    if let Some(p) = self.push(Layer::Draw(k), local, None, &draw.fill, *bg) {
+                    if let Some(p) = self.push(Layer::Draw(k), local.clone(), None, &draw.fill, *bg)
+                    {
                         p.width = draw.width;
                         p.offset = origin + draw.at.to_vec2();
                     }
@@ -708,7 +716,13 @@ impl<'a> Walk<'a> {
             _ => Fill::Role(crate::Role::Ink),
         };
         let face = Face::of(e, th);
-        let lines = self.runs.lines(t, face, frame.size.width, e.lines);
+        // A stand-in-measured value is one line in the box its stand-in set.
+        let room = if e.extras().measure_as.is_some() {
+            f64::INFINITY
+        } else {
+            frame.size.width
+        };
+        let lines = self.runs.lines(t, face, room, e.lines);
         let fonts = self.runs.fonts_for(face);
         let font_coords = self.runs.coords(&fonts, face);
         // An icon font's Private Use Area glyphs have no stems worth
@@ -716,9 +730,36 @@ impl<'a> Walk<'a> {
         let hint = self.runs.settled(key, &font_coords) && !t.chars().all(private_use);
         let n = lines.len();
         let base = self.base_y;
+        // A wrapped paragraph paints slices of its one run, at its metrics.
+        let sliced = if n > 1 {
+            self.runs.line_glyphs(t, face, room, e.lines)
+        } else {
+            Arc::default()
+        };
+        let para = if sliced.is_empty() {
+            None
+        } else {
+            self.runs
+                .run(t, face)?
+                .map(|r| (r.ascent, r.descent, r.line_height))
+        };
         for (li, line) in lines.iter().enumerate() {
-            let Some(run) = self.runs.run(line, face)? else {
-                break;
+            let run = match (sliced.get(li), para) {
+                (Some(glyphs), Some((ascent, descent, line_height))) => LineRun {
+                    glyphs: glyphs.clone(),
+                    ascent,
+                    descent,
+                    line_height,
+                },
+                _ => match self.runs.run(line, face)? {
+                    Some(r) => LineRun {
+                        glyphs: r.glyphs.clone(),
+                        ascent: r.ascent,
+                        descent: r.descent,
+                        line_height: r.line_height,
+                    },
+                    None => break,
+                },
             };
             // One line sits centred on ascent+descent, or on the
             // baseline its parent chose; a stack centres the block.
@@ -749,7 +790,7 @@ impl<'a> Walk<'a> {
                 fonts: fonts.clone(),
                 size: size as f32,
                 origin,
-                glyphs: run.glyphs.clone(),
+                glyphs: run.glyphs,
                 axes: e.axes.clone(),
                 font_coords: font_coords.clone(),
                 hint,
@@ -877,6 +918,9 @@ impl<'a> Walk<'a> {
                 semantics: None,
                 semantic_label_implicit: false,
                 text_value: None,
+                description: None,
+                value_description: None,
+                numeric_step: None,
                 text_geometry: None,
                 clip: inner.clip,
                 clip_path: inner.clip_paths.clone(),
@@ -1039,7 +1083,9 @@ impl<'a> Walk<'a> {
                 Content::Text(t) => {
                     let face = Face::of(c.payload(), th);
                     let lines = self.runs.lines(t, face, f.size.width, c.payload().lines);
-                    self.runs.run(&lines[0], face)?.map(|r| {
+                    // Wrapped lines stack at the paragraph's metrics.
+                    let first: &str = if lines.len() > 1 { t } else { &lines[0] };
+                    self.runs.run(first, face)?.map(|r| {
                         let height = if lines.len() == 1 {
                             r.ascent + r.descent
                         } else {
@@ -1070,6 +1116,14 @@ type Clips = Arc<[super::PlacedPath]>;
 /// A copied span moved by `d`: every offset, frame, origin and clip in it;
 /// the paths are local and stay the same `Arc`s. Clip lists shared between
 /// surfaces are moved once and stay shared.
+/// One painted line's glyphs and the metrics it stacks at.
+struct LineRun {
+    glyphs: Arc<[super::TextGlyph]>,
+    ascent: f64,
+    descent: f64,
+    line_height: f64,
+}
+
 struct Shift {
     d: Vec2,
     lists: Vec<(*const [super::PlacedPath], Clips)>,

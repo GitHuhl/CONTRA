@@ -1,6 +1,6 @@
 //! The retained GPU renderer on a real device. Skips, loudly, when the
 //! machine has no wgpu adapter at all; a software adapter still runs it.
-#![cfg(feature = "gpu-effects")]
+#![cfg(feature = "gpu-quad")]
 
 use mui_scene::prelude::*;
 use mui_scene::{Image, ResolvedScene};
@@ -213,7 +213,7 @@ fn a_host_texture_paints_and_refreshes_without_a_new_scene() {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let fill = |rgba: [u8; 4]| {
@@ -243,7 +243,7 @@ fn a_host_texture_paints_and_refreshes_without_a_new_scene() {
     fill([0, 0, 255, 255]);
     r.set_texture(7, &host);
     let again = r.render(&scene, Affine::IDENTITY, &view).unwrap();
-    assert_eq!((again.encoded_scenes, again.renders), (0, 1));
+    assert_eq!(again.renders, 1, "what samples a touched texture redraws");
     assert_eq!(
         at(&pixels(&device, &queue, &out), 160, 100),
         [0, 0, 255, 255]
@@ -545,9 +545,10 @@ fn an_unchanged_entry_between_two_changes_is_not_damage() {
     same_pixels(&part, &whole);
 }
 
-/// A float appended to the list, and taken away again, is damage too.
+/// A float appended to the list, and taken away again, redraws right. The
+/// quad pass redraws a list whose length changed whole.
 #[test]
-fn a_tooltip_coming_and_going_renders_only_its_box() {
+fn a_tooltip_coming_and_going_matches_a_whole_render() {
     let (plain, tip) = (
         board(None, false, 0.6, Role::Background),
         board(None, true, 0.6, Role::Background),
@@ -556,11 +557,7 @@ fn a_tooltip_coming_and_going_renders_only_its_box() {
         let Some((part, whole, stats)) = damaged(before, after) else {
             return;
         };
-        assert!(
-            stats.rendered_pixels < AREA / 4,
-            "{}",
-            stats.rendered_pixels
-        );
+        assert_eq!(stats.renders, 1);
         same_pixels(&part, &whole);
     }
 }
@@ -656,9 +653,10 @@ fn big_changes_the_first_frame_and_a_resize_render_everything() {
     assert_eq!(resized.rendered_pixels, AREA - u64::from(SIZE[0]) * 8);
 }
 
-/// A backdrop blurs whatever is under it, so no change is local to it.
+/// A change the backdrop's blur cannot reach redraws only its own box; the
+/// kept blur stays.
 #[test]
-fn a_change_under_a_backdrop_renders_everything() {
+fn a_change_beside_a_backdrop_renders_only_its_box() {
     let glass = |c: Color| {
         let root = stack![
             block(40., 40.).fill(Fill::Color(c)).id("swatch"),
@@ -676,7 +674,11 @@ fn a_change_under_a_backdrop_renders_everything() {
     ) else {
         return;
     };
-    assert_eq!(stats.rendered_pixels, AREA);
+    assert!(
+        stats.rendered_pixels < AREA / 4,
+        "{}",
+        stats.rendered_pixels
+    );
     same_pixels(&part, &whole);
 }
 
@@ -788,4 +790,348 @@ fn a_backdrop_over_nothing_stays_translucent() {
         px[0] == 0 && px[1] == 0 && px[2].abs_diff(128) <= 1 && px[3].abs_diff(128) <= 1,
         "{px:?}"
     );
+}
+
+/// Non-Apple sbix glyphs keep their authored bearings, without the Apple emoji
+/// workaround. The same font passes through both retained GPU and CPU paths.
+#[test]
+#[cfg(feature = "cpu")]
+fn non_apple_bitmap_glyph_bearings_match_cpu_and_gpu() {
+    let font = Font::new(&include_bytes!("fixtures/non_apple_sbix.ttf")[..]).unwrap();
+    let root = text("\u{E000}")
+        .text_size(32.)
+        .offset(32., 32.)
+        .anchor(Align::Start, Align::Start)
+        .id("bitmap");
+    let scene = resolve(
+        &SceneSpec::new(root)
+            .font(font)
+            .offered(Size::new(320., 200.)),
+    )
+    .unwrap();
+    let run = scene.paint.iter().find_map(|p| p.text.as_ref()).unwrap();
+    let x = (run.origin.x + f64::from(run.glyphs[0].x) + 6.).round() as u32;
+    let y = (run.origin.y + f64::from(run.glyphs[0].y) - 4. - 8.).round() as u32;
+    let check = |pixels: &[u8], backend: &str| {
+        assert_eq!(
+            at(pixels, x + 3, y + 3),
+            [0, 255, 0, 255],
+            "{backend} bitmap at authored bearing"
+        );
+        assert_eq!(
+            at(pixels, x - 3, y + 3),
+            [0, 0, 0, 0],
+            "{backend} must not invert x bearing"
+        );
+        assert_eq!(
+            at(pixels, x + 3, y + 11),
+            [0, 0, 0, 0],
+            "{backend} must not apply Apple offset"
+        );
+    };
+    let export = |pixels: &[u8], backend: &str| {
+        if let Some(directory) = std::env::var_os("MUI_RENDER_EVIDENCE_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            let file = std::fs::File::create(
+                std::path::Path::new(&directory).join(format!("synthetic-sbix-{backend}.png")),
+            )
+            .unwrap();
+            let mut encoder = png::Encoder::new(file, 64, 64);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let roi_x = x.saturating_sub(16).min(SIZE[0] - 64) as usize;
+            let roi_y = y.saturating_sub(16).min(SIZE[1] - 64) as usize;
+            let crop: Vec<u8> = pixels
+                .as_chunks::<{ 320 * 4 }>()
+                .0
+                .iter()
+                .skip(roi_y)
+                .take(64)
+                .flat_map(|row| row[roi_x * 4..(roi_x + 64) * 4].iter().copied())
+                .collect();
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&crop)
+                .unwrap();
+        }
+    };
+    let mut cpu = mui_vello::software::Renderer::new((320, 200)).unwrap();
+    assert!(cpu.render(&scene, Affine::IDENTITY).unwrap());
+    export(cpu.pixels(), "cpu");
+    check(cpu.pixels(), "CPU");
+    assert!(
+        !cpu.render(&scene, Affine::IDENTITY).unwrap(),
+        "CPU retains bitmap frame"
+    );
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    eprintln!("bitmap regression adapter: {:?}", device.adapter_info());
+    let output = readable(&device);
+    let view = output.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut gpu = pollster::block_on(hybrid(&device, &queue));
+    gpu.render(&scene, Affine::IDENTITY, &view).unwrap();
+    let readback = pixels(&device, &queue, &output);
+    export(&readback, "gpu");
+    check(&readback, "GPU");
+    assert_eq!(
+        gpu.render(&scene, Affine::IDENTITY, &view).unwrap().renders,
+        0,
+        "GPU retains bitmap frame"
+    );
+}
+
+fn bounded_weld(role: Role, x: f64) -> ResolvedScene {
+    let plates = row([block(20., 20.).fill(role), block(20., 20.).fill(role)])
+        .gap(4.)
+        .weld(Weld::all().reach(8.).blend(8.))
+        .id("bounded.weld")
+        .float()
+        .offset(x, 24.)
+        .anchor(Align::Start, Align::Start);
+    resolve(
+        &SceneSpec::new(stack([block(320., 200.).fill(Role::Background), plates]))
+            .offered(Size::new(320., 200.))
+            .weld_backend(WeldBackend::AnalyticGpu),
+    )
+    .unwrap()
+}
+
+#[test]
+fn bounded_weld_changes_and_moves_match_full_renders() {
+    for scale in [1., 2.] {
+        for (before, after) in [
+            (
+                bounded_weld(Role::Primary, 32.),
+                bounded_weld(Role::Danger, 32.),
+            ),
+            (
+                bounded_weld(Role::Primary, 32.),
+                bounded_weld(Role::Primary, 80.),
+            ),
+        ] {
+            let (part, whole, stats) = damaged_at(&before, &after, Affine::scale(scale))
+                .expect("GPU adapter required for weld damage validation");
+            same_pixels(&part, &whole);
+            assert_eq!(stats.renders, 1);
+            assert!(
+                stats.rendered_pixels < AREA / 2,
+                "bounded weld repainted {} pixels",
+                stats.rendered_pixels
+            );
+            assert_eq!(stats.texture_allocations, 0);
+        }
+    }
+}
+
+#[test]
+fn bounded_uniform_morph_reuses_encoding_and_matches_a_fresh_frame() {
+    let (device, queue) = device().expect("GPU adapter required for material replay validation");
+    for scale in [1., 1.5, 2.] {
+        let mut scene = bounded_weld(Role::Primary, 32.);
+        let output = readable(&device);
+        let reference = readable(&device);
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let reference_view = reference.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut retained = pollster::block_on(hybrid(&device, &queue));
+        let mut fresh = pollster::block_on(hybrid(&device, &queue));
+        let xf = Affine::scale(scale);
+        retained.render(&scene, xf, &output_view).unwrap();
+        for progress in [0., 0.5, 1.] {
+            scene.set_weld_morph("bounded.weld", progress).unwrap();
+            let stats = retained.render(&scene, xf, &output_view).unwrap();
+            assert_eq!(stats.effect_draws, 1);
+            assert_eq!(stats.uniform_upload_bytes, 16);
+            assert_eq!(stats.texture_allocations, 0);
+            assert!(stats.rendered_pixels < AREA / 2);
+            fresh.invalidate();
+            fresh.render(&scene, xf, &reference_view).unwrap();
+            near_pixels(
+                &pixels(&device, &queue, &output),
+                &pixels(&device, &queue, &reference),
+                3,
+                "material replay: ",
+            );
+            assert!(retained.is_current(&scene, xf));
+            assert_eq!(
+                retained.render(&scene, xf, &output_view).unwrap().renders,
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn unchanged_welds_skip_encoding_raster_and_presentation() {
+    let (device, queue) = device().expect("GPU adapter required for weld reuse validation");
+    let scene = bounded_weld(Role::Primary, 32.);
+    let out = target(&device);
+    let mut renderer = pollster::block_on(hybrid(&device, &queue));
+    renderer.render(&scene, Affine::IDENTITY, &out).unwrap();
+    assert!(renderer.is_current(&scene, Affine::IDENTITY));
+    let stats = renderer.render(&scene, Affine::IDENTITY, &out).unwrap();
+    assert_eq!(stats.renders, 0);
+    assert_eq!(stats.encoded_scenes, 0);
+    assert_eq!(stats.effect_draws, 0);
+    assert_eq!(stats.uniform_upload_bytes, 0);
+    assert_eq!(stats.boundary_upload_bytes, 0);
+    assert_eq!(stats.texture_allocations, 0);
+}
+
+/// Distant edits in one frame: the quad pass redraws the box around both,
+/// and the frame matches a whole render.
+#[test]
+fn sparse_changes_match_a_full_frame() {
+    let scene = |hot| {
+        let chip = |x, y, id| {
+            block(20., 20.)
+                .fill(if hot { Role::Danger } else { Role::Primary })
+                .float()
+                .offset(x, y)
+                .id(id)
+        };
+        resolve(
+            &SceneSpec::new(
+                stack([chip(10., 10., "a"), chip(275., 165., "b")]).fill(Role::Background),
+            )
+            .offered(Size::new(320., 200.)),
+        )
+        .unwrap()
+    };
+    let Some((part, whole, stats)) = damaged(&scene(false), &scene(true)) else {
+        return;
+    };
+    assert_eq!(stats.renders, 1);
+    same_pixels(&part, &whole);
+}
+
+/// A canvas that grows a draw lengthens the list, which the quad pass
+/// redraws whole; the frame matches a whole render.
+#[test]
+fn inserted_canvas_draws_match_a_whole_render() {
+    let scene = |extra| {
+        let canvas = canvas(move |_| {
+            let mut draws = vec![Draw::fill(
+                Path::polyline(
+                    [
+                        Point::new(5., 5.),
+                        Point::new(20., 5.),
+                        Point::new(20., 20.),
+                    ],
+                    true,
+                ),
+                Role::Primary,
+            )];
+            if extra {
+                draws.push(Draw::fill(
+                    Path::polyline(
+                        [
+                            Point::new(5., 25.),
+                            Point::new(20., 25.),
+                            Point::new(20., 40.),
+                        ],
+                        true,
+                    ),
+                    Role::Danger,
+                ));
+            }
+            draws
+        })
+        .size(40., 50.)
+        .id("canvas");
+        resolve(
+            &SceneSpec::new(
+                stack([
+                    canvas,
+                    block(100., 100.)
+                        .float()
+                        .offset(200., 80.)
+                        .fill(Role::Warning)
+                        .id("far"),
+                ])
+                .fill(Role::Background),
+            )
+            .offered(Size::new(320., 200.)),
+        )
+        .unwrap()
+    };
+    let Some((part, whole, _)) = damaged(&scene(false), &scene(true)) else {
+        return;
+    };
+    same_pixels(&part, &whole);
+}
+
+#[test]
+fn packed_text_regions_match_fresh_glyph_rendering() {
+    let font = Font::new(epaint_default_fonts::HACK_REGULAR).unwrap();
+    let scene = |hot| {
+        let label = |x, y, id| {
+            text("12.3")
+                .text_size(12.)
+                .fill(if hot { Role::Danger } else { Role::Ink })
+                .float()
+                .offset(x, y)
+                .id(id)
+        };
+        resolve(
+            &SceneSpec::new(
+                stack([label(5., 10., "a"), label(125., 75., "b")]).fill(Role::Background),
+            )
+            .font(font.clone())
+            .offered(Size::new(320., 200.)),
+        )
+        .unwrap()
+    };
+    for xf in [Affine::IDENTITY, Affine::scale(2.)] {
+        let Some((part, whole, stats)) = damaged_at(&scene(false), &scene(true), xf) else {
+            return;
+        };
+        // At 2x both labels lie past the target's edge: nothing to draw.
+        assert!(stats.renders <= 1);
+        assert!(stats.rendered_pixels < AREA);
+        same_pixels(&part, &whole);
+    }
+}
+
+#[test]
+fn vector_partial_repaint_matches_full_frame_at_nonzero_origin() {
+    use mui_vello::kurbo::{Rect, Shape};
+    let scene = |color| {
+        let vector = mui_scene::Vector::new(
+            32.,
+            24.,
+            vec![mui_scene::VectorCommand::Fill {
+                path: Rect::new(0., 0., 32., 24.).to_path(0.01),
+                transform: Affine::IDENTITY,
+                brush: mui_vello::peniko::Brush::Solid(mui_vello::peniko::Color::from_rgba8(
+                    color, 210, 70, 255,
+                )),
+                brush_transform: Affine::IDENTITY,
+                rule: mui_vello::peniko::Fill::NonZero,
+            }],
+        )
+        .unwrap();
+        resolve(&SceneSpec::new(
+            stack([block(32., 24.)
+                .at(132., 116.)
+                .fill(Fill::Vector(Arc::new(vector), Fit::Fill))
+                .id("changed")])
+            .size(320., 200.)
+            .radius(0.)
+            .fill(Color::srgb(0.08, 0.08, 0.08)),
+        ))
+        .unwrap()
+    };
+    for scale in [1., 1.5, 2.] {
+        let Some((part, whole, stats)) = damaged_at(&scene(30), &scene(160), Affine::scale(scale))
+        else {
+            return;
+        };
+        assert!(
+            stats.rendered_pixels < AREA,
+            "expected partial repaint at {scale}"
+        );
+        same_pixels(&part, &whole);
+    }
 }

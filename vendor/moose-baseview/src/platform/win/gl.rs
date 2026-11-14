@@ -3,11 +3,11 @@ use std::num::NonZeroI32;
 use std::rc::Rc;
 use windows_sys::Win32::Graphics::OpenGL::wglGetProcAddress;
 
+use super::native::with_dummy_window;
 use crate::gl::*;
 use crate::warn;
 use crate::wrappers::win32::window::{
-    with_dummy_window, HWnd, OwnDeviceContext, PixelFormat, PixelFormatAttribs, WglContext,
-    WglExtra,
+    HWnd, OwnDeviceContext, PixelFormat, PixelFormatAttribs, WglContext, WglExtra,
 };
 use crate::wrappers::win32::RawLibrary;
 

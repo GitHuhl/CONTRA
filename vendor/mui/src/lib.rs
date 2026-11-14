@@ -50,11 +50,12 @@ pub use ui::{Clipboard, Edit, Frame, Interaction, MotionPolicy, TextInputState, 
 pub mod prelude {
     pub use crate::widgets::presets::{card, chip, glass, meter, panel, tile};
     pub use crate::widgets::{
-        BinAxis, BinEdit, Bins, ColorFormat, ColorOpts, Control, CurveEdit, ListEvent, ListItem,
-        ListOptions, ListRow, ListState, Newline, OklchPicker, PickerShape, Response, ScrollTo,
-        TextEdit, TextOpts, Variant, bins, bins_hover, button, color_picker, curve, drag_value,
-        knob, oklch_picker, slider, stepped, text_edit, text_input, toggle, uniform_list,
-        variable_list,
+        BinAxis, BinEdit, Bins, ColorFormat, ColorOpts, Column, Control, CurveEdit, ListEvent,
+        ListItem, ListOptions, ListRow, ListState, Newline, OklchPicker, PickerShape, Response,
+        ScrollTo, Setting, TOAST_SECS, TextEdit, TextOpts, Variant, bins, bins_hover, button,
+        color_picker, curve, dialog, drag_value, group, knob, menu, oklch_picker, popover, select,
+        setting, slider, stepped, table, tabs, text_edit, text_input, toast, toasts, toggle,
+        tree_row, uniform_list, variable_list,
     };
     pub use crate::{Edit, Frame, Interaction, MotionPolicy, SemanticAction, Ui};
     pub use mui_input::{
@@ -75,11 +76,16 @@ pub mod prelude {
 
 /// The before/after example in `docs/DSL-V2.md`, compiled.
 #[cfg(doctest)]
-#[doc = include_str!("../docs/DSL-V2.md")]
+#[doc = include_str!("../../../docs/DSL-V2.md")]
 struct DslDoctests;
 
 /// Every runnable `rust` block in the README, compiled and run by
 /// `cargo test --doc`; `rust,ignore` blocks remain illustrative by design.
 #[cfg(doctest)]
-#[doc = include_str!("../README.md")]
+#[doc = include_str!("../../../README.md")]
 struct ReadmeDoctests;
+
+/// Runnable examples for the semantic control compositions.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/SEMANTIC-CONTROLS.md")]
+struct SemanticControlDoctests;

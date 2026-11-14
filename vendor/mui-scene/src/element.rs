@@ -355,6 +355,17 @@ pub struct Extras {
     /// A string this text node is at least as wide as, whatever it currently
     /// says. See [`Styled::reserve`].
     pub reserve: Option<String>,
+    /// Additional strings measured in the same font. See [`Styled::reserve_all`].
+    pub reserve_all: Option<Arc<[String]>>,
+    /// Supplemental accessible help, separate from the control's name.
+    pub description: Option<Arc<str>>,
+    /// Human-readable value with units, alongside a numeric slider value.
+    pub value_description: Option<Arc<str>>,
+    /// Explicit minimum keyboard/accessibility step for a numeric control.
+    pub numeric_step: Option<f64>,
+    /// The string this text node is laid out as, whatever it says. See
+    /// [`Styled::measure_as`].
+    pub measure_as: Option<String>,
     /// Shown after the pointer rests on the node.
     pub tip: Option<Arc<str>>,
     /// The spring this node's paint chases when its declared style changes.
@@ -411,6 +422,11 @@ impl Extras {
         editable_text: None,
         rotation: None,
         reserve: None,
+        reserve_all: None,
+        description: None,
+        value_description: None,
+        numeric_step: None,
+        measure_as: None,
         tip: None,
         transition: None,
         layout_transition: None,
@@ -491,7 +507,15 @@ impl Element {
         self.extras.as_deref().unwrap_or(&Extras::NONE)
     }
     pub fn extras_mut(&mut self) -> &mut Extras {
-        self.extras.get_or_insert_default()
+        self.extras.get_or_insert_with(crate::declaration::extras)
+    }
+
+    /// Retire this payload's declaration storage before discarding its tree.
+    /// Only empty, bounded buffers are kept; captured values are dropped now.
+    /// The payload must not be resolved or retained after this call.
+    #[doc(hidden)]
+    pub fn recycle_declaration_storage(&mut self) {
+        crate::declaration::recycle(self);
     }
 }
 
@@ -988,6 +1012,54 @@ pub trait Styled: Paints {
         self.element_mut().extras_mut().reserve = Some(s.into());
         self
     }
+    /// Reserve the widest of several strings, measured with this node's font,
+    /// size and variation axes. Unlike counting characters, this works with
+    /// proportional glyphs and unit changes. The current text remains a floor.
+    /// A shared `Arc<[String]>` can be reused without copying the samples.
+    /// This supplements [`Styled::reserve`]; it does not replace it.
+    fn reserve_all(mut self, samples: impl Into<Arc<[String]>>) -> Self {
+        self.element_mut().extras_mut().reserve_all = Some(samples.into());
+        self
+    }
+    /// Supplemental accessible help. Unlike a tooltip this is available
+    /// without hovering, and does not replace the concise accessible name.
+    fn described(mut self, description: impl Into<Arc<str>>) -> Self {
+        self.element_mut().extras_mut().description = Some(description.into());
+        self
+    }
+    /// A slider's value in user-facing units (for example `"440 Hz"`).
+    /// Numeric bounds and actions stay on its [`A11y::Slider`] role.
+    fn value_description(mut self, value: impl Into<Arc<str>>) -> Self {
+        self.element_mut().extras_mut().value_description = Some(value.into());
+        self
+    }
+    /// Minimum arrow-key and accessibility increment for a numeric control.
+    /// Positive finite values override the default hundredth of the range.
+    /// Invalid values clear the override. Pointer dragging stays continuous.
+    fn numeric_step(mut self, step: f64) -> Self {
+        self.element_mut().extras_mut().numeric_step =
+            (step.is_finite() && step > 0.0).then_some(step);
+        self
+    }
+    /// Lay this text node out exactly as if it said `s`, whatever it says:
+    /// the text it shows is paint, so a live readout changing every frame
+    /// re-lays out nothing. One line that a flex row may squeeze like a
+    /// [`Styled::reserve`]; a longer value than `s` overflows its box.
+    ///
+    /// Give it the widest string the node can show. [`Styled::reserve`] is
+    /// the floor-only variant that still measures a longer value.
+    ///
+    /// ```
+    /// use mui_scene::prelude::*;
+    /// let spec = |value: &str| SceneSpec::new(row![text(value).measure_as("-88.8 dB").id("gain")]);
+    /// let a = resolve(&spec("0.0 dB")).unwrap().surface("gain").unwrap().frame;
+    /// let b = resolve(&spec("-12.4 dB")).unwrap().surface("gain").unwrap().frame;
+    /// assert_eq!(a, b);
+    /// ```
+    fn measure_as(mut self, s: impl Into<String>) -> Self {
+        self.element_mut().extras_mut().measure_as = Some(s.into());
+        self
+    }
     /// Declare what this node looks like while hovered, pressed or focused,
     /// beside what it looks like at rest. `f` is handed the resting style,
     /// so it edits rather than replaces, and a later `.fill(..)` is still
@@ -1004,9 +1076,11 @@ pub trait Styled: Paints {
     /// assert_eq!(el.element_mut().states.len(), 1);
     /// ```
     fn on(mut self, state: State, f: impl Fn(Style) -> Style + 'static) -> Self {
-        self.element_mut()
-            .states
-            .push((state, StateStyle(Arc::new(f))));
+        let element = self.element_mut();
+        if element.states.capacity() == 0 {
+            element.states = crate::declaration::states();
+        }
+        element.states.push((state, StateStyle(Arc::new(f))));
         self
     }
     fn tip(mut self, s: impl Into<Arc<str>>) -> Self {

@@ -1,4 +1,3 @@
-pub use crate::platform::x11::window_thread::WindowThreadControl;
 use crate::platform::x11::window_thread::WindowThreadHandle;
 
 pub type WindowHandle = WindowThreadHandle;

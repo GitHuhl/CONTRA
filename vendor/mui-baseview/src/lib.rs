@@ -3,11 +3,16 @@
 //! framework's adapter opens the same window with its own [`View`]), and
 //! [`run`] is the same window as a standalone app.
 //!
-//! This crate only translates baseview's events into [`mui::host::Driver`]
-//! calls and presents through `mui::vello::host::Host`; the queue, the
-//! frame schedule, zoom and key routing are `mui::host`'s, so another
-//! window crate hosts the same [`View`] the same way.
+//! Native callbacks queue ordered input to an editor worker. The worker owns
+//! [`mui::host::Driver`], builds and rasters into persistent offscreen targets,
+//! then returns changed bitmap regions for native presentation. Baseview's
+//! display source paces demand; idle content submits no rendering work.
 #![deny(unsafe_code)]
+
+#[cfg(all(panic = "abort", not(feature = "allow-panic-abort")))]
+compile_error!(
+    "mui-baseview requires panic=unwind for host-safe callback containment; allow-panic-abort explicitly accepts that a panic terminates the host"
+);
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -15,120 +20,135 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mui_native::native::{AccessibilityUi, NativeAccessibility};
-// Native first: dropping the pair invalidates the portable endpoint before it
-// is destroyed. The upstream native endpoint is explicitly !Send and !Sync.
+use a11y::{AccessibilityUi, NativeAccessibility};
 type A11y = (NativeAccessibility, AccessibilityUi);
+type RenderTask = Box<dyn FnOnce() + Send>;
+
+/// Native IME and accessibility bridges for custom baseview hosts.
+pub mod native;
 /// The baseview this window runs on (moose-baseview), so a consumer names
 /// `Window`, `WindowSettings` and friends without depending on it itself.
 pub use baseview;
+
+/// A drag thumbnail's size in logical pixels, for
+/// [`Requests::drag_out_with_image`].
+pub const DRAG_PREVIEW_SIZE: (usize, usize) = (224, 90);
+
+mod drag;
+mod native_worker;
+mod policies;
+mod timing;
 use baseview::dpi::{LogicalSize, PhysicalPosition};
 use baseview::{
     DropData, DropEffect, Event, EventStatus, HandlerError, MouseButton, MouseCursor, MouseEvent,
     ScrollDelta, Window, WindowContext, WindowEvent, WindowHandler, WindowSettings, WindowSize,
 };
+pub use drag::DragQueueError;
 use keyboard_types::{Key as HostKey, KeyState, KeyboardEvent, Modifiers, NamedKey};
+/// Drag images and protocol lifecycle values shared by product editors.
+pub use matari_audio_drag_and_drop::{
+    DragImage, DragPreview, FailureStage, LinuxOutcome, Outcome, PreviewImageError, PreviewStatus,
+    SessionEvent,
+};
 /// What a [`KeyHook`] is handed.
 pub use mui::host::KeyEvent;
-use mui::host::{Driver, Modifier, NOTCH_LINES, NativeKey, Wheel};
+use mui::host::{Driver, Modifier, NativeKey, Wheel};
 pub use mui::host::{Shared, View, lock};
 use mui::prelude::{Button, Cursor, Key, Mods, Point};
-use mui::vello::host::{Frame, Host, target_size};
+use mui::vello::host::{FailureClass, Frame, GpuInit, Host, Retry, target_size};
 use mui::vello::kurbo::Affine;
+use native_worker::build;
+pub use policies::{WheelAcceleration, WheelPolicy};
 #[cfg(target_os = "linux")]
 use raw_window_handle::HasDisplayHandle;
 use raw_window_handle::HasWindowHandle;
 
-mod pace;
-mod timing;
-pub use timing::{
-    NATIVE_METRICS, NATIVE_OUTCOMES, NATIVE_TIMING_LIMIT, NativeFrameOutcome, NativeFrameSample,
-    NativeTimingHook, NativeTimingReport,
-};
-
-const GPU_RETRY: Duration = Duration::from_millis(500);
-/// KONTAKTO patch: MUI lines per wheel notch (see the wheel event below).
-/// baseview does not read the system's scroll-lines setting, so this is fixed:
-/// ten of the theme's 12-point lines, 120 points or five list rows.
-/// KONTAKTO patch: notches this close together are one fling, and each one
-/// in it scrolls further than the last, up to [`MAX_GAIN`] times a notch.
-const FLING: Duration = Duration::from_millis(90);
-const MAX_GAIN: f64 = 3.;
-
-/// KONTAKTO patch: lines one notch of `y` scrolls, `gap` after the last
-/// notch: a fast run the same way speeds up, a pause or a turn starts over.
-/// `run` is the notches in the fling so far, signed by direction.
-pub fn notch_lines(y: f64, gap: Option<Duration>, run: &mut i32) -> f64 {
-    let way = if y < 0. { -1 } else { 1 };
-    *run = if gap.is_some_and(|g| g < FLING) && run.signum() == way {
-        *run + way
-    } else {
-        way
-    };
-    let gain = (1. + 0.25 * f64::from(run.abs() - 1)).min(MAX_GAIN);
-    y * NOTCH_LINES * gain
-}
-
-thread_local! {
-    /// KONTAKTO patch: see [`resize_corner`].
-    static CORNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// KONTAKTO patch: the pointer is over (or dragging) the window's resize
-/// corner: show the diagonal resize cursor, which MUI's `Cursor` lacks.
-/// Set from the view's build, on the window's thread, every frame.
-pub fn resize_corner(on: bool) {
-    CORNER.with(|c| c.set(on));
-}
-
-/// KONTAKTO patch: asked every tick with the frame's `Ui`: whether the
-/// pointer hides now (a knob being dragged). When it stops, the pointer
-/// comes back where it hid.
-pub type PointerHook = Arc<Mutex<dyn FnMut(&mui::Ui) -> bool + Send>>;
-
-/// KONTAKTO patch: observe native GPU diagnostics outside the UI/model lock.
-/// Host retains its callback; the window forwards errors on its next tick.
-pub type LogHook = Arc<Mutex<dyn FnMut(&str) + Send>>;
-
 /// An app's look at every key event, down and up, before MUI routes it:
 /// `true` takes the key, and neither MUI nor the host sees it. MUI hands a
 /// view key presses only; a computer keyboard that plays notes has to hear
-/// the key come up. Runs on the window's thread with the last frame's `Ui`.
+/// the key come up. Runs on the model worker with its retained `Ui`; native calls belong in the native pump.
 pub type KeyHook = Arc<Mutex<dyn FnMut(&mui::Ui, &KeyEvent) -> bool + Send>>;
 
-/// Observe the owned X11 identifier at creation and its cancellation edge
-/// before native teardown, outside the UI/model lock.
+/// A native-close signal. Runs before borrowing the model or handler; it must
+/// never borrow the UI/model or wait for workers.
+pub type CloseHook = Arc<dyn Fn() + Send + Sync>;
+
+/// Evaluated with the retained `Ui` on its model worker. Returning true hides
+/// the pointer during a gesture; the native thread restores its original position
+/// on release. Leaving the window or losing focus cancels restoration.
+pub type PointerHook = Arc<Mutex<dyn FnMut(&mui::Ui) -> bool + Send>>;
+
+/// Native-thread creation and cancellation of an owned X11 identifier.
+/// This hook must not borrow the UI/model or wait for the model worker.
 #[cfg(target_os = "linux")]
 pub type X11WindowHook = Arc<Mutex<dyn FnMut(Option<u32>) + Send>>;
+
+/// Last frame submitted to the native child; not GPU completion or scanout.
+#[derive(Clone, Copy, Debug)]
+pub struct Presentation {
+    pub frames: u64,
+    pub size: (u32, u32),
+    pub software: bool,
+    pub reason: &'static str,
+}
 
 /// Requests from the host's thread, applied by the window's next tick,
 /// which is the only place baseview's `WindowContext` can be touched.
 #[derive(Default)]
 pub struct Requests {
+    #[cfg(feature = "test-support")]
+    test_events: Mutex<VecDeque<Event>>,
     size: AtomicU64,
     scale: AtomicU64,
     redraw: AtomicBool,
-    keys: Mutex<Option<KeyHook>>,
-    /// KONTAKTO patch: see [`PointerHook`].
-    pointer: Mutex<Option<PointerHook>>,
-    /// KONTAKTO patch: one bounded native capture, configured before open.
-    timing: Mutex<Option<NativeTimingHook>>,
-    log: Mutex<Option<LogHook>>,
+    focus: AtomicBool,
     #[cfg(target_os = "linux")]
-    x11_window: std::sync::atomic::AtomicU32,
+    wayland_open: AtomicBool,
+    /// Microseconds; 0 is the default model heartbeat.
+    poll: AtomicU64,
+    keys: Mutex<Option<KeyHook>>,
+    pointer: Mutex<Option<PointerHook>>,
+    wheel: Mutex<WheelPolicy>,
     #[cfg(target_os = "linux")]
     x11_hook: Mutex<Option<X11WindowHook>>,
+    close: Mutex<Option<CloseHook>>,
+    idle: Mutex<Option<CloseHook>>,
+    requester: Mutex<Option<baseview::FrameRequester>>,
+    presentation: Mutex<Option<Presentation>>,
+    #[cfg(target_os = "linux")]
+    x11_window: std::sync::atomic::AtomicU32,
+    drag: drag::Mailbox,
+    render_active: AtomicBool,
+    render_generation: AtomicU64,
+    render_cancelled: AtomicBool,
+    render_start: Mutex<Option<RenderTask>>,
+    render_stop: Mutex<Option<RenderTask>>,
+    render_work: Mutex<VecDeque<RenderTask>>,
+    native_start: Mutex<Option<RenderTask>>,
+    clipboard_write: Mutex<Option<String>>,
 }
 
 impl Requests {
-    /// The current editor XID; reading it does not retain the native window.
-    #[cfg(target_os = "linux")]
-    pub fn x11_window(&self) -> Option<u32> {
-        let window = self.x11_window.load(Ordering::Acquire);
-        (window != 0).then_some(window)
+    /// Configure baseview notch conversion before opening this editor.
+    /// The separate floating Wayland adapter does not use this policy.
+    pub fn set_wheel_policy(&self, policy: WheelPolicy) {
+        *self
+            .wheel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
     }
 
-    /// Observe creation/close on the native window thread; see [`X11WindowHook`].
+    /// Install the model-worker pointer policy before opening a baseview editor.
+    /// The separate floating Wayland adapter does not use this policy.
+    pub fn on_pointer(&self, hook: PointerHook) {
+        *self
+            .pointer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Observe creation and cancellation on the native thread. Register before
+    /// opening. Each created X11 window retains its hook until cancellation.
     #[cfg(target_os = "linux")]
     pub fn on_x11_window(&self, hook: X11WindowHook) {
         *self
@@ -137,50 +157,219 @@ impl Requests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
-    #[cfg(target_os = "linux")]
-    fn notify_x11_window(&self) {
-        let hook = self
-            .x11_hook
+    /// Queue an integration-fixture event through the native pump. Bounded,
+    /// ordered and absent from production builds. Native focus/capture APIs
+    /// still execute normally, including synchronous platform callbacks.
+    #[cfg(feature = "test-support")]
+    pub fn test_event(&self, event: Event) -> Result<(), String> {
+        let mut events = self.test_events.lock().map_err(|e| e.to_string())?;
+        if events.len() >= 32 {
+            return Err("native fixture event queue is full".into());
+        }
+        events.push_back(event);
+        drop(events);
+        self.wake();
+        Ok(())
+    }
+
+    /// Run once on the native window thread before starting its model worker.
+    pub fn on_native_start(&self, start: impl FnOnce() + Send + 'static) {
+        *self
+            .native_start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(start));
+    }
+    /// Install worker-only lifecycle work before opening a native editor.
+    /// Neither closure may call a host/native-window API. `stop` must revoke
+    /// model-side references; it runs after cancellation, including after panic.
+    pub fn on_render_lifecycle(
+        &self,
+        start: impl FnOnce() + Send + 'static,
+        stop: impl FnOnce() + Send + 'static,
+    ) {
+        *self
+            .render_start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(start));
+        *self
+            .render_stop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(stop));
+    }
+    /// Queue ordered model work on the editor worker and request a
+    /// display-paced frame. Never acquire the model lock in a native callback.
+    pub fn dispatch_render_work(&self, work: impl FnOnce() + Send + 'static) {
+        self.render_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(Box::new(work));
+        self.redraw();
+    }
+    /// True while this editor's worker can still access its model. Native close
+    /// never waits for it; a reopened worker can sequence its model attachment.
+    pub fn render_active(&self) -> bool {
+        self.render_active.load(Ordering::Acquire)
+    }
+    /// Native close has revoked this editor, even if a GPU call is still running.
+    pub fn render_cancelled(&self) -> bool {
+        self.render_cancelled.load(Ordering::Acquire)
+    }
+    /// Request native keyboard focus on the window's owning thread.
+    pub fn focus(&self) {
+        self.focus.store(true, Ordering::Release);
+        self.wake();
+    }
+
+    /// Coherent presentation evidence; absent until the first successful submit.
+    pub fn presentation(&self) -> Option<Presentation> {
+        *self
+            .presentation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn presented(&self, size: (u32, u32), software: bool, reason: &'static str) {
+        let mut status = self
+            .presentation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let first_cpu_frame = software && status.is_none_or(|old| !old.software);
+        let frames = status.map_or(1, |old| old.frames.saturating_add(1));
+        *status = Some(Presentation {
+            frames,
+            size,
+            software,
+            reason,
+        });
+        drop(status);
+        if first_cpu_frame {
+            mui::diagnostics::breadcrumb(
+                "mui-baseview",
+                "cpu_frame_presented",
+                "native CPU presentation succeeded",
+            );
+        }
+    }
+    fn bind_requester(&self, requester: Option<baseview::FrameRequester>) {
+        *self
+            .requester
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = requester;
+    }
+    fn wake(&self) {
+        let requester = self
+            .requester
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some(hook) = hook {
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                hook.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)(
-                    self.x11_window()
-                );
-            })) {
-                let line = format!(
-                    "mui-baseview: panic in native X11 parent hook: {}",
-                    panic_message(payload.as_ref())
-                );
-                eprintln!("{line}");
-                let log = self
-                    .log
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(log) = log {
-                    let mut sink = match log.try_lock() {
-                        Ok(sink) => sink,
-                        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                        Err(std::sync::TryLockError::WouldBlock) => return,
-                    };
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&line)));
-                }
-            }
+        if let Some(requester) = requester {
+            requester.request_frame();
         }
     }
+    /// Wake the native window loop to run `on_idle` without invalidating the
+    /// model, scheduling a render-worker tick, or enabling periodic frames.
+    /// This schedules work; it never invokes the hook on the caller's thread.
+    /// The native thread is the opening host thread on Windows, but the X11
+    /// window thread on Linux. Host callbacks must still check thread ownership.
+    pub fn request_native_idle(&self) {
+        self.wake();
+    }
 
-    /// Observe uncaptured GPU errors on a window tick without taking the UI/model lock.
-    pub fn on_log(&self, hook: LogHook) {
+    /// Pump deferred host work after a frame has released the shared model lock.
+    /// The hook must check the calling thread before invoking host callbacks.
+    pub fn on_idle(&self, hook: CloseHook) {
         *self
-            .log
+            .idle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
+    fn idle(&self) {
+        let hook = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook
+            && let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()))
+        {
+            mui::diagnostics::error(
+                "mui-baseview",
+                "idle_panic",
+                mui::diagnostics::panic_message(&*payload),
+            );
+        }
+    }
+    /// Register the close signal for the next native window, before opening it.
+    /// It runs once on native close, or when the window adapter is dropped.
+    pub fn on_close(&self, hook: CloseHook) {
+        *self
+            .close
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+    /// Whether a floating Wayland editor currently owns this request queue.
+    #[cfg(target_os = "linux")]
+    pub fn wayland_open(&self) -> bool {
+        self.wayland_open.load(Ordering::Acquire)
+    }
 
+    /// The editor's X11 window identifier, for parenting desktop portal dialogs.
+    ///
+    /// Available after native creation and cleared on close. This is an owned
+    /// identifier, not a borrowed native handle; cancel dialogs when their editor
+    /// closes, since reading it does not keep the window alive.
+    #[cfg(target_os = "linux")]
+    pub fn x11_window(&self) -> Option<u32> {
+        let window = self.x11_window.load(Ordering::Acquire);
+        (window != 0).then_some(window)
+    }
+    /// Queue an export from the current primary pointer gesture.
+    pub fn drag_out(&self, paths: Vec<std::path::PathBuf>) -> Result<(), DragQueueError> {
+        self.queue_drag(paths, None)
+    }
+    pub fn drag_out_with_waveform(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        buckets: Vec<(f32, f32)>,
+    ) -> Result<(), DragQueueError> {
+        self.drag_out_with_preview(
+            paths,
+            matari_audio_drag_and_drop::DragPreview::Waveform { buckets },
+        )
+    }
+    pub fn drag_out_with_image(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        pixels: Vec<u8>,
+    ) -> Result<(), DragQueueError> {
+        self.drag_out_with_preview(
+            paths,
+            matari_audio_drag_and_drop::DragPreview::Image { pixels },
+        )
+    }
+    pub fn drag_out_with_preview(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        preview: matari_audio_drag_and_drop::DragPreview,
+    ) -> Result<(), DragQueueError> {
+        self.queue_drag(paths, Some(preview))
+    }
+    fn queue_drag(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        preview: Option<matari_audio_drag_and_drop::DragPreview>,
+    ) -> Result<(), DragQueueError> {
+        self.drag.queue(paths, preview)?;
+        self.redraw();
+        Ok(())
+    }
+    /// Hide the source's drag visual while native ownership is queued or active.
+    pub fn drag_active(&self) -> bool {
+        self.drag.active()
+    }
+    /// Drain this editor's protocol lifecycle events. Transfer success does not certify host import.
+    pub fn take_drag_events(&self) -> Vec<matari_audio_drag_and_drop::SessionEvent> {
+        self.drag.events()
+    }
     /// Hand every key event to `hook` first; see [`KeyHook`].
     pub fn on_key(&self, hook: KeyHook) {
         *self
@@ -188,38 +377,39 @@ impl Requests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
-    /// KONTAKTO patch: let `hook` hide the pointer; see [`PointerHook`].
-    pub fn on_pointer(&self, hook: PointerHook) {
-        *self
-            .pointer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
-    }
-
-    /// Capture the next primary drag for ten seconds; deliver one report off the frame path.
-    pub fn on_native_timing(&self, hook: NativeTimingHook) {
-        *self
-            .timing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
-    }
-
     /// Resize the child window to `width` x `height` logical points.
     pub fn resize(&self, width: u32, height: u32) {
         self.size.store(
             u64::from(width) << 32 | u64::from(height),
             Ordering::Release,
         );
+        self.wake();
     }
     /// The host's content scale changed.
     pub fn scale(&self, factor: f64) {
         if factor.is_finite() && factor > 0.0 {
             self.scale.store(factor.to_bits(), Ordering::Release);
+            self.wake();
+        }
+    }
+    /// Poll [`View::changed`] at least this often while `Some` (live meters,
+    /// pitch, scopes); `None` returns to the idle heartbeat. One relaxed
+    /// atomic store, no wake, no lock: safe to call from the audio thread
+    /// when telemetry starts and stops. Takes effect from the next tick.
+    pub fn set_poll_interval(&self, interval: Option<Duration>) {
+        let micros = interval.map_or(0, |d| d.as_micros().clamp(1, u64::MAX.into()) as u64);
+        self.poll.store(micros, Ordering::Relaxed);
+    }
+    fn poll_interval(&self) -> Option<Duration> {
+        match self.poll.load(Ordering::Relaxed) {
+            0 => None,
+            micros => Some(Duration::from_micros(micros)),
         }
     }
     /// Rebuild the tree on the next tick even if nothing it polls moved.
     pub fn redraw(&self) {
         self.redraw.store(true, Ordering::Release);
+        self.wake();
     }
 }
 
@@ -237,16 +427,29 @@ pub fn open<V: View + Send + 'static>(
     shared: Arc<Mutex<Shared<V>>>,
     requests: Arc<Requests>,
 ) -> Option<Window> {
+    // A headless host (mui-cut's adapter) takes the view instead.
+    if mui::host::headless::offer(&shared, size) {
+        return None;
+    }
+    // baseview panics on a handle it cannot read.
+    if let Err(e) = parent.window_handle() {
+        log(&shared, &format!("mui-baseview: no parent window ({e})"));
+        return None;
+    }
+    let settings = settings(title, size)
+        .with_parent(parent)
+        .with_scale_factor_override(scale);
     let sink = Arc::clone(&shared);
-    let (settings, handler) = prepare_open(parent, title, size, scale, shared, requests)?;
-    Window::create(settings, handler)
-        .and_then(|w| w.show().map(|()| w))
+    let window =
+        Window::create(settings, build(shared, requests, true)).and_then(|w| w.show().map(|()| w));
+    window
         .map_err(|e| log(&sink, &format!("mui-baseview: window failed ({e})")))
         .ok()
 }
 
-/// Linux editor window with an auto-Send controller and no main-thread host
-/// callbacks. Native rendering and teardown remain on the X11 worker.
+/// Open an embedded X11 editor with a movable command controller.
+/// Native window state and callbacks stay on the X11 worker. Close the
+/// controller before destroying the host parent.
 #[cfg(target_os = "linux")]
 pub fn open_threaded<V: View + Send + 'static>(
     parent: &impl HasWindowHandle,
@@ -256,17 +459,27 @@ pub fn open_threaded<V: View + Send + 'static>(
     shared: Arc<Mutex<Shared<V>>>,
     requests: Arc<Requests>,
 ) -> Option<baseview::ThreadedWindow> {
+    if mui::host::headless::offer(&shared, size) {
+        return None;
+    }
+    if let Err(error) = parent.window_handle() {
+        log(
+            &shared,
+            &format!("mui-baseview: no parent window ({error})"),
+        );
+        return None;
+    }
+    let settings = settings(title, size)
+        .with_parent(parent)
+        .with_scale_factor_override(scale);
     let sink = Arc::clone(&shared);
-    let (settings, handler) = prepare_open(parent, title, size, scale, shared, requests)?;
-    baseview::ThreadedWindow::create(settings, handler)
-        .and_then(|w| w.show().map(|()| w))
-        .map_err(|e| log(&sink, &format!("mui-baseview: window failed ({e})")))
+    baseview::ThreadedWindow::create(settings, build(shared, requests, true))
+        .and_then(|window| window.show().map(|()| window))
+        .map_err(|error| log(&sink, &format!("mui-baseview: window failed ({error})")))
         .ok()
 }
 
-/// Linux editor window with no parent: a top-level window the window manager
-/// places, for a host that asks for a floating GUI. Same lifecycle as
-/// [`open_threaded`].
+/// Open a floating X11 editor without claiming the process's standalone event loop.
 #[cfg(target_os = "linux")]
 pub fn open_floating_threaded<V: View + Send + 'static>(
     title: &str,
@@ -279,86 +492,13 @@ pub fn open_floating_threaded<V: View + Send + 'static>(
         return None;
     }
     let sink = Arc::clone(&shared);
-    let settings = settings(title, size).with_scale_factor_override(scale);
-    baseview::ThreadedWindow::create(settings, build(shared, requests, false))
-        .and_then(|w| w.show().map(|()| w))
-        .map_err(|e| {
-            log(
-                &sink,
-                &format!("mui-baseview: floating window failed ({e})"),
-            )
-        })
-        .ok()
-}
-
-fn prepare_open<V: View + Send + 'static>(
-    parent: &impl HasWindowHandle,
-    title: &str,
-    size: (u32, u32),
-    scale: Option<f64>,
-    shared: Arc<Mutex<Shared<V>>>,
-    requests: Arc<Requests>,
-) -> Option<(
-    WindowSettings,
-    impl FnOnce(WindowContext) -> Result<Adapter<V>, HandlerError> + Send + 'static,
-)> {
-    // A headless host (mui-cut's adapter) takes the view instead.
-    if mui::host::headless::offer(&shared, size) {
-        return None;
-    }
-    // baseview panics on a handle it cannot read.
-    let handle = match parent.window_handle() {
-        Ok(handle) => handle,
-        Err(e) => {
-            log(&shared, &format!("mui-baseview: no parent window ({e})"));
-            return None;
-        }
-    };
-    // Persist through the existing app sink before parent extraction can
-    // retain a Cocoa view or native window creation can enter OS code.
-    let api = match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::AppKit(_) => "AppKit/NSView",
-        raw_window_handle::RawWindowHandle::Win32(_) => "Win32/HWND",
-        raw_window_handle::RawWindowHandle::Xlib(_) => "X11/Xlib",
-        raw_window_handle::RawWindowHandle::Xcb(_) => "X11/Xcb",
-        raw_window_handle::RawWindowHandle::Wayland(_) => "Wayland",
-        _ => "unsupported",
-    };
-    log(
-        &shared,
-        &format!(
-            "mui-baseview: native window init entering native code os={} arch={} api={api} thread={:?} main_thread={:?} backend={:?} logical_size={size:?} scale_override={scale:?}",
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            std::thread::current().id(),
-            platform::main_thread_status(),
-            gpu_backends(cfg!(target_os = "windows"), wgpu::Backends::from_env())
-        ),
-    );
-    // KONTAKTO patch: baseview's Linux child is X11, including under a
-    // Wayland desktop. Diagnose the API, never print a host's raw handle.
-    #[cfg(target_os = "linux")]
-    {
-        let api = match linux_parent_api(handle.as_raw()) {
-            Ok(api) => api,
-            Err(reason) => {
-                log(&shared, &format!("mui-baseview: window failed ({reason})"));
-                return None;
-            }
-        };
-        log(
-            &shared,
-            &format!(
-                "mui-baseview: native window init api={api} DISPLAY_present={} WAYLAND_DISPLAY_present={} logical_size={size:?} scale_override={scale:?}",
-                std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()),
-                std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-            ),
-        );
-    }
-    let settings = settings(title, size)
-        .with_parent(parent)
-        .with_scale_factor_override(scale);
-    Some((settings, build(shared, requests, true)))
+    baseview::ThreadedWindow::create(
+        settings(title, size).with_scale_factor_override(scale),
+        build(shared, requests, false),
+    )
+    .and_then(|window| window.show().map(|()| window))
+    .map_err(|error| log(&sink, &format!("mui-baseview: window failed ({error})")))
+    .ok()
 }
 
 /// Run a top-level window of `size` logical points at the system scale, until
@@ -389,70 +529,6 @@ fn settings(title: &str, size: (u32, u32)) -> WindowSettings {
         .with_size(LogicalSize::new(f64::from(size.0), f64::from(size.1)))
 }
 
-/// The handler constructor `open` and `run` share.
-fn build<V: View + Send + 'static>(
-    shared: Arc<Mutex<Shared<V>>>,
-    requests: Arc<Requests>,
-    parented: bool,
-) -> impl FnOnce(WindowContext) -> Result<Adapter<V>, HandlerError> + Send + 'static {
-    move |cx: WindowContext| {
-        let size = cx.size();
-        let physical = (size.physical.width, size.physical.height);
-        log(
-            &shared,
-            &format!(
-                "mui-baseview: native window init creating accessibility adapter; physical_size={physical:?} device_scale={}",
-                size.scale_factor
-            ),
-        );
-        let mut handler = Handler::new(shared, requests, physical, size.scale_factor);
-        #[cfg(target_os = "linux")]
-        {
-            handler.x11_window = cx
-                .window_handle()
-                .ok()
-                .and_then(|handle| match handle.as_raw() {
-                    raw_window_handle::RawWindowHandle::Xlib(h) => u32::try_from(h.window).ok(),
-                    raw_window_handle::RawWindowHandle::Xcb(h) => Some(h.window.get()),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            handler
-                .requests
-                .x11_window
-                .store(handler.x11_window, Ordering::Release);
-            handler.requests.notify_x11_window();
-        }
-        // SAFETY: baseview invokes this builder on the live window's owning
-        // thread before show. Adapter drops Handler (including the provider)
-        // before WindowContext; WillClose also drops it before model access.
-        #[expect(unsafe_code, reason = "baseview owns the native window lifecycle")]
-        unsafe {
-            handler.a11y = cx
-                .window_handle()
-                .ok()
-                .and_then(|handle| NativeAccessibility::new(handle.as_raw()));
-        }
-        if let Some((native, _)) = handler.a11y.as_mut() {
-            native.focus(cx.has_focus());
-        }
-        handler.parented = parented;
-        log(
-            &handler.shared,
-            "mui-baseview: native window ready; waiting for first frame",
-        );
-        let timed = handler.timing.is_some();
-        Ok(Adapter {
-            cx,
-            handler: RefCell::new(handler),
-            pending_resize: Cell::new(None),
-            pending_events: RefCell::new(VecDeque::new()),
-            timed,
-            reentrant: Cell::new(0),
-        })
-    }
-}
-
 /// The window's event handler. Public so a framework adapter can drive it
 /// headless in its own tests ([`Handler::new`], [`Handler::step`],
 /// [`Handler::on_event_inner`]); a window gets one from [`open`] or [`run`].
@@ -461,48 +537,37 @@ pub struct Handler<V> {
     shared: Arc<Mutex<Shared<V>>>,
     requests: Arc<Requests>,
     gpu: Option<Host>,
+    gpu_init: Option<GpuInit>,
+    gpu_retry: mui::vello::host::Retry,
+    cpu_retry: Retry,
+    presenter_reason: &'static str,
     software: Option<mui::vello::software::Window<WindowContext>>,
     software_only: bool,
-    /// KONTAKTO patch: one GPU retry per editor open, taken on the first resize
-    /// after a fallback. Never armed when the CPU renderer was asked for.
-    gpu_retry_left: bool,
-    cpu_presented: bool,
-    gpu_log_generation: Option<u64>,
-    gpu_log_cursor: u64,
     gpu_retry_at: Instant,
     applied_cursor: Option<MouseCursor>,
     /// The current scene is not on screen yet: paint it.
     unpainted: bool,
-    /// KONTAKTO patch: retry pacing and the frame counts it logs.
-    pace: pace::Pace,
-    last_panic: Option<String>,
     /// A screen reader's side; only a real window has one.
     a11y: Option<A11y>,
-    /// A child of a host's window: keep it pinned to the parent's top.
-    parented: bool,
     /// The window's scale factor: baseview's pointer is in pixels.
     scale: f64,
     /// The keyboard capture last asked of baseview.
     captured: Option<bool>,
-    /// KONTAKTO patch: where the pointer last was, in physical pixels, and
-    /// where it hid, while a [`PointerHook`] hides it.
-    pointer_at: Option<PhysicalPosition<f64>>,
-    hidden_at: Option<PhysicalPosition<f64>>,
-    /// KONTAKTO patch: the last wheel notch, and the fling it is part of.
-    notch: (Option<Instant>, i32),
     /// Last successful native text input configuration; changes preserve composition.
     applied_ime: Option<Option<baseview::ImeConfiguration>>,
     /// The queue and the frame schedule.
     pub driver: Driver,
-    timing: Option<timing::Capture>,
     #[cfg(target_os = "linux")]
     x11_window: u32,
+    /// Outbound drag sessions, and whether the window is a host's child.
+    drag: drag::Host,
     _reporting: mui::diagnostics::ReportingGuard,
 }
 
-#[cfg(target_os = "linux")]
 impl<V> Drop for Handler<V> {
     fn drop(&mut self) {
+        self.drag.close(&self.requests.drag);
+        #[cfg(target_os = "linux")]
         self.clear_x11_window();
     }
 }
@@ -510,15 +575,13 @@ impl<V> Drop for Handler<V> {
 #[cfg(target_os = "linux")]
 impl<V> Handler<V> {
     fn clear_x11_window(&self) {
-        // A late old-handler drop must preserve a reopened window's parent.
-        if self
-            .requests
-            .x11_window
-            .compare_exchange(self.x11_window, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            self.requests.notify_x11_window();
-        }
+        // A retained old handler must not clear a newly opened window's identifier.
+        let _ = self.requests.x11_window.compare_exchange(
+            self.x11_window,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -530,46 +593,40 @@ impl<V: View> Handler<V> {
         size: (u32, u32),
         scale: f64,
     ) -> Self {
-        let timing = requests
-            .timing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .map(|hook| timing::Capture::new(hook, size, scale));
-        let forced_cpu = std::env::var("MUI_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"));
+        lock(&shared).ui.set_gpu_welding_available(false);
+        let drag = drag::Host::new(&requests);
         Self {
             shared,
             requests,
             gpu: None,
+            gpu_init: None,
+            gpu_retry: mui::vello::host::Retry::default(),
+            cpu_retry: Retry::default(),
+            presenter_reason: "CPU startup",
             software: None,
-            software_only: forced_cpu,
-            gpu_retry_left: !forced_cpu,
-            cpu_presented: false,
-            gpu_log_generation: None,
-            gpu_log_cursor: 0,
+            software_only: std::env::var("MUI_RENDERER")
+                .is_ok_and(|v| v.eq_ignore_ascii_case("cpu")),
             gpu_retry_at: Instant::now(),
             applied_cursor: None,
             unpainted: true,
-            pace: pace::Pace::new(Instant::now()),
-            last_panic: None,
             a11y: None,
-            parented: false,
             scale,
             captured: None,
-            pointer_at: None,
-            hidden_at: None,
-            notch: (None, 0),
             applied_ime: None,
             driver: Driver::new(size, scale, Box::new(Clipboard::default())),
-            timing,
             #[cfg(target_os = "linux")]
             x11_window: 0,
+            drag,
             _reporting: mui::diagnostics::retain_reporter(),
         }
     }
 
-    fn tick(&mut self, window: &WindowContext, sample: &mut Option<NativeFrameSample>) {
+    fn tick(&mut self, window: &WindowContext) {
+        let drag_frame = self.drag.frame_token(&self.requests.drag);
         let requests = &self.requests;
+        if requests.focus.swap(false, Ordering::AcqRel) && !window.has_focus() {
+            let _ = window.focus();
+        }
         let packed = requests.size.swap(0, Ordering::AcqRel);
         let bits = requests.scale.swap(0, Ordering::AcqRel);
         if packed != 0 || bits != 0 {
@@ -587,132 +644,136 @@ impl<V: View> Handler<V> {
             // Not every platform reports a resize it was asked for.
             self.resized(window.size());
         }
+        // Hosts may deliver the initial size/DPI after creation without a
+        // separate resize callback. Never configure from the builder's stale size.
+        let native_size = window.size();
+        if self.driver.size() != (native_size.physical.width, native_size.physical.height)
+            || self.scale != native_size.scale_factor
+        {
+            self.resized(native_size);
+        }
         // A hidden or detached editor cannot present, and on Windows this is
         // the host's GUI thread: a blocking present there freezes the host.
         let Ok(handle) = window.window_handle().map(|h| h.as_raw()) else {
-            if let Some(s) = sample {
-                s.outcome = NativeFrameOutcome::NoWindow;
-            }
             return;
         };
         if platform::should_skip_frame(handle) {
-            if let Some(s) = sample {
-                s.outcome = NativeFrameOutcome::Hidden;
-            }
             return;
         }
         #[cfg(target_os = "linux")]
         if let Some((native, _)) = self.a11y.as_mut()
-            && let Ok(display) = window.display_handle()
-            && let Ok(handle) = window.window_handle()
+            && let (Ok(display), Ok(handle)) = (window.display_handle(), window.window_handle())
         {
-            // SAFETY: both handles are borrowed from the same live context,
-            // on its owning thread and before acquiring the model lock.
-            #[expect(unsafe_code, reason = "borrow the live baseview display and window")]
+            // SAFETY: both handles borrow this live window on its owning thread.
+            #[expect(unsafe_code, reason = "query the owned window's original display")]
             unsafe {
                 native.update_bounds(display.as_raw(), handle.as_raw());
             }
         }
-        // macOS: keep the child pinned to the parent's top as it resizes.
-        // A top-level window's view is its content view: leave it be.
-        if self.parented {
-            platform::reanchor_to_superview_top(handle);
-        }
         let now = Instant::now();
-        if let Some(c) = self.pace.report(now) {
-            mui::diagnostics::breadcrumb(
-                "mui-baseview",
-                "frames",
-                &format!(
-                    "frames in {}s: presented={} skipped-unpainted={} a11y-redraws={} requested={}",
-                    pace::REPORT.as_secs(),
-                    c.presented,
-                    c.skipped,
-                    c.a11y_redraws,
-                    c.requested
-                ),
-            );
-        }
         let size = self.driver.size();
         if self.requests.redraw.swap(false, Ordering::AcqRel) {
             self.driver.redraw();
-            self.unpainted = true;
-            if let Some(gpu) = &mut self.gpu {
-                gpu.invalidate();
-            }
             if let Some(software) = &mut self.software {
                 software.invalidate();
             }
         }
-        // Lost between presents: an idle editor would never find out. The
-        // next present rebuilds the device.
-        if self.gpu.as_ref().is_some_and(Host::device_lost) {
-            self.unpainted = true;
-        }
+        // Idle windows do no device polling; a dirty frame observes loss.
         if self.gpu.is_none()
             && self.software.is_none()
             && target_size(size.0, size.1).is_some()
-            && now >= self.gpu_retry_at
+            && self.cpu_retry.ready(now)
         {
-            if !self.software_only {
-                match open_gpu(window, size, |line| log(&self.shared, line)) {
-                    Ok(gpu) => {
-                        self.gpu_log_generation = None;
-                        self.gpu = Some(gpu);
-                        lock(&self.shared).ui.set_gpu_welding_available(true);
-                        self.unpainted = true;
-                    }
-                    Err(e) => {
-                        log(
-                            &self.shared,
-                            &format!("mui-baseview: GPU unavailable ({e}); using CPU rendering"),
-                        );
-                        self.software_only = true;
-                    }
+            let open = if self.software_only || self.gpu_init.is_some() {
+                mui::vello::software::Window::new
+            } else {
+                mui::vello::software::Window::new_startup
+            };
+            match open(window.clone(), size) {
+                Ok(software) => {
+                    self.software = Some(software);
+                    self.cpu_retry.reset();
+                    lock(&self.shared).ui.set_gpu_welding_available(false);
+                    self.driver.redraw();
+                    self.unpainted = true;
                 }
-            }
-            if self.software_only {
-                match mui::vello::software::Window::new(window.clone(), size) {
-                    Ok(software) => {
-                        self.software = Some(software);
-                        lock(&self.shared).ui.set_gpu_welding_available(false);
-                        self.driver.redraw();
-                        self.unpainted = true;
-                    }
-                    Err(e) => {
+                Err(error) => {
+                    if self.cpu_retry.deadline().is_none() {
                         log(
                             &self.shared,
-                            &format!("mui-baseview: CPU presentation unavailable ({e})"),
+                            &format!("mui-baseview: CPU presentation unavailable ({error})"),
                         );
-                        self.gpu_retry_at = now + GPU_RETRY;
                     }
+                    self.cpu_retry.fail(now, FailureClass::Transient);
+                    self.gpu_retry_at = self.cpu_retry.deadline().unwrap_or(now);
                 }
             }
         }
-        if let Some(gpu) = &self.gpu {
-            observe_gpu_errors(
-                gpu,
-                &self.requests,
-                &mut self.gpu_log_generation,
-                &mut self.gpu_log_cursor,
-            );
+        if self.gpu.is_none()
+            && let Some(init) = self.gpu_init.as_mut()
+        {
+            let software = &mut self.software;
+            let result = init.poll(size, |instance| {
+                // Called only when the GPU result is ready. Never attach CPU
+                // and CAMetalLayer presenters to the same native view.
+                drop(software.take());
+                #[expect(
+                    unsafe_code,
+                    reason = "native surface creation stays on the window thread"
+                )]
+                // SAFETY: handler owns the live window and drops its surface first.
+                unsafe { surface::create(instance, window) }
+                    .ok_or_else(|| "native surface not ready".into())
+            });
+            if let Some(result) = result {
+                match result {
+                    Ok(gpu) => {
+                        self.gpu = Some(gpu);
+                        self.presenter_reason = "GPU ready";
+                        lock(&self.shared).ui.set_gpu_welding_available(true);
+                        self.driver.redraw();
+                        self.unpainted = true;
+                    }
+                    Err(error) => {
+                        // Once per failure streak: backoff retries must not flood the host log.
+                        if self.presenter_reason != "CPU GPU initialization failed" {
+                            log(
+                                &self.shared,
+                                &format!(
+                                    "mui-baseview: GPU unavailable ({error}); using CPU rendering"
+                                ),
+                            );
+                        }
+                        // Retry classification controls GPU recovery, not CPU scene quality.
+                        // Transient failure must also leave the startup placeholder behind.
+                        if error.failure_class() == FailureClass::Permanent {
+                            self.software_only = true;
+                        }
+                        let repaint = self
+                            .software
+                            .as_mut()
+                            .is_some_and(|software| software.finish_startup(size));
+                        self.presenter_reason = "CPU GPU initialization failed";
+                        if repaint {
+                            self.driver.redraw();
+                            self.unpainted = true;
+                        }
+                    }
+                }
+            }
+            self.gpu_retry_at = init.deadline().unwrap_or(now);
         }
         // The lock covers the frame and a snapshot of its scene, not the
         // present: acquiring a surface texture can wait out a vsync, and a
         // host-thread close() or state load must not wait with it.
-        let mut hide = false;
         let mut accessibility_update = None;
         let ime_configuration;
         let capture;
         let scene = {
-            let lock_at = sample.as_ref().map(|_| Instant::now());
             let mut s = lock(&self.shared);
-            if let Some(sample) = sample {
-                sample.lock_ns = timing::elapsed(lock_at);
-            }
             let a11y = self.a11y.as_mut().map(|(_, ui)| ui);
             if let Some(a11y) = &a11y
-                && self.pace.a11y_redraws(a11y.wants_tree())
+                && a11y.wants_tree()
             {
                 self.driver.redraw();
             }
@@ -721,25 +782,7 @@ impl<V: View> Handler<V> {
             {
                 self.driver.redraw();
             }
-            let advance_at = sample.as_ref().map(|_| Instant::now());
             let fresh = self.driver.advance(&mut s, now);
-            if let Some(sample) = sample {
-                sample.advance_ns = timing::elapsed(advance_at);
-                sample.new_scene = fresh;
-            }
-            // KONTAKTO patch: the app says whether the pointer hides.
-            let hook = self
-                .requests
-                .pointer
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(hook) = hook {
-                let mut hook = hook
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                hide = hook(&s.ui);
-            }
             ime_configuration = self
                 .driver
                 .ime_configuration(&s.ui)
@@ -752,25 +795,11 @@ impl<V: View> Handler<V> {
             if let Some((_, a11y)) = self.a11y.as_mut()
                 && (fresh || a11y.wants_tree())
             {
-                let wants = a11y.wants_tree();
                 accessibility_update = a11y.prepare(&s.ui);
-                self.pace
-                    .a11y_prepared(wants, accessibility_update.is_some());
-            }
-            if fresh {
-                self.pace.requested();
             }
             self.unpainted |= fresh;
-            if self.unpainted
-                && self.pace.paints(fresh, now)
-                && (self.gpu.is_some() || self.software.is_some())
-            {
-                let scene_at = sample.as_ref().map(|_| Instant::now());
-                let scene = s.ui.scene_snapshot();
-                if let Some(sample) = sample {
-                    sample.scene_ns = timing::elapsed(scene_at);
-                }
-                scene
+            if self.unpainted && (self.gpu.is_some() || self.software.is_some()) {
+                s.ui.scene_snapshot()
             } else {
                 None
             }
@@ -788,24 +817,10 @@ impl<V: View> Handler<V> {
             window.set_ime_configuration(ime_configuration.clone());
             self.applied_ime = Some(ime_configuration);
         }
-        if self.gpu.is_none() && self.software.is_none() {
-            if let Some(sample) = sample {
-                sample.outcome = NativeFrameOutcome::NoGpu;
-            }
-        }
         if let (Some(software), Some(scene)) = (self.software.as_mut(), scene.as_ref()) {
-            let present_at = sample.as_ref().map(|_| Instant::now());
-            let draw_start = self.driver.profiler().map(|_| Instant::now());
+            let start = self.driver.profiler().map(|_| Instant::now());
             let result = software.present(scene, Affine::scale(self.driver.ui_scale()), size);
-            if let Some(sample) = sample {
-                sample.present_ns = timing::elapsed(present_at);
-                sample.outcome = match &result {
-                    Ok(true) => NativeFrameOutcome::Presented,
-                    Ok(false) => NativeFrameOutcome::Current,
-                    Err(_) => NativeFrameOutcome::Error,
-                };
-            }
-            if let (Some(profile), Some(start)) = (self.driver.profiler_mut(), draw_start) {
+            if let (Some(profile), Some(start)) = (self.driver.profiler_mut(), start) {
                 profile.record_since(mui::profiling::Phase::BackendDraw, start);
                 if matches!(result, Ok(true)) {
                     profile.record_since(mui::profiling::Phase::PresentCall, start);
@@ -814,21 +829,19 @@ impl<V: View> Handler<V> {
                 }
             }
             match result {
-                Ok(presented) => {
+                Ok(drew) => {
+                    self.requests.drag.rendered(drag_frame);
                     self.unpainted = false;
-                    if presented {
-                        self.pace.presented();
-                    } else {
-                        self.pace.current();
+                    if drew {
+                        let reason = if software.background_only() {
+                            "CPU background-only startup/over-budget"
+                        } else {
+                            self.presenter_reason
+                        };
+                        self.requests.presented(size, true, reason);
                     }
-                    if presented && !self.cpu_presented {
-                        mui::diagnostics::breadcrumb(
-                            "mui-baseview",
-                            "cpu_frame_presented",
-                            "first native CPU frame presented",
-                        );
-                        self.cpu_presented = true;
-                    }
+                    // First pixels precede both detached and synchronous initialization.
+                    self.start_gpu_after_cpu_frame(drew);
                 }
                 Err(e) => {
                     log(
@@ -836,43 +849,21 @@ impl<V: View> Handler<V> {
                         &format!("mui-baseview: CPU render failed ({e})"),
                     );
                     self.software = None;
-                    self.gpu_retry_at = now + GPU_RETRY;
+                    self.cpu_retry.fail(Instant::now(), FailureClass::Transient);
+                    self.gpu_retry_at = self.cpu_retry.deadline().unwrap_or(now);
                 }
             }
         }
-        if let (Some(gpu), Some(scene)) = (self.gpu.as_mut(), scene) {
-            let resize_at = sample.as_ref().map(|_| Instant::now());
-            let resized = gpu.resize(size.0, size.1);
-            if let Some(sample) = sample {
-                sample.resize_ns = timing::elapsed(resize_at);
+        if let (Some(gpu), Some(scene)) = (self.gpu.as_mut(), scene)
+            && now >= self.gpu_retry_at
+        {
+            if let Err(e) = gpu.resize(size.0, size.1) {
+                log(&self.shared, &format!("mui-baseview: {e}"));
+                self.gpu_failed(e.failure_class(), "CPU resize recovery");
+                return;
             }
-            let present_at = sample
-                .as_ref()
-                .filter(|_| resized.is_ok())
-                .map(|_| Instant::now());
             let draw_start = self.driver.profiler().map(|_| Instant::now());
-            // A failed resize leaves a partly configured target; never present into it.
-            let presented =
-                resized.and_then(|()| gpu.present(&scene, Affine::scale(self.driver.ui_scale())));
-            // Present may rebuild a lost device. Observe the new generation
-            // without replacing Host's own callback or entering the model lock.
-            observe_gpu_errors(
-                gpu,
-                &self.requests,
-                &mut self.gpu_log_generation,
-                &mut self.gpu_log_cursor,
-            );
-            if let Some(sample) = sample {
-                sample.present_ns = timing::elapsed(present_at);
-                sample.outcome = match &presented {
-                    Ok(Frame::Presented(_)) => NativeFrameOutcome::Presented,
-                    Ok(Frame::Current) => NativeFrameOutcome::Current,
-                    Ok(Frame::Skipped) => NativeFrameOutcome::Skipped,
-                    Ok(Frame::SurfaceLost) => NativeFrameOutcome::SurfaceLost,
-                    Err(_) => NativeFrameOutcome::Error,
-                };
-            }
-            let frame = presented;
+            let frame = gpu.present(&scene, Affine::scale(self.driver.ui_scale()));
             if let (Some(profiler), Some(start)) = (self.driver.profiler_mut(), draw_start) {
                 profiler.record_since(mui::profiling::Phase::BackendDraw, start);
                 if matches!(&frame, Ok(Frame::Presented(_))) {
@@ -882,71 +873,74 @@ impl<V: View> Handler<V> {
             }
             match frame {
                 Ok(Frame::Presented(_)) => {
+                    self.requests.drag.rendered(drag_frame);
+                    self.gpu_retry.reset();
                     self.unpainted = false;
-                    self.pace.presented();
+                    self.requests
+                        .presented(gpu.size(), false, self.presenter_reason);
                 }
                 Ok(Frame::Current) => {
+                    self.requests.drag.rendered(drag_frame);
+                    self.gpu_retry.reset();
                     self.unpainted = false;
-                    self.pace.current();
                     if let Some(profiler) = self.driver.profiler_mut() {
                         profiler.discard_pending_presentation();
                     }
                 }
-                Ok(Frame::Skipped) => self.pace.skipped(now),
+                // Outdated/timed-out acquires are routine mid-resize; the host
+                // already reconfigured, so retry next tick instead of backing
+                // off (a backoff left the window black and at the old size).
+                Ok(Frame::Skipped) => {}
                 Ok(Frame::SurfaceLost) => {
+                    self.gpu_retry.fail(now, FailureClass::Transient);
+                    self.gpu_retry_at = self.gpu_retry.deadline().unwrap_or(now);
                     // SAFETY: the surface comes from this window's live
                     // native handle, and baseview drops the handler that owns
                     // it before the window.
                     #[expect(unsafe_code, reason = "calls the unsafe surface constructor")]
                     let surface = unsafe { surface::create(gpu.instance(), window) };
-                    let recovered = surface.and_then(|surface| {
-                        gpu.try_replace_surface(surface).map_err(|e| e.to_string())
-                    });
-                    if let Err(e) = recovered {
-                        log(
-                            &self.shared,
-                            &format!(
-                                "mui-baseview: surface recovery failed ({e}); using CPU rendering"
-                            ),
-                        );
-                        self.gpu = None;
-                        self.software_only = true;
-                        self.gpu_retry_at = now;
-                        self.unpainted = true;
+                    if let Some(surface) = surface {
+                        if let Err(error) = gpu.try_replace_surface(surface) {
+                            self.gpu_failed(error.failure_class(), "CPU surface recovery");
+                        }
+                    } else {
+                        log(&self.shared, "mui-baseview: surface lost; rebuilding");
+                        self.gpu_failed(FailureClass::Transient, "CPU surface recovery");
                     }
                 }
                 Err(e) => {
-                    log(
-                        &self.shared,
-                        &format!("mui-baseview: GPU render failed ({e}); using CPU rendering"),
-                    );
-                    // Drop the GPU surface before another presenter takes the window.
-                    self.gpu = None;
-                    self.software_only = true;
-                    self.gpu_retry_at = now;
-                    self.unpainted = true;
+                    log(&self.shared, &format!("mui-baseview: {e}"));
+                    // Permanent faults stay on CPU; loss/configuration recover
+                    // off-thread, never through a per-frame rebuild.
+                    self.gpu_failed(e.failure_class(), "CPU GPU recovery");
                 }
             }
         }
-        // KONTAKTO patch: hidden where a drag began; back there after.
-        match (hide, self.hidden_at) {
-            (true, None) => self.hidden_at = self.pointer_at,
-            (false, Some(at)) => {
-                platform::warp_pointer(window, at.x, at.y, self.scale);
-                self.hidden_at = None;
-            }
-            _ => {}
-        }
-        let cursor = if self.hidden_at.is_some() {
-            MouseCursor::Hidden
-        } else if CORNER.with(std::cell::Cell::get) {
-            MouseCursor::NwseResize
-        } else {
-            native_cursor(self.driver.cursor())
-        };
+        let cursor = native_cursor(self.driver.cursor());
         if self.applied_cursor != Some(cursor) {
             let _ = window.set_mouse_cursor(cursor);
             self.applied_cursor = Some(cursor);
+        }
+    }
+
+    fn gpu_failed(&mut self, class: FailureClass, reason: &'static str) {
+        self.gpu = None;
+        self.software = None;
+        self.gpu_retry.reset();
+        self.software_only = class == FailureClass::Permanent;
+        if let Some(init) = &mut self.gpu_init {
+            init.recover(class);
+        }
+        lock(&self.shared).ui.set_gpu_welding_available(false);
+        self.driver.redraw();
+        self.presenter_reason = reason;
+        self.gpu_retry_at = Instant::now();
+        self.unpainted = true;
+    }
+
+    fn start_gpu_after_cpu_frame(&mut self, presented: bool) {
+        if presented && !self.software_only && self.gpu_init.is_none() {
+            self.gpu_init = Some(GpuInit::new(baseview::pin_current_image_for_detached_work()));
         }
     }
 
@@ -957,7 +951,9 @@ impl<V: View> Handler<V> {
             self.driver.redraw();
         }
         let now = self.driver.last_frame() + Duration::from_millis(16);
-        self.driver.advance(&mut lock(&self.shared), now)
+        let advanced = self.driver.advance(&mut lock(&self.shared), now);
+        self.requests.idle();
+        advanced
     }
 
     /// The window's new size, as baseview reports it.
@@ -965,60 +961,33 @@ impl<V: View> Handler<V> {
         self.scale = size.scale_factor;
         let physical = (size.physical.width, size.physical.height);
         self.driver.resized(physical, size.scale_factor);
-        self.unpainted = true;
-        if self.software_only && self.gpu_retry_left {
-            self.gpu_retry_left = false;
-            self.software_only = false;
-            self.software = None;
-            self.gpu_retry_at = Instant::now();
-        }
-        if let Some(gpu) = &mut self.gpu {
-            gpu.invalidate();
-        }
-        if let Some(software) = &mut self.software {
-            software.invalidate();
-        }
-        if let Some(capture) = &mut self.timing {
-            capture.geometry(physical, size.scale_factor);
-        }
     }
 
     /// One native event, as baseview delivers it.
     pub fn on_event_inner(&mut self, event: &Event) -> EventStatus {
+        self.drag.observe(&self.requests.drag, event);
+        if matches!(event, Event::Window(WindowEvent::WillClose)) {
+            self.drag.close(&self.requests.drag);
+        }
         #[cfg(target_os = "linux")]
         if matches!(event, Event::Window(WindowEvent::WillClose)) {
             self.clear_x11_window();
-        }
-        if let Some(capture) = &mut self.timing {
-            match event {
-                Event::Mouse(MouseEvent::ButtonPressed {
-                    button: MouseButton::Left,
-                    ..
-                }) => capture.primary = true,
-                Event::Mouse(MouseEvent::ButtonReleased {
-                    button: MouseButton::Left,
-                    ..
-                })
-                | Event::Window(WindowEvent::Unfocused) => capture.primary = false,
-                Event::Mouse(MouseEvent::CursorMoved { .. }) => {
-                    capture.pointer_move(Instant::now())
-                }
-                _ => {}
-            }
         }
         let scale = self.scale;
         let points = |p: PhysicalPosition<f64>| Point::new(p.x / scale, p.y / scale);
         let d = &mut self.driver;
         match event {
-            Event::Ime(event) => d.ime(mui_native::native::ime_event(event)),
+            Event::Window(WindowEvent::RedrawRequested) => {
+                self.unpainted = true;
+                if let Some(software) = &mut self.software {
+                    software.invalidate();
+                    self.unpainted = true;
+                }
+            }
+            Event::Ime(event) => d.ime(native::ime_event(event)),
             Event::Keyboard(key) => {
                 let event = key_event(key);
-                let hook = self
-                    .requests
-                    .keys
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
+                let hook = self.requests.keys.lock().ok().and_then(|h| h.clone());
                 if let Some(hook) = hook {
                     let mut hook = hook
                         .lock()
@@ -1038,11 +1007,7 @@ impl<V: View> Handler<V> {
                 MouseEvent::CursorMoved {
                     position,
                     modifiers,
-                } => {
-                    // KONTAKTO patch: kept to put a hidden pointer back.
-                    self.pointer_at = Some(position);
-                    d.pointer_moved(points(position), mods(modifiers));
-                }
+                } => d.pointer_moved(points(position), mods(modifiers)),
                 MouseEvent::ButtonPressed { button, modifiers }
                 | MouseEvent::ButtonReleased { button, modifiers } => {
                     if let Some(b) = mouse_button(button) {
@@ -1052,45 +1017,12 @@ impl<V: View> Handler<V> {
                 }
                 MouseEvent::WheelScrolled { delta, modifiers } => {
                     let wheel = match delta {
-                        // KONTAKTO patch: baseview reports one line per notch on every
-                        // platform, and MUI makes a line one text height
-                        // (12 points): half a list row. A notch moves
-                        // five rows, more in a fast run (`notch_lines`);
-                        // trackpads send pixels and stay exact. The lists
-                        // glide to where the notch puts them.
-                        ScrollDelta::Lines { x, y } => {
-                            let now = Instant::now();
-                            let gap = self.notch.0.map(|t| now - t);
-                            self.notch.0 = Some(now);
-                            let along = if y != 0. { y } else { x };
-                            let lines = notch_lines(f64::from(along), gap, &mut self.notch.1);
-                            if y != 0. {
-                                Wheel::Lines(0., lines)
-                            } else {
-                                Wheel::Lines(lines, 0.)
-                            }
-                        }
+                        ScrollDelta::Lines { x, y } => Wheel::Lines(f64::from(x), f64::from(y)),
                         ScrollDelta::Pixels { x, y } => Wheel::Pixels(f64::from(x), f64::from(y)),
                     };
                     d.wheel(wheel, mods(modifiers));
                 }
-                MouseEvent::CursorLeft | MouseEvent::DragLeft => {
-                    if matches!(mouse, MouseEvent::DragLeft) {
-                        let s = &mut *lock(&self.shared);
-                        d.drop_files(
-                            s,
-                            mui::prelude::Point::new(-1., -1.),
-                            mui::prelude::Mods::default(),
-                            &[],
-                            false,
-                        );
-                    }
-                    // KONTAKTO patch: a release may still be waiting for a
-                    // frame. Do not restore an already-outside pointer.
-                    self.pointer_at = None;
-                    self.hidden_at = None;
-                    d.pointer_left();
-                }
+                MouseEvent::CursorLeft | MouseEvent::DragLeft => d.pointer_left(),
                 MouseEvent::DragEntered {
                     position,
                     modifiers,
@@ -1123,11 +1055,6 @@ impl<V: View> Handler<V> {
             },
             Event::Window(e @ (WindowEvent::Focused | WindowEvent::Unfocused)) => {
                 let focused = matches!(e, WindowEvent::Focused);
-                if !focused {
-                    // KONTAKTO patch: never warp back into an inactive editor.
-                    self.pointer_at = None;
-                    self.hidden_at = None;
-                }
                 d.focus(focused);
                 if let Some((native, _)) = self.a11y.as_mut() {
                     native.focus(focused);
@@ -1136,17 +1063,11 @@ impl<V: View> Handler<V> {
             Event::Window(WindowEvent::WillClose) => {
                 // Drop retained native accessibility views before locking the model.
                 drop(self.a11y.take());
+                drop(self.software.take());
+                drop(self.gpu.take());
+                drop(self.gpu_init.take());
                 self.applied_ime = None;
                 d.close(&mut lock(&self.shared));
-            }
-            Event::Window(WindowEvent::RedrawRequested) => {
-                self.unpainted = true;
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.invalidate();
-                }
-                if let Some(software) = &mut self.software {
-                    software.invalidate();
-                }
             }
             // A scale change arrives as a resize too.
             _ => {}
@@ -1159,14 +1080,49 @@ impl<V: View> Handler<V> {
 /// (on Windows, a resize from inside a frame is reported before `resize`
 /// returns). A call that finds the handler busy is kept, the latest resize
 /// and every event, and delivered once the outer call returns.
-struct Adapter<V> {
+#[doc(hidden)]
+pub struct Adapter<V> {
+    // Cancel owned dialogs before dropping the native context or model.
+    close: NativeClose,
     // Drop graphics and native accessibility before their window context.
     handler: RefCell<Handler<V>>,
     cx: WindowContext,
     pending_resize: Cell<Option<WindowSize>>,
     pending_events: RefCell<VecDeque<Event>>,
-    timed: bool,
-    reentrant: Cell<u64>,
+    buttons: NativeButtons,
+}
+
+struct NativeClose {
+    hook: Option<CloseHook>,
+    fired: Cell<bool>,
+}
+
+impl NativeClose {
+    fn fire(&self) {
+        if !self.fired.replace(true)
+            && let Some(hook) = &self.hook
+        {
+            // This callback precedes the handler's panic guard at the FFI edge.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()))
+            {
+                mui::diagnostics::error(
+                    "mui-baseview",
+                    "close_panic",
+                    mui::diagnostics::panic_message(&*payload),
+                );
+                eprintln!(
+                    "mui-baseview: panic in native close signal: {}",
+                    mui::diagnostics::panic_message(&*payload)
+                );
+            }
+        }
+    }
+}
+
+impl Drop for NativeClose {
+    fn drop(&mut self) {
+        self.fire();
+    }
 }
 
 impl<V: View> Adapter<V> {
@@ -1178,6 +1134,55 @@ impl<V: View> Adapter<V> {
             guard(h, |h| h.on_event_inner(&event));
         });
     }
+}
+
+#[derive(Default)]
+struct NativeButtons(RefCell<Vec<MouseButton>>);
+
+impl NativeButtons {
+    fn observe(&self, event: &Event) {
+        match event {
+            Event::Mouse(MouseEvent::ButtonPressed { button, .. }) => {
+                let mut buttons = self.0.borrow_mut();
+                if !buttons.contains(button) {
+                    buttons.push(*button);
+                }
+            }
+            Event::Mouse(MouseEvent::ButtonReleased { button, .. }) => {
+                self.0.borrow_mut().retain(|held| held != button);
+            }
+            Event::Window(WindowEvent::Unfocused | WindowEvent::WillClose) => {
+                self.0.borrow_mut().clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn held(&self) -> bool {
+        !self.0.borrow().is_empty()
+    }
+}
+
+fn enqueue_event(queue: &mut VecDeque<Event>, event: Event, dragging: bool) {
+    // Only hover is replaceable state. A held gesture needs every position for
+    // Driver's trail, including when its press preceded this inbox/drain.
+    // Never cross a key, IME, button, focus, wheel, drop or accessibility barrier.
+    if let (
+        Some(Event::Mouse(MouseEvent::CursorMoved {
+            modifiers: previous,
+            ..
+        })),
+        Event::Mouse(MouseEvent::CursorMoved { modifiers, .. }),
+    ) = (queue.back(), &event)
+        && !dragging
+        && previous == modifiers
+    {
+        if let Some(last) = queue.back_mut() {
+            *last = event;
+        }
+        return;
+    }
+    queue.push_back(event);
 }
 
 fn drain_events<T>(queue: &RefCell<VecDeque<T>>, mut deliver: impl FnMut(T)) {
@@ -1195,65 +1200,76 @@ fn drain_events<T>(queue: &RefCell<VecDeque<T>>, mut deliver: impl FnMut(T)) {
 /// panic kills the process before it gets here.
 fn guard<V: View, R>(h: &mut Handler<V>, f: impl FnOnce(&mut Handler<V>) -> R) -> Option<R> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(h))) {
-        Ok(r) => {
-            h.last_panic = None;
-            Some(r)
-        }
+        Ok(value) => Some(value),
         Err(payload) => {
-            let message = panic_message(payload.as_ref());
-            let mut end = message.len().min(4096);
-            while !message.is_char_boundary(end) {
-                end -= 1;
-            }
-            let message = &message[..end];
-            if h.last_panic.as_deref() != Some(message) {
-                log(
-                    &h.shared,
-                    &format!(
-                        "mui-baseview: panic in the window, swallowed at the FFI edge: {message}"
-                    ),
-                );
-                h.last_panic = Some(message.to_owned());
-            }
-            h.driver.redraw();
-            h.unpainted = true;
-            if let Some(gpu) = &mut h.gpu {
-                gpu.invalidate();
-            }
-            if let Some(software) = &mut h.software {
-                software.invalidate();
-            }
+            log(
+                &h.shared,
+                &format!(
+                    "mui-baseview: panic at the window FFI edge: {}",
+                    mui::diagnostics::panic_message(&*payload)
+                ),
+            );
             None
         }
     }
 }
 
 impl<V: View + 'static> WindowHandler for Adapter<V> {
+    fn frame_demand(&self) -> baseview::FrameDemand {
+        // ponytail: View::changed, plugin meters and a11y requests are polled.
+        // Push-based change notifications would remove this idle heartbeat.
+        const MODEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+        const RECOVERY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+        let Ok(h) = self.handler.try_borrow() else {
+            return baseview::FrameDemand::Continuous;
+        };
+        let now = Instant::now();
+        let mut at = now.checked_add(MODEL_POLL_INTERVAL).unwrap_or(now);
+        let recovery_poll = now.checked_add(RECOVERY_POLL_INTERVAL).unwrap_or(now);
+        if let Some(wake) = h.driver.next_wake() {
+            at = at.min(wake);
+        }
+        if let Some(poll) = h.requests.poll_interval() {
+            at = at.min(now.checked_add(poll).unwrap_or(now));
+        }
+        if h.requests.drag_active() {
+            at = at.min(now + Duration::from_millis(10));
+        }
+        if h.requests.redraw.load(Ordering::Acquire) {
+            at = now;
+        }
+        if h.unpainted || (h.gpu.is_none() && h.gpu_retry_at > now) {
+            at = at.min(h.gpu_retry_at.max(recovery_poll));
+        }
+        // CPU presentation does not mean asynchronous GPU recovery is idle:
+        // a pending background init is polled, its backoff lives in gpu_retry_at.
+        if h.gpu_init.as_ref().is_some_and(GpuInit::pending) {
+            at = at.min(recovery_poll);
+        }
+        baseview::FrameDemand::At(at)
+    }
+
     fn on_frame(&self) -> Result<(), HandlerError> {
+        let mut idle = None;
         if let Ok(mut h) = self.handler.try_borrow_mut() {
-            let at = h.timing.as_ref().map(|_| Instant::now());
+            idle = Some(Arc::clone(&h.requests));
             let wake_start = h.driver.profiler().map(|_| Instant::now());
             self.drain(&mut h);
-            let mut sample = at.and_then(|at| h.timing.as_mut().and_then(|c| c.begin(at)));
-            if sample.as_ref().is_some_and(|s| s.interval_ns == 0) {
-                self.reentrant.set(0);
-            }
-            let completed = guard(&mut h, |h| h.tick(&self.cx, &mut sample)).is_some();
+            guard(&mut h, |h| h.tick(&self.cx));
             self.drain(&mut h);
-            if let (Some(mut sample), Some(at)) = (sample, at) {
-                sample.total_ns = timing::ns(at.elapsed());
-                if !completed {
-                    sample.outcome = NativeFrameOutcome::Panicked;
+            guard(&mut h, |h| {
+                if h.drag.drive(&h.requests, &self.cx) {
+                    h.driver.button(Button::Primary, false, Mods::default());
+                    h.driver.pointer_left();
+                    h.requests.redraw();
                 }
-                if let Some(capture) = &mut h.timing {
-                    capture.record(sample, Instant::now(), self.reentrant.replace(0));
-                }
-            }
+            });
             if let (Some(profiler), Some(start)) = (h.driver.profiler_mut(), wake_start) {
                 profiler.record_since(mui::profiling::Phase::NativeWake, start);
             }
-        } else if self.timed {
-            self.reentrant.set(self.reentrant.get().saturating_add(1));
+        }
+        if let Some(requests) = idle {
+            requests.idle();
         }
         Ok(())
     }
@@ -1270,8 +1286,18 @@ impl<V: View + 'static> WindowHandler for Adapter<V> {
     }
 
     fn on_event(&self, event: Event) -> EventStatus {
+        // Observe directly delivered edges too, before the handler borrow can
+        // fail. The button set survives inbox drains and tracks every button.
+        self.buttons.observe(&event);
+        if matches!(event, Event::Window(WindowEvent::WillClose)) {
+            self.close.fire();
+        }
         let Ok(mut h) = self.handler.try_borrow_mut() else {
-            self.pending_events.borrow_mut().push_back(event);
+            enqueue_event(
+                &mut self.pending_events.borrow_mut(),
+                event,
+                self.buttons.held(),
+            );
             return EventStatus::Ignored;
         };
         let status = guard(&mut h, |h| h.on_event_inner(&event)).unwrap_or(EventStatus::Ignored);
@@ -1282,7 +1308,7 @@ impl<V: View + 'static> WindowHandler for Adapter<V> {
 
 /// Scene geometry is in UI points; baseview's IME contract uses client pixels.
 fn native_ime(config: mui::host::ImeConfiguration, scale: f64) -> baseview::ImeConfiguration {
-    let config = mui_native::native::ime_configuration(config, scale);
+    let config = native::ime_configuration(config, scale);
     baseview::ImeConfiguration {
         id: config.id,
         position: PhysicalPosition::new(config.area.0.x, config.area.0.y),
@@ -1400,162 +1426,150 @@ impl Clipboard {
 }
 
 fn log<V: View>(shared: &Mutex<Shared<V>>, line: &str) {
-    if line.contains("unavailable") || line.contains("failed") || line.contains("panic") {
-        mui::diagnostics::error("mui-baseview", "native_window", line);
-    } else {
-        mui::diagnostics::breadcrumb("mui-baseview", "native_window", line);
-    }
+    mui::diagnostics::error("mui-baseview", "window_error", line);
     if let Err(payload) =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lock(shared).view.log(line)))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match shared.try_lock() {
+            Ok(mut shared) => shared.view.log(line),
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().view.log(line),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }))
     {
         mui::diagnostics::error(
             "mui-baseview",
-            "view_log_panic",
-            panic_message(payload.as_ref()),
+            "logger_panic",
+            mui::diagnostics::panic_message(&*payload),
         );
     }
 }
 
-fn report_gpu_error(hook: &LogHook, error: impl std::fmt::Display) {
-    // Host has already recorded and logged this error. Forward it without
-    // replacing its callback, consuming other observers or taking the model lock.
-    let line = format!("mui-baseview: GPU failed (uncaptured error: {error})");
-    let mut sink = match hook.try_lock() {
-        Ok(sink) => sink,
-        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-        // A sink may itself trigger another GPU diagnostic. Preserve stderr
-        // without blocking or recursively entering its FnMut callback.
-        Err(std::sync::TryLockError::WouldBlock) => return,
-    };
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&line))).is_err() {
-        eprintln!("mui-baseview: diagnostic sink panicked; GPU error retained on stderr");
+// Native tests explicitly request the synchronous GPU lane. Production windows
+// use GpuInit only, after a successful CPU frame.
+#[cfg(all(test, target_os = "linux"))]
+mod test_display {
+    use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, RawDisplayHandle};
+
+    /// The window's X connection, retained for a synchronous instance. GL
+    /// (EGL) needs the display at instance creation; Vulkan does not.
+    #[derive(Debug)]
+    pub struct Display {
+        raw: RawDisplayHandle,
+        _owner: baseview::PlatformHandle,
+    }
+    impl Display {
+        pub fn new(window: &baseview::WindowContext) -> Result<Self, HandleError> {
+            Ok(Self {
+                raw: window.display_handle()?.as_raw(),
+                _owner: window.platform_handle(),
+            })
+        }
+    }
+    // SAFETY: PlatformHandle retains the same thread-safe X11 connection.
+    #[expect(unsafe_code, reason = "retained thread-safe X11 connection")]
+    unsafe impl Send for Display {}
+    // SAFETY: as above.
+    #[expect(unsafe_code, reason = "retained thread-safe X11 connection")]
+    unsafe impl Sync for Display {}
+    impl HasDisplayHandle for Display {
+        #[expect(unsafe_code, reason = "borrows the retained display connection")]
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            // SAFETY: _owner keeps the connection behind raw alive.
+            Ok(unsafe { DisplayHandle::borrow_raw(self.raw) })
+        }
     }
 }
 
-fn observe_gpu_errors(
-    gpu: &Host,
-    requests: &Requests,
-    generation: &mut Option<u64>,
-    cursor: &mut u64,
-) {
-    let error = observe_generation_error(generation, cursor, gpu.generation(), |cursor| {
-        gpu.observe_gpu_error(cursor)
-    });
-    let hook = requests
-        .log
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let (Some(error), Some(hook)) = (error, hook) {
-        report_gpu_error(&hook, error);
-    }
-}
-
-// A replacement device starts a fresh error sequence; each app sink observes
-// once without consuming errors from MUI's own independent observers.
-fn observe_generation_error(
-    generation: &mut Option<u64>,
-    cursor: &mut u64,
-    current: u64,
-    observe: impl FnOnce(&mut u64) -> Option<String>,
-) -> Option<String> {
-    if *generation != Some(current) {
-        *generation = Some(current);
-        *cursor = 0;
-    }
-    observe(cursor)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_parent_api(
-    handle: raw_window_handle::RawWindowHandle,
-) -> Result<&'static str, &'static str> {
-    use raw_window_handle::RawWindowHandle;
-    match handle {
-        RawWindowHandle::Xlib(_) => Ok("X11/Xlib"),
-        RawWindowHandle::Xcb(_) => Ok("X11/Xcb"),
-        RawWindowHandle::Wayland(_) => Err(
-            "native Wayland embedding is unavailable; this editor requires an X11 parent window and XWayland in a Wayland session",
-        ),
-        _ => Err("unsupported Linux parent window API; this editor requires an X11 parent window"),
-    }
-}
-
-/// KONTAKTO patch: retain wgpu's panic cause instead of discarding the
-/// shader/backend diagnostic when the native initialization unwinds.
-fn gpu_panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
-    format!(
-        "panic while creating GPU resources: {}",
-        panic_message(payload)
+#[cfg(all(test, target_os = "linux"))]
+fn open_gpu(window: &WindowContext, size: (u32, u32)) -> Result<Host, String> {
+    Host::open_native(
+        |backends| {
+            let display = test_display::Display::new(window).map_err(|e| e.to_string())?;
+            let mut descriptor =
+                mui::vello::host::instance_descriptor().with_display_handle(Box::new(display));
+            descriptor.backends = backends;
+            let instance = wgpu::Instance::new(descriptor);
+            // SAFETY: this test's handler drops the host before its native context.
+            #[expect(unsafe_code, reason = "native test surface lifetime")]
+            let surface = unsafe { surface::create(&instance, window) }
+                .ok_or("native test surface unavailable")?;
+            Ok((instance, surface))
+        },
+        size,
     )
 }
 
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("non-string panic payload")
-}
-
-/// KONTAKTO patch: do not initialize Vulkan implicitly in Windows hosts.
-/// Explicit WGPU_BACKEND remains authoritative, including an empty/invalid
-/// request which must fail visibly rather than silently select another API.
-fn gpu_backends(windows: bool, requested: Option<wgpu::Backends>) -> wgpu::Backends {
-    requested.unwrap_or(if windows {
-        wgpu::Backends::DX12
-    } else {
-        wgpu::Backends::all()
-    })
-}
-
-/// A device and renderer for this window's surface. Catch Rust unwinding;
-/// native access violations and panic=abort cannot be recovered here.
-fn open_gpu(
-    window: &WindowContext,
-    size: (u32, u32),
-    mut report: impl FnMut(&str),
-) -> Result<Host, String> {
-    let requested = wgpu::Backends::from_env();
-    let backends = gpu_backends(cfg!(target_os = "windows"), requested);
-    let policy = if requested.is_some() {
-        "explicit WGPU_BACKEND"
-    } else if cfg!(target_os = "windows") {
-        "Windows Direct3D12 default; no automatic Vulkan fallback"
-    } else {
-        "platform default"
-    };
-    report(&format!(
-        "mui-baseview: GPU init requested={backends:?}; {policy}"
-    ));
-    if !backends.intersects(wgpu::Instance::enabled_backend_features()) {
-        return Err(format!(
-            "requested backend {backends:?} is not enabled on this platform; unset WGPU_BACKEND to use the platform default"
-        ));
-    }
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let display = surface::Display::new(window).map_err(|e| e.to_string())?;
-        let mut descriptor = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display));
-        descriptor.backends = backends;
-        let instance = wgpu::Instance::new(descriptor);
-        report("mui-baseview: GPU init creating native surface");
-        // SAFETY: the surface uses this window's live native handle. Baseview's
-        // owned close paths drop the handler/renderer before destroying it.
-        // An embedding host must keep that handle alive during callbacks;
-        // forced external destruction cannot satisfy the surface lifetime.
-        #[expect(unsafe_code, reason = "calls the unsafe surface constructor")]
-        let surface = unsafe { surface::create(&instance, window) }?;
-        report("mui-baseview: GPU init creating adapter, device and renderer");
-        let gpu = Host::new(instance, surface, size).map_err(|e| format!("{backends:?}: {e}; no automatic backend switch, WGPU_BACKEND must be selected before starting the host"))?;
-        let adapter = gpu.device().0.adapter_info();
-        report(&format!("mui-baseview: GPU ready backend={:?} adapter={:?} type={:?} vendor={:#06x} device={:#06x} driver={:?} driver_info={:?}",
-            adapter.backend, adapter.name, adapter.device_type, adapter.vendor, adapter.device, adapter.driver, adapter.driver_info));
-        Ok(gpu)
-    }))
-    .map_err(|payload| gpu_panic_reason(payload.as_ref()))?
-}
-
+mod a11y;
 mod platform;
 mod surface;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod gpu_policy_tests {
+    use super::*;
+    struct Empty;
+    impl View for Empty {
+        fn build(&mut self, _: &mut mui::Ui, _: &mui::prelude::Input) -> mui::scene::El {
+            mui::prelude::block(240., 200.)
+        }
+        fn changed(&mut self) -> bool {
+            false
+        }
+        fn request_resize(&mut self, _: u32, _: u32) -> bool {
+            false
+        }
+    }
+    fn handler() -> Handler<Empty> {
+        Handler::new(
+            Arc::new(Mutex::new(Shared {
+                ui: mui::Ui::default(),
+                view: Empty,
+            })),
+            Arc::default(),
+            (240, 200),
+            1.0,
+        )
+    }
+    #[test]
+    fn cpu_frame_is_required_before_the_gpu_initializer_exists() {
+        let mut handler = handler();
+        handler.software_only = false;
+        handler.start_gpu_after_cpu_frame(false);
+        assert!(handler.gpu_init.is_none());
+        handler.start_gpu_after_cpu_frame(true);
+        assert!(handler.gpu_init.is_some());
+        assert!(handler.gpu.is_none());
+    }
+    #[test]
+    fn requests_publish_atomics_before_waking_the_native_window() {
+        let requests = Arc::new(Requests::default());
+        let observed = Arc::new(AtomicU64::new(0));
+        let weak = Arc::downgrade(&requests);
+        let count = observed.clone();
+        requests.bind_requester(Some(baseview::FrameRequester::new(move || {
+            let requests = weak.upgrade().unwrap();
+            assert!(requests.size.load(Ordering::Acquire) != 0);
+            count.fetch_add(1, Ordering::Relaxed);
+        })));
+        requests.resize(240, 200);
+        requests.scale(2.0);
+        requests.redraw();
+        assert_eq!(observed.load(Ordering::Relaxed), 3);
+    }
+    #[test]
+    fn headless_idle_hook_runs_without_the_shared_model_lock() {
+        let mut handler = handler();
+        let shared = handler.shared.clone();
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = called.clone();
+        handler.requests.on_idle(Arc::new(move || {
+            assert!(shared.try_lock().is_ok());
+            flag.store(true, Ordering::Release);
+        }));
+        handler.step();
+        assert!(called.load(Ordering::Acquire));
+    }
+}
+
+/// Native floating Wayland editors; embedded X11 windows still use `open`.
+#[cfg(target_os = "linux")]
+pub mod wayland;

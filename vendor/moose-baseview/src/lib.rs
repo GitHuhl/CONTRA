@@ -1,12 +1,17 @@
 mod clipboard;
 mod context;
+mod dock;
+pub use dock::{DockEdge, DockOptions};
+mod damage;
 pub mod dpi;
+mod drag_resize;
 mod error;
 mod event;
 mod handler;
 pub mod host;
 mod ime;
 mod keyboard;
+mod work;
 pub use ime::{Ime, ImeConfiguration};
 mod mouse_cursor;
 mod settings;
@@ -19,13 +24,21 @@ pub(crate) mod platform;
 pub mod gl;
 
 pub use clipboard::*;
+#[cfg(target_os = "linux")]
+pub use context::MatariX11ScheduleError;
+pub use context::{MatariDragAdapter, MatariScheduleError};
 pub use context::{PlatformHandle, WindowContext};
+pub use drag_resize::{DragResizeError, ResizeEdge};
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+mod drag;
+pub use damage::{DamageArea, DamageRect};
 pub use error::*;
 pub use event::*;
-pub use handler::WindowHandler;
+pub use handler::{FrameDemand, WindowHandler};
 pub use mouse_cursor::MouseCursor;
 pub use settings::*;
 pub use window::*;
+pub use work::{TimerHandle, WindowWaker};
 
 #[allow(unused, reason = "Some platforms may not use all exports from this mod")]
 pub(crate) use tracing::*;

@@ -78,6 +78,12 @@ pub trait PluginLogicCore<S: Sample = f32>: 'static {
     /// reinterpreting the old bytes.
     type DspState: Send + 'static;
 
+    /// Resolve a custom static CLAP extension table.
+    #[must_use]
+    fn clap_extension(_id: &std::ffi::CStr) -> Option<moose_core::export::CustomClapExtension> {
+        None
+    }
+
     /// Whether the hot-reload shell carries live DSP state across a
     /// reload, via a `save_state` / `load_state` round-trip. Default
     /// `true`. Override to `false` on a state that must always re-init
@@ -87,6 +93,12 @@ pub trait PluginLogicCore<S: Sample = f32>: 'static {
     #[must_use]
     fn supports_in_place() -> bool {
         false
+    }
+
+    /// Maximum serialized host state; size document admission to this bound.
+    #[must_use]
+    fn max_host_state_bytes() -> usize {
+        32 * 1024 * 1024
     }
 
     /// Supported audio bus configurations. The host picks one. Default:
@@ -101,6 +113,26 @@ pub trait PluginLogicCore<S: Sample = f32>: 'static {
     fn init(params: &Self::Params, cx: &InitContext) -> Self::DspState;
 
     fn reset(state: &mut Self::DspState, params: &Self::Params, config: &AudioConfig);
+    /// Worker/fallible-preparation logic must declare this requirement. Legacy
+    /// synchronous users retain false. Hot loaders refuse true until executable
+    /// worker lifetime and fallible cross-generation preparation are qualified.
+    #[must_use]
+    fn requires_fallible_preparation() -> bool {
+        false
+    }
+    /// Prepare the runtime before activation.
+    ///
+    /// # Errors
+    /// Returns an error when configuration or preparation fails.
+    fn prepare(
+        state: &mut Self::DspState,
+        params: &Self::Params,
+        config: &moose_core::plugin::PreparationConfig,
+    ) -> Result<(), moose_core::plugin::PreparationError> {
+        config.validate()?;
+        Self::reset(state, params, &config.audio);
+        Ok(())
+    }
 
     fn process(
         state: &mut Self::DspState,
@@ -225,6 +257,10 @@ macro_rules! plugin_logic_leaf_trait {
             /// round-trip, never by reinterpreting the old bytes.
             type DspState: ::core::default::Default + Send + 'static;
 
+            /// Resolve a custom static CLAP extension table.
+            #[must_use]
+    fn clap_extension(_id: &::std::ffi::CStr) -> Option<moose_core::export::CustomClapExtension> { None }
+
             /// Whether the hot-reload shell carries live DSP state across a
             /// reload. Default `true`: the shell serializes the state
             /// through the old dylib and restores it into the new one via
@@ -248,6 +284,9 @@ macro_rules! plugin_logic_leaf_trait {
             fn supports_in_place() -> bool {
                 false
             }
+
+            /// Maximum serialized host state; size document admission to this bound.
+            fn max_host_state_bytes() -> usize { 32 * 1024 * 1024 }
 
             /// Supported audio bus configurations. The host picks one;
             /// the others are rejected at bus-config time before
@@ -292,6 +331,22 @@ macro_rules! plugin_logic_leaf_trait {
                 config: &$crate::__plugin_logic_deps::AudioConfig,
             ) {
                 let _ = (state, params, config);
+            }
+
+            /// Fallible offaudio activation. Default forwards the ordinary
+            /// reset exactly once; worker plugins override this and only return
+            /// success after their real finite policy/readiness is admitted.
+            fn requires_fallible_preparation()->bool{false}
+            /// Prepare the runtime before activation.
+            ///
+            /// # Errors
+            /// Returns an error when configuration or preparation fails.
+            fn prepare(state: &mut Self::DspState, params: &Self::Params,
+                config: &$crate::__plugin_logic_deps::PreparationConfig,
+            ) -> Result<(), $crate::__plugin_logic_deps::PreparationError> {
+                config.validate()?;
+                <Self as $name>::reset(state, params, &config.audio);
+                Ok(())
             }
 
             /// Process one block of audio. Real-time - no allocations,
@@ -503,6 +558,7 @@ pub mod __plugin_logic_deps {
     pub use moose_core::config::AudioConfig;
     pub use moose_core::editor::Editor;
     pub use moose_core::events::EventList;
+    pub use moose_core::plugin::{PreparationConfig, PreparationError};
     pub use moose_core::process::{ProcessContext, ProcessStatus};
     pub use moose_core::snapshot::SNAPSHOT_PREALLOC;
     pub use moose_core::state::{ForeignState, MigratedState, StateLoadError};
@@ -596,6 +652,9 @@ macro_rules! pure_plugin_leaf_trait {
                 false
             }
 
+            /// Maximum serialized host state; size document admission to this bound.
+            fn max_host_state_bytes() -> usize { 32 * 1024 * 1024 }
+
             /// Supported audio bus configurations. Same contract as the
             /// stateful leaf's `bus_layouts`. Default: the standard audio
             /// effect - stereo and mono.
@@ -647,6 +706,8 @@ macro_rules! pure_plugin_leaf_trait {
             fn supports_in_place() -> bool {
                 <T as $name>::supports_in_place()
             }
+
+            fn max_host_state_bytes() -> usize { <T as $name>::max_host_state_bytes() }
 
             fn bus_layouts() -> Vec<crate::__plugin_logic_deps::BusLayout> {
                 <T as $name>::bus_layouts()
@@ -792,6 +853,10 @@ pub trait BackgroundTask: Send + 'static {
     /// (a long serialized handler delays this lane's later tasks). The mode
     /// is per lane, so a concurrent lane in the same plugin is unaffected.
     const SERIALIZED: bool = false;
+    /// Allow a nonblocking OS wake when a task is first queued. Default false
+    /// preserves syscall-free scheduling. Opt-in lanes remain allocation-free;
+    /// when all lanes opt in, idle pool threads park without periodic wakeups.
+    const WAKE_ON_SCHEDULE: bool = false;
     /// Run one task on the pool. See the trait docs for the contract,
     /// including the concurrency note on [`Self::SERIALIZED`].
     fn run(self, params: &Self::Params);
@@ -829,10 +894,20 @@ macro_rules! plugin_logic_bridge {
             type Params = <T as $leaf>::Params;
             type DspState = <T as $leaf>::DspState;
 
+            fn clap_extension(
+                id: &std::ffi::CStr,
+            ) -> Option<moose_core::export::CustomClapExtension> {
+                <Self as $leaf>::clap_extension(id)
+            }
+
             const PRESERVE_DSP_STATE: bool = <T as $leaf>::PRESERVE_DSP_STATE;
 
             fn supports_in_place() -> bool {
                 <Self as $leaf>::supports_in_place()
+            }
+
+            fn max_host_state_bytes() -> usize {
+                <Self as $leaf>::max_host_state_bytes()
             }
 
             fn bus_layouts() -> Vec<BusLayout> {
@@ -848,6 +923,17 @@ macro_rules! plugin_logic_bridge {
 
             fn reset(state: &mut Self::DspState, params: &Self::Params, config: &AudioConfig) {
                 <Self as $leaf>::reset(state, params, config);
+            }
+
+            fn requires_fallible_preparation() -> bool {
+                <Self as $leaf>::requires_fallible_preparation()
+            }
+            fn prepare(
+                state: &mut Self::DspState,
+                params: &Self::Params,
+                config: &moose_core::plugin::PreparationConfig,
+            ) -> Result<(), moose_core::plugin::PreparationError> {
+                <Self as $leaf>::prepare(state, params, config)
             }
 
             fn process(

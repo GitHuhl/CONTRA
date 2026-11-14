@@ -29,26 +29,13 @@ pub struct Bridge<P: ?Sized = dyn Params> {
     /// host echo cannot jitter a drag, and an incremental drag across a
     /// discrete parameter accumulates between the steps it sends.
     open: Vec<(u32, f64, f64)>,
+    held: Vec<u32>,
     /// The ids `bind` saw this build: an open gesture not among them lost
     /// its widget, and nothing else would ever end it.
     bound: Vec<u32>,
-    /// The gestures [`Bridge::hold`] opened: only these it may end.
-    held: Vec<u32>,
     /// Every parameter and meter as last seen, bit for bit: `changed`
     /// compares against it without hashing or allocating.
     seen: Box<[u64]>,
-    /// When `changed` last looked at the meters.
-    metered: Option<std::time::Instant>,
-}
-
-/// Meters rebuild the tree at most this often: a level moves every audio
-/// block, and a display tick per move kept a playing editor's thread busy.
-const METER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
-
-/// A meter reading as the eye sees it: half-decibel steps down to -60 dB.
-fn meter_step(level: f32) -> u64 {
-    let db = 20.0 * level.max(1e-3).log10();
-    (db * 2.0).round() as i64 as u64
 }
 
 impl<P: Params + ?Sized> Bridge<P> {
@@ -63,10 +50,9 @@ impl<P: Params + ?Sized> Bridge<P> {
             infos,
             meters,
             open: Vec::new(),
-            bound: Vec::new(),
             held: Vec::new(),
+            bound: Vec::new(),
             seen,
-            metered: None,
         }
     }
 
@@ -98,12 +84,14 @@ impl<P: Params + ?Sized> Bridge<P> {
             }
         }
         self.open.clear();
+        self.held.clear();
     }
 
     /// Drop the host without calling it: for `Drop`, when the host may have
     /// torn its side down already.
     pub fn detach(&mut self) {
         self.open.clear();
+        self.held.clear();
         self.context = None;
     }
 
@@ -115,6 +103,7 @@ impl<P: Params + ?Sized> Bridge<P> {
                 context.end_edit(id);
             }
         }
+        self.held.clear();
     }
 
     fn info(&self, id: u32) -> Option<&ParamInfo> {
@@ -161,22 +150,12 @@ impl<P: Params + ?Sized> Bridge<P> {
                 .get_normalized(info.id)
                 .map_or(u64::MAX - 1, f64::to_bits)
         });
-        let params = self.infos.len();
-        for (seen, now) in self.seen.iter_mut().zip(values) {
-            changed |= *seen != now;
-            *seen = now;
-        }
-        let now = std::time::Instant::now();
-        if self.metered.is_some_and(|at| now - at < METER_INTERVAL) {
-            return changed;
-        }
-        self.metered = Some(now);
         let meters = self.meters.iter().map(|&id| {
             self.context
                 .as_ref()
-                .map_or(0, |c| meter_step(c.get_meter(id)))
+                .map_or(0, |c| u64::from(c.get_meter(id).to_bits()))
         });
-        for (seen, now) in self.seen[params..].iter_mut().zip(meters) {
+        for (seen, now) in self.seen.iter_mut().zip(values.chain(meters)) {
             changed |= *seen != now;
             *seen = now;
         }
@@ -303,55 +282,30 @@ impl<P: Params + ?Sized> Bridge<P> {
         })
     }
 
-    /// Keep the gesture on `param` open while `rolling`: a control turned
-    /// without a pointer edge, such as a roll of the wheel. Its first call
-    /// opens the edit, and the calls that follow keep it open; a call with
-    /// `rolling` false ends the edit that `hold` opened, and leaves a pointer
-    /// drag's edit alone.
-    ///
-    /// While held, [`Bridge::value`] reads the value the control last set, not
-    /// the store's. A host that has not yet taken that set would otherwise
-    /// hand the next frame the old value and lose the step, and the host
-    /// records the roll as one edit rather than one per notch.
-    ///
-    /// ```ignore
-    /// let el = bridge.bind(ui, P::Depth, |ui, id, v| knob(ui, id, v, rest));
-    /// bridge.hold(P::Depth, wheel_rolling(id));
-    /// ```
+    /// Keep a wheel or other pointer-free gesture open while it is rolling.
+    /// Releasing a hold does not end a gesture opened by a pointer control.
     pub fn hold(&mut self, param: impl Into<u32>, rolling: bool) {
         let id = param.into();
         if rolling {
-            if !self.is_open(id) {
+            if !self.is_open(id)
+                && self
+                    .info(id)
+                    .is_some_and(|info| !info.flags.contains(ParamFlags::READONLY))
+            {
                 self.begin(id);
-                if self.is_open(id) && !self.held.contains(&id) {
+                if self.is_open(id) {
                     self.held.push(id);
                 }
             }
-        } else if let Some(at) = self.held.iter().position(|h| *h == id) {
-            self.held.swap_remove(at);
+        } else if self.held.contains(&id) {
             self.end(id);
         }
     }
 
-    /// A gesture on a parameter no widget owns: a plot handle, a canvas, a
-    /// drag that is not a `Response`. `plain` is in the parameter's own
-    /// units.
-    ///
-    /// Call it on every frame of the drag. The first call opens the host's
-    /// edit and the value lands inside it; later calls only move the value.
-    /// A build that does not call it names the parameter to no `bind`, so
-    /// [`Bridge::end_unbound`] closes the gesture and the host is told the
-    /// edit ended -- the caller keeps no drag state of its own.
-    ///
-    /// ```ignore
-    /// if let Some(index) = graph::held(ui) {
-    ///     bridge.drag_gesture(P::Band1Frequency, model.bands[index].frequency);
-    /// }
-    /// ```
+    /// Send a canvas or plot drag in the parameter's plain units.
+    /// Call on each build during the drag; an unbound build ends it.
     pub fn drag_gesture(&mut self, param: impl Into<u32>, plain: f64) {
         let id = param.into();
-        // Naming the parameter is what keeps `end_unbound` from closing the
-        // edit while the drag is still going.
         self.bound.push(id);
         let Some(range) = self
             .info(id)
@@ -360,10 +314,10 @@ impl<P: Params + ?Sized> Bridge<P> {
         else {
             return;
         };
-        if !self.is_open(id) {
+        if plain.is_finite() {
             self.begin(id);
+            self.set(id, range, range.normalize(plain));
         }
-        self.set(id, range, range.normalize(plain));
     }
 
     /// After a build: end the gestures no `bind` in it named. `MuiEditor`
@@ -407,6 +361,7 @@ impl<P: Params + ?Sized> Bridge<P> {
     }
 
     fn end(&mut self, id: u32) {
+        self.held.retain(|held| *held != id);
         if let (Some(context), Some(i)) = (
             &self.context,
             self.open.iter().position(|(open, ..)| *open == id),

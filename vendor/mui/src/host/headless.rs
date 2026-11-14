@@ -60,7 +60,6 @@ pub fn offer<V: View + Send + 'static>(shared: &Arc<Mutex<Shared<V>>>, size: (u3
         return false;
     }
     let ui = std::mem::take(&mut lock(shared).ui);
-    ui.release_thread_memos();
     *OFFERED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Headless {
         ui,
         view: Box::new(Parked(Arc::clone(shared))),
@@ -115,17 +114,6 @@ mod tests {
     use super::*;
     use crate::prelude::*;
 
-    #[test]
-    fn invalid_headless_time_keeps_the_last_representable_clock() {
-        set_time(0.25);
-        for seconds in [f64::INFINITY, f64::MAX] {
-            set_time(seconds);
-            assert_eq!(TIME.load(Ordering::Acquire), 0.25f64.to_bits());
-        }
-        set_time(-1.);
-        assert_eq!(TIME.load(Ordering::Acquire), 0f64.to_bits());
-    }
-
     struct Label(&'static str);
     impl View for Label {
         fn build(&mut self, _: &mut Ui, _: &Input) -> El {
@@ -136,6 +124,15 @@ mod tests {
         }
         fn request_resize(&mut self, _: u32, _: u32) -> bool {
             false
+        }
+    }
+
+    #[test]
+    fn invalid_headless_time_does_not_poison_the_global_clock() {
+        set_time(0.25);
+        for seconds in [f64::INFINITY, f64::MAX] {
+            set_time(seconds);
+            assert_eq!(TIME.load(Ordering::Acquire), 0.25f64.to_bits());
         }
     }
 

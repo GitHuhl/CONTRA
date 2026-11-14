@@ -1,17 +1,16 @@
-# Vendored from moose bffa467 with CONTRA's output port name patch; see vendor/MOOSE-PATCHES.md.
 [package]
 name = "moose-vst3"
+description = "VST3 format wrapper for moose (C++ shim)"
 version = "7.0.0"
 repository = "https://github.com/Matari-Audio/moose"
 homepage = "https://github.com/Matari-Audio/moose"
 edition = "2024"
 license = "LicenseRef-TruceLicense-1.0"
 rust-version = "1.92"
-description = "VST3 format wrapper for moose (C++ shim)"
 
 [dependencies]
-moose-core = {path = "../moose-core"}
-moose-params = {path = "../moose-params"}
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
 # Wait-free bounded queue for the host/editor → audio state-load
 # handoff so the audio thread is the only one that ever holds
 # `&mut Plugin`.
@@ -20,3 +19,5 @@ crossbeam-queue = "0.3"
 [build-dependencies]
 cc = "1"
 
+[dev-dependencies]
+moose-derive = {version = "7.0.0", path = "../moose-derive"}

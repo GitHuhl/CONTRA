@@ -9,5 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-law = { path = "../../base/law" }
-contra-time = { path = "../../base/time" }
+contra-law = {path = "../../base/law"}
+contra-time = {path = "../../base/time"}

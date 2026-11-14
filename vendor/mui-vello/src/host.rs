@@ -13,13 +13,155 @@ use std::time::{Duration, Instant};
 
 use mui_scene::ResolvedScene;
 
-use crate::Classic;
+use crate::Canvas;
 use crate::effects::{Budget, EffectStats, GpuRenderer};
 use crate::kurbo::Affine;
 
+mod crash_guard;
+mod initialization;
+mod selection;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use initialization::InitGate;
+pub use initialization::{BitmapPatch, GpuInit, Offscreen};
+use selection::{adapter_rank, requested_limits, validate_renderer_requirements};
+pub(crate) mod pipeline_cache;
+
 /// A failed device rebuild waits this long before the next attempt, so a
 /// GPU that keeps failing does not cost a device creation every frame.
-const RETRY: Duration = Duration::from_millis(500);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    Permanent,
+    Transient,
+}
+
+/// Shared recovery policy: 250 ms doubling to 8 s. Permanent failures require reset.
+#[derive(Debug, Default)]
+pub struct Retry {
+    failures: u32,
+    deadline: Option<Instant>,
+    disabled: bool,
+}
+impl Retry {
+    pub fn ready(&self, now: Instant) -> bool {
+        !self.disabled && self.deadline.is_none_or(|at| now >= at)
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        (!self.disabled).then_some(self.deadline).flatten()
+    }
+    pub fn fail(&mut self, now: Instant, class: FailureClass) {
+        self.disabled |= class == FailureClass::Permanent;
+        let delay = Duration::from_millis(250 * (1u64 << self.failures.min(5)));
+        self.failures = self.failures.saturating_add(1);
+        self.deadline = Some(now + delay);
+    }
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Native instance policy: backend allowlist from WGPU_BACKEND, opt-in validation,
+/// static DXC where wgpu links it (x86-64 MSVC), and opaque HWND presentation
+/// without an acquisition wait.
+pub fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    descriptor.flags = if std::env::var("MUI_GPU_DEBUG").is_ok_and(|v| v == "1") {
+        wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION
+    } else {
+        wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL
+    };
+    descriptor.backend_options.dx12.shader_compiler = dx12_compiler();
+    descriptor.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromHwnd;
+    descriptor.backend_options.dx12.latency_waitable_object =
+        wgpu::Dx12UseFrameLatencyWaitableObject::DontWait;
+    crate::diagnostics::breadcrumb(
+        "mui-vello",
+        "backend_policy",
+        &format!(
+            "enabled={:?}; dx12_compiler={:?}; flags={:?}; windows_dx12_first={}",
+            descriptor.backends,
+            descriptor.backend_options.dx12.shader_compiler,
+            descriptor.flags,
+            cfg!(windows),
+        ),
+    );
+    descriptor
+}
+
+fn dx12_compiler() -> wgpu::Dx12Compiler {
+    if let Some(compiler) = wgpu::Dx12Compiler::from_env() {
+        return compiler;
+    }
+    if cfg!(all(target_env = "msvc", not(target_arch = "aarch64"))) {
+        return wgpu::Dx12Compiler::StaticDxc;
+    }
+    #[cfg(windows)]
+    if let Some(path) = dynamic_dxc_path() {
+        return wgpu::Dx12Compiler::DynamicDxc { dxc_path: path };
+    }
+    if cfg!(windows) {
+        wgpu::Dx12Compiler::Fxc
+    } else {
+        wgpu::Dx12Compiler::Auto
+    }
+}
+
+#[cfg(windows)]
+fn dynamic_dxc_path() -> Option<String> {
+    let configured = std::env::var_os("MUI_DXCOMPILER_PATH").map(std::path::PathBuf::from);
+    let adjacent = plugin_directory().map(|p| p.join("dxcompiler.dll"));
+    [configured, adjacent]
+        .into_iter()
+        .flatten()
+        .find_map(|path| {
+            let path = if path.is_dir() {
+                path.join("dxcompiler.dll")
+            } else {
+                path
+            };
+            path.is_file().then(|| path.to_string_lossy().into_owned())
+        })
+}
+
+// current_exe() identifies the DAW, not the plugin DLL. Resolve this function's
+// containing module without changing its loader reference count.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "query the plugin image containing this function"
+)]
+fn plugin_directory() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(
+            flags: u32,
+            address: *const u16,
+            module: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        fn GetModuleFileNameW(module: *mut std::ffi::c_void, path: *mut u16, size: u32) -> u32;
+    }
+    let mut module = std::ptr::null_mut();
+    let mut path = vec![0u16; 32768];
+    // SAFETY: FROM_ADDRESS interprets the pointer as an address within our
+    // image. The module stays mapped during this call; path is writable.
+    let length = unsafe {
+        if GetModuleHandleExW(
+            0x6,
+            plugin_directory as *const () as *const u16,
+            &mut module,
+        ) == 0
+        {
+            return None;
+        }
+        GetModuleFileNameW(module, path.as_mut_ptr(), 32768) as usize
+    };
+    if length == 0 || length >= path.len() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&path[..length]));
+    path.parent().map(std::path::Path::to_path_buf)
+}
 
 // Opening every API eagerly loads GL/EGL even when Vulkan/Metal/DX12 succeeds.
 // Keep the caller's enabled backends, but pay for the secondary APIs only on failure.
@@ -27,12 +169,10 @@ fn try_backends<T>(
     enabled: wgpu::Backends,
     mut open: impl FnMut(wgpu::Backends) -> Result<T, String>,
 ) -> Result<T, String> {
-    let primary = enabled & wgpu::Backends::PRIMARY;
     let mut errors = Vec::new();
-    for backends in [primary, enabled - primary]
-        .into_iter()
-        .filter(|b| !b.is_empty())
-    {
+    // One API at a time: even Instance::new may fault in a native loader.
+    // Prefer Windows' native DX12 path before loading Vulkan; Metal stays first on macOS.
+    for backends in backend_order().into_iter().filter(|b| enabled.contains(*b)) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open(backends)));
         match result {
             Ok(Ok(host)) => return Ok(host),
@@ -56,16 +196,31 @@ fn try_backends<T>(
     }
 }
 
-/// The surface size clamped to what a vello `Scene` holds (`u16`), or
-/// `None` when there is nothing to draw into: a minimised window reports
-/// 0x0, and configuring a zero-sized surface is invalid.
-pub fn target_size(width: u32, height: u32) -> Option<(u32, u32)> {
-    let max = u32::from(u16::MAX);
-    (width > 0 && height > 0).then(|| (width.min(max), height.min(max)))
+fn backend_order() -> [wgpu::Backends; 6] {
+    backend_order_for(cfg!(windows))
 }
 
-/// MUI's alpha contract wants a non-sRGB UNORM target: vello writes sRGB
-/// values, and an `_Srgb` surface would encode them a second time.
+fn backend_order_for(windows: bool) -> [wgpu::Backends; 6] {
+    use wgpu::Backends as B;
+    [
+        B::METAL,
+        if windows { B::DX12 } else { B::VULKAN },
+        if windows { B::VULKAN } else { B::DX12 },
+        B::BROWSER_WEBGPU,
+        B::GL,
+        B::NOOP,
+    ]
+}
+
+/// The surface size, or `None` when there is nothing to draw into: a
+/// minimised window reports 0x0, and configuring a zero-sized surface is
+/// invalid. The device's texture limit is applied where the size is used.
+pub fn target_size(width: u32, height: u32) -> Option<(u32, u32)> {
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// MUI's alpha contract wants a non-sRGB UNORM target: the renderer writes
+/// sRGB values, and an `_Srgb` surface would encode them a second time.
 pub fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
     formats.iter().copied().find(|f| {
         matches!(
@@ -75,18 +230,14 @@ pub fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFo
     })
 }
 
-/// The present mode for a window surface. Windows: `AutoNoVsync`, because
-/// an embedded editor presents on the DAW's GUI thread and a backed-up
-/// Fifo blocks it. Elsewhere the first of Mailbox, FifoRelaxed, Fifo.
+/// Prefer an offered nonblocking mode; use FIFO when it is the only choice.
+/// The native host owns display pacing. No application frame cap is introduced.
 fn present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     use wgpu::PresentMode as P;
-    if cfg!(windows) {
-        return P::AutoNoVsync;
-    }
-    [P::Mailbox, P::FifoRelaxed]
+    [P::Mailbox, P::Immediate, P::FifoRelaxed, P::Fifo]
         .into_iter()
         .find(|m| modes.contains(m))
-        .unwrap_or(P::Fifo)
+        .unwrap_or(P::AutoVsync)
 }
 
 /// Whether a window shows what is behind it where the scene is not opaque.
@@ -103,7 +254,7 @@ pub enum Transparency {
 
 /// The alpha mode a surface offering `offered` is configured with for
 /// `want`: premultiplied (what MUI paints) or else straight alpha when
-/// translucent, and `Auto` -- opaque where offered -- otherwise.
+/// translucent, and an offered opaque/inherited mode otherwise.
 pub fn alpha_mode(
     offered: &[wgpu::CompositeAlphaMode],
     want: Transparency,
@@ -112,9 +263,14 @@ pub fn alpha_mode(
     let translucent = [A::PreMultiplied, A::PostMultiplied]
         .into_iter()
         .find(|m| offered.contains(m));
+    let opaque = [A::Opaque, A::Inherit]
+        .into_iter()
+        .find(|mode| offered.contains(mode))
+        .or_else(|| offered.first().copied())
+        .unwrap_or(A::Auto);
     match want {
-        Transparency::Translucent => translucent.unwrap_or(A::Auto),
-        Transparency::Opaque => A::Auto,
+        Transparency::Translucent => translucent.unwrap_or(opaque),
+        Transparency::Opaque => opaque,
     }
 }
 
@@ -143,7 +299,7 @@ pub enum Frame {
 /// The initialization operation a candidate reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuStage {
-    /// Surface formats, alpha modes, usages, or compute limits are unsuitable.
+    /// Surface formats, alpha modes, usages, or renderer limits are unsuitable.
     Capabilities,
     /// The driver refused the requested device.
     Device,
@@ -203,81 +359,6 @@ impl std::fmt::Display for GpuDiagnostics {
     }
 }
 
-// Adapter type/backend preference adapted from Zed's Apache-2.0
-// crates/gpui_wgpu/src/wgpu_context.rs at
-// a84689073d296dfd39987bc7dd478e43ef76d83a (sort_adapters).
-// Copyright 2022 - 2025 Zed Industries, Inc.
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// http://www.apache.org/licenses/LICENSE-2.0
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-// Adaptation: stable high-performance ranking without Zed-specific overrides;
-// retain CPU fallback and MUI's full compute renderer requirements.
-fn adapter_rank(info: &wgpu::AdapterInfo) -> (u8, u8) {
-    let device = match info.device_type {
-        wgpu::DeviceType::DiscreteGpu => 0,
-        wgpu::DeviceType::IntegratedGpu => 1,
-        wgpu::DeviceType::Other => 2,
-        wgpu::DeviceType::VirtualGpu => 3,
-        wgpu::DeviceType::Cpu => 4,
-    };
-    let backend = match info.backend {
-        wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 0,
-        _ => 1,
-    };
-    (device, backend)
-}
-
-/// Vello's blend spill and tile buffers grow with scene depth; big libraries
-/// (Conflux) need more than the 128 MiB default storage binding. Ask for what
-/// the adapter really offers, capped so one buffer cannot eat the VRAM.
-fn renderer_limits(supported: &wgpu::Limits) -> wgpu::Limits {
-    const CAP: u64 = 1 << 30;
-    let mut limits = wgpu::Limits::default()
-        .using_resolution(supported.clone())
-        .using_alignment(supported.clone());
-    limits.max_storage_buffer_binding_size = limits
-        .max_storage_buffer_binding_size
-        .max(supported.max_storage_buffer_binding_size.min(CAP));
-    limits.max_buffer_size = limits.max_buffer_size.max(supported.max_buffer_size.min(CAP));
-    limits
-}
-
-fn validate_renderer_requirements(
-    info: &wgpu::AdapterInfo,
-    flags: wgpu::DownlevelFlags,
-    requested: &wgpu::Limits,
-    supported: &wgpu::Limits,
-) -> Result<(), String> {
-    // WARP's compute JIT faults outside Rust error handling; see the captured
-    // stack in research/platform-validation-2026-10-08.md.
-    if info.backend == wgpu::Backend::Dx12
-        && info.device_type == wgpu::DeviceType::Cpu
-        && info.vendor == 0x1414
-    {
-        return Err("WARP compute shader compilation can crash; use CPU rendering".into());
-    }
-    if !flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS) {
-        return Err("Vello requires compute shaders; downlevel GL is unsupported".into());
-    }
-    let mut missing = Vec::new();
-    requested.check_limits_with_fail_fn(supported, false, |name, requested, supported| {
-        missing.push(format!(
-            "{name}: requested {requested}, supported {supported}"
-        ));
-    });
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("renderer limits: {}", missing.join(", ")))
-    }
-}
-
 /// Run the finite candidate list once. The same policy is exercised without a
 /// driver in tests; a failed preferred device must not hide working software.
 fn select_candidate<A, T>(
@@ -286,10 +367,10 @@ fn select_candidate<A, T>(
 ) -> Result<(T, GpuDiagnostics), HostError> {
     let mut diagnostics = GpuDiagnostics::default();
     for (adapter, mut candidate) in candidates {
-        crate::diagnostics::breadcrumb(
-            "mui-vello",
-            "adapter_capabilities",
-            &format!("{candidate:?}"),
+        crate::diagnostics::gpu_candidate(
+            "candidate_considered",
+            "querying capabilities",
+            &candidate.adapter,
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             attempt(adapter, &mut candidate)
@@ -298,7 +379,8 @@ fn select_candidate<A, T>(
             Ok(Ok(selected)) => {
                 candidate.stage = GpuStage::Ready;
                 diagnostics.candidates.push(candidate);
-                crate::diagnostics::breadcrumb("mui-vello", "gpu_ready", &diagnostics.to_string());
+                let chosen = diagnostics.candidates.last().expect("selected candidate");
+                crate::diagnostics::gpu_candidate("gpu_ready", "quad pass ready", &chosen.adapter);
                 return Ok((selected, diagnostics));
             }
             Ok(Err(error)) => candidate.failure = Some(error),
@@ -308,7 +390,15 @@ fn select_candidate<A, T>(
                 crate::diagnostics::gpu_error("initialization_panic", message, &candidate.adapter);
             }
         }
-        crate::diagnostics::breadcrumb("mui-vello", "candidate_failed", &format!("{candidate:?}"));
+        crate::diagnostics::gpu_candidate(
+            "candidate_rejected",
+            &format!(
+                "{:?}: {}",
+                candidate.stage,
+                candidate.failure.as_deref().unwrap_or("unknown")
+            ),
+            &candidate.adapter,
+        );
         diagnostics.candidates.push(candidate);
     }
     crate::diagnostics::error(
@@ -351,6 +441,11 @@ impl DeviceErrors {
 /// Why a [`Host`] could not paint.
 #[derive(Debug)]
 pub enum HostError {
+    /// Initialization failed before an adapter report was available.
+    Unavailable {
+        message: String,
+        class: FailureClass,
+    },
     /// Every candidate failed. Inspect the complete adapter/stage report.
     Initialization(GpuDiagnostics),
     /// No adapter can present to the surface.
@@ -373,6 +468,7 @@ pub enum HostError {
 impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Unavailable { message, .. } => f.write_str(message),
             Self::Initialization(report) => write!(f, "GPU initialization: {report}"),
             Self::Adapter(e) => write!(f, "GPU adapter: {e}"),
             Self::Device(e) => write!(f, "GPU device: {e}"),
@@ -396,6 +492,23 @@ impl std::error::Error for HostError {
     }
 }
 impl HostError {
+    pub fn failure_class(&self) -> FailureClass {
+        match self {
+            Self::Unavailable { class, .. } => *class,
+            Self::Initialization(report)
+                if report
+                    .candidates
+                    .iter()
+                    .all(|c| matches!(c.stage, GpuStage::Capabilities | GpuStage::Renderer)) =>
+            {
+                FailureClass::Permanent
+            }
+            Self::Validation => FailureClass::Permanent,
+            // Surface loss, allocation pressure and render/driver faults can
+            // clear without restarting a DAW. Retry with the existing backoff.
+            _ => FailureClass::Transient,
+        }
+    }
     /// Candidate failures, also when this error wraps a device-loss rebuild.
     pub fn diagnostics(&self) -> Option<&GpuDiagnostics> {
         match self {
@@ -409,6 +522,7 @@ impl HostError {
 /// Everything that lives on one device, rebuilt whole when it is lost:
 /// pipelines, atlases, weld textures and retained encodings die with it.
 struct OnDevice {
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -418,6 +532,8 @@ struct OnDevice {
     /// Raised by wgpu's device-lost callback, on whatever thread wgpu calls it.
     errors: Arc<DeviceErrors>,
     diagnostics: GpuDiagnostics,
+    // Drop driver resources before disarming an unfinished trial.
+    trial: Arc<crash_guard::Attempt>,
 }
 
 impl OnDevice {
@@ -428,6 +544,17 @@ impl OnDevice {
         surface: Option<&wgpu::Surface<'_>>,
         size: (u32, u32),
         transparency: Transparency,
+    ) -> Result<Self, HostError> {
+        Self::open_filtered(instance, surface, size, transparency, &[], None)
+    }
+
+    fn open_filtered(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        size: (u32, u32),
+        transparency: Transparency,
+        excluded: &[(String, wgpu::Backend)],
+        enumeration: Option<&crash_guard::Attempt>,
     ) -> Result<Self, HostError> {
         // Enumeration remains constrained by the instance's enabled backends
         // (including WGPU_BACKEND when its descriptor was built from env).
@@ -443,18 +570,61 @@ impl OnDevice {
             ),
             None,
         );
-        let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        let mut adapters = Vec::new();
+        if let Some(trial) = enumeration {
+            trial.phase("enumerate");
+            adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+                .into_iter()
+                .map(|adapter| {
+                    let info = adapter.get_info();
+                    (adapter, info)
+                })
+                .collect();
+            trial.finish();
+        } else {
+            // For an externally supplied instance we cannot guard its creation,
+            // but can still isolate enumeration of each enabled native API.
+            for backend in backend_order()
+                .into_iter()
+                .filter(|backend| wgpu::Instance::enabled_backend_features().contains(*backend))
+            {
+                if let Ok(trial) =
+                    crash_guard::Attempt::begin(&crash_guard::Key::enumeration(backend))
+                {
+                    trial.phase("enumerate");
+                    adapters.extend(
+                        pollster::block_on(instance.enumerate_adapters(backend))
+                            .into_iter()
+                            .map(|adapter| {
+                                let info = adapter.get_info();
+                                (adapter, info)
+                            }),
+                    );
+                    trial.finish();
+                }
+            }
+        }
         drop(operation);
-        adapters.sort_by_key(|adapter| adapter_rank(&adapter.get_info()));
-        let candidates = adapters.into_iter().map(|adapter| {
-            let supported_limits = adapter.limits();
-            // Do not use GPUI's downlevel/GL limits: Vello needs compute,
-            // storage buffers, and the full default workgroup limits.
-            let requested_limits = renderer_limits(&supported_limits);
+        adapters.retain(|(_, info)| {
+            let rejected = excluded
+                .iter()
+                .any(|(name, backend)| name == &info.name && *backend == info.backend);
+            if rejected {
+                crate::diagnostics::gpu_candidate(
+                    "candidate_rejected",
+                    "excluded after incompatible surface",
+                    info,
+                );
+            }
+            !rejected
+        });
+        adapters.sort_by_key(|(_, info)| adapter_rank(info));
+        let candidates = adapters.into_iter().map(|(adapter, info)| {
             let candidate = AdapterDiagnostic {
-                adapter: adapter.get_info(),
-                supported_limits,
-                requested_limits,
+                adapter: info,
+                // Query capabilities only after the adapter trial is armed.
+                supported_limits: wgpu::Limits::default(),
+                requested_limits: wgpu::Limits::default(),
                 stage: GpuStage::Capabilities,
                 format: None,
                 alpha_mode: None,
@@ -476,34 +646,26 @@ impl OnDevice {
         transparency: Transparency,
         candidate: &mut AdapterDiagnostic,
     ) -> Result<Self, String> {
+        let trial = Arc::new(crash_guard::Attempt::begin(&crash_guard::Key::adapter(
+            &candidate.adapter,
+        ))?);
+        trial.phase("request_device");
+        candidate.supported_limits = adapter.limits();
+        // WebGL2-class limits at the adapter's own texture size: see
+        // `selection::requested_limits`.
+        candidate.requested_limits = requested_limits(&candidate.supported_limits);
         validate_renderer_requirements(
             &candidate.adapter,
-            adapter.get_downlevel_capabilities().flags,
             &candidate.requested_limits,
             &candidate.supported_limits,
         )?;
+        selection::validate_texture_formats(adapter)?;
         let limit = candidate.requested_limits.max_texture_dimension_2d;
         let (width, height) = target_size(size.0.min(limit), size.1.min(limit)).unwrap_or((1, 1));
         let config = if let Some(surface) = surface {
-            let caps = surface.get_capabilities(adapter);
-            if caps.alpha_modes.is_empty()
-                || caps.present_modes.is_empty()
-                || !caps.usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
-            {
-                return Err(
-                    "surface has no usable alpha/present modes or render attachment usage".into(),
-                );
-            }
-            let format = surface_format(&caps.formats).ok_or("no non-sRGB UNORM surface format")?;
-            wgpu::SurfaceConfiguration {
-                format,
-                present_mode: present_mode(&caps.present_modes),
-                alpha_mode: alpha_mode(&caps.alpha_modes, transparency),
-                desired_maximum_frame_latency: 1,
-                ..surface
-                    .get_default_config(adapter, width, height)
-                    .ok_or("no default surface configuration")?
-            }
+            candidate.stage = GpuStage::Surface;
+            initialization::surface_config(surface, adapter, (width, height), transparency)
+                .map_err(|error| error.to_string())?
         } else {
             wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -526,9 +688,11 @@ impl OnDevice {
             &format!("{candidate:?}"),
             Some(&candidate.adapter),
         );
+        trial.phase("request_device");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("MUI retained renderer"),
             required_limits: candidate.requested_limits.clone(),
+            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
@@ -562,6 +726,7 @@ impl OnDevice {
             &format!("format={:?}; size=({width},{height})", config.format),
             Some(&candidate.adapter),
         );
+        trial.phase("create_renderer");
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -594,6 +759,8 @@ impl OnDevice {
             return Err(format!("device error during initialization: {error}"));
         }
         Ok(Self {
+            trial,
+            adapter: adapter.clone(),
             device,
             queue,
             config,
@@ -654,13 +821,15 @@ fn configure(
 /// A window's surface, the device painting it and the renderer.
 pub struct Host {
     instance: wgpu::Instance,
+    // A weak static registry owns no GPU objects. The editor is the strong owner.
+    shared: Option<Arc<initialization::Session>>,
     // None after a failed replacement; acquisition must wait for a new surface.
     surface: Option<wgpu::Surface<'static>>,
     gpu: OnDevice,
     /// The size last asked for, in physical pixels: what a rebuilt device
     /// configures. `None` while there is nothing to draw into.
     wanted: Option<(u32, u32)>,
-    retry_at: Option<Instant>,
+    retry: Retry,
     /// Bumped on every device rebuild: what lives on the old device is gone.
     generation: u64,
     /// What the caller asked for; a rebuilt device asks again.
@@ -688,10 +857,13 @@ impl Host {
         size: (u32, u32),
         transparency: Transparency,
     ) -> Result<Self, String> {
-        let enabled = wgpu::InstanceDescriptor::new_without_display_handle_from_env().backends;
+        let enabled = wgpu::InstanceDescriptor::new_without_display_handle_from_env().backends
+            & wgpu::Instance::enabled_backend_features();
         try_backends(enabled, |backends| {
+            let trial = crash_guard::Attempt::begin(&crash_guard::Key::enumeration(backends))?;
+            trial.phase("enumerate");
             let (instance, surface) = create(backends)?;
-            Self::with_transparency(instance, surface, size, transparency)
+            Self::with_transparency_guarded(instance, surface, size, transparency, Some(&trial))
                 .map_err(|e| e.to_string())
         })
     }
@@ -716,58 +888,35 @@ impl Host {
         size: (u32, u32),
         transparency: Transparency,
     ) -> Result<Self, HostError> {
-        let gpu = OnDevice::open(&instance, Some(&surface), size, transparency)?;
+        Self::with_transparency_guarded(instance, surface, size, transparency, None)
+    }
+
+    fn with_transparency_guarded(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        size: (u32, u32),
+        transparency: Transparency,
+        enumeration: Option<&crash_guard::Attempt>,
+    ) -> Result<Self, HostError> {
+        let gpu = OnDevice::open_filtered(
+            &instance,
+            Some(&surface),
+            size,
+            transparency,
+            &[],
+            enumeration,
+        )?;
         Ok(Self {
             instance,
+            shared: None,
             surface: Some(surface),
             gpu,
             wanted: target_size(size.0, size.1),
-            retry_at: None,
+            retry: Retry::default(),
             generation: 0,
             transparency,
             first_frame: true,
         })
-    }
-
-    /// A device and renderer with no window, for tests and benchmarks: draw
-    /// with [`Host::render_offscreen`].
-    pub fn headless(size: (u32, u32)) -> Result<Self, HostError> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let gpu = OnDevice::open(&instance, None, size, Transparency::Opaque)?;
-        Ok(Self {
-            instance,
-            surface: None,
-            gpu,
-            wanted: target_size(size.0, size.1),
-            retry_at: None,
-            generation: 0,
-            transparency: Transparency::Opaque,
-            first_frame: false,
-        })
-    }
-
-    /// Draw `scene` into a texture of the renderer's size and wait for the GPU
-    /// to finish: what a frame costs without the swapchain.
-    pub fn render_offscreen(&mut self, scene: &ResolvedScene, xf: Affine) -> Result<(), HostError> {
-        let OnDevice { device, renderer, size, config, .. } = &mut self.gpu;
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("headless target"),
-            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        renderer.invalidate();
-        renderer.render(scene, xf, &view).map_err(HostError::Render)?;
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        Ok(())
     }
 
     /// The surface composites with alpha: [`Transparency::Translucent`]
@@ -824,21 +973,11 @@ impl Host {
         self.gpu.poll_lost()
     }
 
-    /// Force a complete repaint after a native expose, restore, or reparent.
-    pub fn invalidate(&mut self) {
-        self.gpu.renderer.invalidate();
-        self.first_frame = true;
-    }
-
     /// Resize to `width` x `height` physical pixels, clamped to what the
-    /// device and a vello scene hold. Zero hides: presents skip until a
+    /// device holds. Zero hides: presents skip until a
     /// real size comes back.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), HostError> {
-        let was_hidden = self.wanted.is_none();
         self.wanted = target_size(width, height);
-        if was_hidden && self.wanted.is_some() {
-            self.invalidate();
-        }
         let Some((width, height)) = self.wanted else {
             return Ok(());
         };
@@ -867,6 +1006,9 @@ impl Host {
         let mut next = config.clone();
         (next.width, next.height) = (width, height);
         if let Some(surface) = &self.surface {
+            // DXGI ResizeBuffers requires every old backbuffer view released.
+            // The renderer caches the last output view to skip idle presents.
+            renderer.invalidate();
             configure(surface, device, &next).map_err(|error| {
                 crate::diagnostics::error("mui-vello", "resize_failed", &error);
                 HostError::Configuration(error)
@@ -880,7 +1022,6 @@ impl Host {
         // oversized GL framebuffer shifts its top-left image upward, while
         // Wayland surfaces take their dimensions from the submitted buffer.
         *config = next;
-        self.first_frame = true;
         Ok(())
     }
 
@@ -906,18 +1047,43 @@ impl Host {
     ) -> Result<(), HostError> {
         // EGL permits one configured window surface per native window. Wgpu
         // creates it during configure, so release the old swapchain first.
+        // Cached output views must go before their swapchain (DXGI too).
+        self.gpu.renderer.invalidate();
         self.surface = None;
+        if self.shared.is_some() {
+            let config = initialization::surface_config(
+                &surface,
+                &self.gpu.adapter,
+                self.wanted.unwrap_or((1, 1)),
+                self.transparency,
+            )?;
+            if let Err(error) = configure(&surface, &self.gpu.device, &config) {
+                self.retry.fail(Instant::now(), FailureClass::Transient);
+                return Err(HostError::Configuration(error));
+            }
+            self.gpu.renderer.set_surface_format(config.format);
+            self.gpu
+                .renderer
+                .resize([config.width, config.height])
+                .map_err(HostError::Render)?;
+            self.gpu.renderer.invalidate();
+            self.gpu.config = config;
+            self.gpu.size = (self.gpu.config.width, self.gpu.config.height);
+            self.surface = Some(surface);
+            self.retry.reset();
+            return Ok(());
+        }
         let gpu = OnDevice::open(
             &self.instance,
             Some(&surface),
             self.wanted.unwrap_or((1, 1)),
             self.transparency,
-        )?;
+        )
+        .inspect_err(|error| self.retry.fail(Instant::now(), error.failure_class()))?;
         self.surface = Some(surface);
         self.gpu = gpu;
         self.generation = self.generation.wrapping_add(1);
-        self.retry_at = None;
-        self.first_frame = true;
+        self.retry.reset();
         Ok(())
     }
 
@@ -925,14 +1091,15 @@ impl Host {
     /// device-rebuild failure, not a lost surface; painting the same scene
     /// again would fail the same way.
     pub fn present(&mut self, scene: &ResolvedScene, xf: Affine) -> Result<Frame, HostError> {
-        self.present_inner::<fn(&mut Classic<'_>)>(scene, xf, None)
+        self.present_inner(scene, xf, None::<fn(&mut dyn Canvas)>)
             .inspect_err(|error| {
                 crate::diagnostics::error("mui-vello", "present_failed", &error.to_string());
             })
     }
 
-    /// [`Host::present`] with `overlay` drawn on top, never retained.
-    pub fn present_with_overlay<F: FnOnce(&mut Classic<'_>)>(
+    /// [`Host::present`] with `overlay` drawn on top, never retained (see
+    /// [`GpuRenderer::render_with_overlay`]: the frame is drawn on the CPU).
+    pub fn present_with_overlay<F: FnOnce(&mut dyn Canvas)>(
         &mut self,
         scene: &ResolvedScene,
         xf: Affine,
@@ -944,7 +1111,7 @@ impl Host {
             })
     }
 
-    fn present_inner<F: FnOnce(&mut Classic<'_>)>(
+    fn present_inner<F: FnOnce(&mut dyn Canvas)>(
         &mut self,
         scene: &ResolvedScene,
         xf: Affine,
@@ -954,24 +1121,31 @@ impl Host {
         let Some(size) = self.wanted else {
             return Ok(Frame::Skipped);
         };
+        if !self.retry.ready(Instant::now()) {
+            return Ok(Frame::Skipped);
+        }
         let Some(surface) = &self.surface else {
             return Ok(Frame::SurfaceLost);
         };
         if self.gpu.poll_lost() {
-            let now = Instant::now();
-            if self.retry_at.is_some_and(|at| now < at) {
-                return Ok(Frame::Skipped);
+            if self.shared.is_some() {
+                return Err(HostError::Unavailable {
+                    message: "shared device lost; rebuilding off the window thread".into(),
+                    class: FailureClass::Transient,
+                });
             }
+            let now = Instant::now();
+            self.gpu.renderer.invalidate();
             match OnDevice::open(&self.instance, Some(surface), size, self.transparency) {
                 Ok(gpu) => {
                     self.gpu = gpu;
                     self.generation = self.generation.wrapping_add(1);
                     self.first_frame = true;
-                    self.retry_at = None;
+                    self.retry.reset();
                     return Ok(Frame::Skipped);
                 }
                 Err(e) => {
-                    self.retry_at = Some(now + RETRY);
+                    self.retry.fail(now, e.failure_class());
                     return Err(HostError::DeviceLost(Box::new(e)));
                 }
             }
@@ -995,24 +1169,25 @@ impl Host {
                     .map(|c| &c.adapter),
             )
         });
+        if self.first_frame {
+            self.gpu.trial.phase("first_render");
+        }
         let OnDevice {
             device,
             queue,
             config,
             renderer,
+            trial,
             ..
         } = &mut self.gpu;
-        if self.first_frame {
-            renderer.invalidate();
-        }
         if overlay.is_none() && renderer.is_current(scene, xf) {
             return Ok(Frame::Current);
         }
         let frame = match surface.get_current_texture() {
             Acquired::Success(frame) | Acquired::Suboptimal(frame) => frame,
             Acquired::Outdated => {
-                configure(surface, device, config).map_err(HostError::Configuration)?;
                 renderer.invalidate();
+                configure(surface, device, config).map_err(HostError::Configuration)?;
                 return Ok(Frame::Skipped);
             }
             Acquired::Occluded | Acquired::Timeout => return Ok(Frame::Skipped),
@@ -1022,15 +1197,21 @@ impl Host {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let stats = match overlay {
+        let stats = match match overlay {
             Some(draw) => renderer.render_with_overlay(scene, xf, &view, draw),
             None => renderer.render(scene, xf, &view),
-        }
-        .map_err(HostError::Render)?;
+        } {
+            Ok(stats) => stats,
+            Err(error) => return Err(HostError::Render(error)),
+        };
         queue.present(frame);
         // Driver compilation can fault after submit returns, before work completes.
         if let Some(operation) = operation {
-            queue.on_submitted_work_done(move || drop(operation));
+            let trial = trial.clone();
+            queue.on_submitted_work_done(move || {
+                trial.finish();
+                drop(operation);
+            });
         }
         if self.first_frame {
             crate::diagnostics::breadcrumb(
@@ -1048,6 +1229,62 @@ impl Host {
 mod tests {
     use super::*;
     use mui_scene::prelude::*;
+
+    #[test]
+    fn transient_retries_double_to_a_cap_and_permanent_failures_require_reset() {
+        let now = Instant::now();
+        let mut retry = Retry::default();
+        for milliseconds in [250, 500, 1000, 2000, 4000, 8000, 8000] {
+            retry.fail(now, FailureClass::Transient);
+            assert_eq!(
+                retry.deadline(),
+                Some(now + Duration::from_millis(milliseconds))
+            );
+            assert!(!retry.ready(now));
+            assert!(retry.ready(now + Duration::from_millis(milliseconds)));
+        }
+        retry.fail(now, FailureClass::Permanent);
+        assert!(!retry.ready(now + Duration::from_secs(3600)));
+        retry.reset();
+        assert!(retry.ready(now));
+    }
+
+    #[test]
+    fn capability_failures_are_sticky_but_configuration_and_loss_are_transient() {
+        assert_eq!(
+            HostError::Initialization(GpuDiagnostics::default()).failure_class(),
+            FailureClass::Permanent
+        );
+        assert_eq!(
+            HostError::Configuration("view not mapped yet".into()).failure_class(),
+            FailureClass::Transient
+        );
+        assert_eq!(
+            HostError::DeviceLost(Box::new(HostError::Validation)).failure_class(),
+            FailureClass::Transient
+        );
+        assert_eq!(
+            HostError::Render(crate::effects::Error::Render("driver fault".into())).failure_class(),
+            FailureClass::Transient
+        );
+    }
+
+    #[test]
+    fn requested_limits_keep_the_adapters_texture_size_and_ask_no_storage() {
+        let supported = wgpu::Limits {
+            max_texture_dimension_2d: 16384,
+            ..wgpu::Limits::default()
+        };
+        let requested = requested_limits(&supported);
+        assert_eq!(requested.max_texture_dimension_2d, 16384);
+        assert_eq!(requested.max_storage_buffers_per_shader_stage, 0);
+        assert!(requested.check_limits(&supported));
+        assert!(
+            requested.check_limits(
+                &wgpu::Limits::downlevel_webgl2_defaults().using_resolution(supported)
+            )
+        );
+    }
 
     #[test]
     fn native_backends_are_lazy_and_preserve_the_allowlist() {
@@ -1094,10 +1331,10 @@ mod tests {
     }
 
     #[test]
-    fn sizes_clamp_and_zero_is_nothing_to_draw_into() {
+    fn zero_is_nothing_to_draw_into() {
         assert_eq!(target_size(0, 600), None);
         assert_eq!(target_size(800, 0), None);
-        assert_eq!(target_size(70_000, 600), Some((65_535, 600)));
+        assert_eq!(target_size(70_000, 600), Some((70_000, 600)));
     }
 
     #[test]
@@ -1122,10 +1359,10 @@ mod tests {
         let dx12_hwnd = [A::Opaque];
         assert_eq!(alpha_mode(&vulkan_x11, Translucent), A::PreMultiplied);
         assert_eq!(alpha_mode(&metal, Translucent), A::PostMultiplied);
-        assert_eq!(alpha_mode(&dx12_hwnd, Translucent), A::Auto);
-        for offered in [&vulkan_x11[..], &metal, &dx12_hwnd] {
-            assert_eq!(alpha_mode(offered, Opaque), A::Auto, "{offered:?}");
-        }
+        assert_eq!(alpha_mode(&dx12_hwnd, Translucent), A::Opaque);
+        assert_eq!(alpha_mode(&vulkan_x11, Opaque), A::Inherit);
+        assert_eq!(alpha_mode(&metal, Opaque), A::Opaque);
+        assert_eq!(alpha_mode(&dx12_hwnd, Opaque), A::Opaque);
         assert!(is_translucent(A::PreMultiplied) && is_translucent(A::PostMultiplied));
         assert!(!is_translucent(A::Auto) && !is_translucent(A::Inherit));
         assert_eq!(Transparency::default(), Opaque);
@@ -1135,12 +1372,10 @@ mod tests {
     fn present_mode_follows_the_platform() {
         use wgpu::PresentMode as P;
         let mode = present_mode(&[P::Fifo, P::FifoRelaxed]);
-        if cfg!(windows) {
-            assert_eq!(mode, P::AutoNoVsync);
-        } else {
-            assert_eq!(mode, P::FifoRelaxed);
-            assert_eq!(present_mode(&[P::Fifo]), P::Fifo);
-        }
+        assert_eq!(mode, P::FifoRelaxed);
+        assert_eq!(present_mode(&[P::Fifo]), P::Fifo);
+        assert_eq!(present_mode(&[P::Immediate]), P::Immediate);
+        assert_eq!(present_mode(&[]), P::AutoVsync);
     }
 
     fn adapter_info(
@@ -1156,90 +1391,51 @@ mod tests {
     }
 
     #[test]
-    fn renderer_requests_large_buffers_the_adapter_offers() {
-        let mut supported = wgpu::Limits::default();
-        supported.max_storage_buffer_binding_size = u64::MAX;
-        supported.max_buffer_size = u64::MAX;
-        let asked = renderer_limits(&supported);
-        // The 154 MB blend spill that forced CPU rendering must fit.
-        assert!(asked.max_storage_buffer_binding_size >= 154_681_344);
-        assert!(asked.max_buffer_size >= 154_681_344);
-        assert!(asked.max_buffer_size <= 1 << 30);
-        // A small adapter is never asked for more than it has.
-        let small = wgpu::Limits::default();
-        let asked = renderer_limits(&small);
-        assert!(validate_renderer_requirements(
-            &adapter_info("a", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Vulkan),
-            wgpu::DownlevelFlags::COMPUTE_SHADERS, &asked, &small).is_ok());
+    fn non_validation_runtime_faults_recover_without_a_restart() {
+        assert_eq!(
+            HostError::Surface("temporary").failure_class(),
+            FailureClass::Transient
+        );
+        assert_eq!(
+            HostError::Render(crate::effects::Error::Render("driver fault".into())).failure_class(),
+            FailureClass::Transient
+        );
+        assert_eq!(
+            HostError::Validation.failure_class(),
+            FailureClass::Permanent
+        );
     }
-
     #[test]
-    fn downlevel_gl_is_rejected_without_weakening_vello_requirements() {
+    fn windows_tries_dx12_before_loading_vulkan_and_honors_backend_override() {
+        use wgpu::Backends as B;
+        assert_eq!(backend_order_for(true)[..3], [B::METAL, B::DX12, B::VULKAN]);
+        assert_eq!(
+            backend_order_for(false)[..3],
+            [B::METAL, B::VULKAN, B::DX12]
+        );
+        // A Vulkan-only allowlist never opens DX12, on any host platform.
+        let mut tried = Vec::new();
+        let _ = try_backends(B::VULKAN, |backend| {
+            tried.push(backend);
+            Ok(())
+        });
+        assert_eq!(tried, [B::VULKAN]);
+    }
+    #[test]
+    fn downlevel_gl_is_accepted_and_short_limits_are_not() {
         let info = adapter_info("GL", wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Gl);
-        let requested = wgpu::Limits::default();
         let downlevel = wgpu::Limits::downlevel_webgl2_defaults();
-        assert!(
-            validate_renderer_requirements(
-                &info,
-                wgpu::DownlevelFlags::empty(),
-                &requested,
-                &downlevel
-            )
-            .unwrap_err()
-            .contains("compute shaders")
-        );
-        assert!(
-            validate_renderer_requirements(
-                &info,
-                wgpu::DownlevelFlags::COMPUTE_SHADERS,
-                &requested,
-                &downlevel
-            )
-            .unwrap_err()
-            .contains("renderer limits")
-        );
-        assert!(
-            validate_renderer_requirements(
-                &info,
-                wgpu::DownlevelFlags::COMPUTE_SHADERS,
-                &requested,
-                &requested
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn warp_is_rejected_before_device_creation_without_rejecting_hardware_or_mesa() {
-        let limits = wgpu::Limits::default();
-        let validate = |info: &wgpu::AdapterInfo| {
-            validate_renderer_requirements(
-                info,
-                wgpu::DownlevelFlags::COMPUTE_SHADERS,
-                &limits,
-                &limits,
-            )
+        let requested = requested_limits(&downlevel);
+        assert!(validate_renderer_requirements(&info, &requested, &downlevel).is_ok());
+        let short = wgpu::Limits {
+            max_vertex_attributes: 8,
+            ..downlevel
         };
-        let mut info = adapter_info(
-            "Microsoft Basic Render Driver",
-            wgpu::DeviceType::Cpu,
-            wgpu::Backend::Dx12,
+        assert!(
+            validate_renderer_requirements(&info, &requested, &short)
+                .unwrap_err()
+                .contains("renderer limits")
         );
-        info.vendor = 0x1414;
-        info.device = 0x008c;
-        info.driver = "10.0.26100.33438".into();
-        assert!(validate(&info).unwrap_err().contains("WARP"));
-        info.backend = wgpu::Backend::Vulkan;
-        assert!(validate(&info).is_ok());
-        info.backend = wgpu::Backend::Dx12;
-        info.device_type = wgpu::DeviceType::DiscreteGpu;
-        for vendor in [0x10de, 0x8086, 0x1002, 0x1414] {
-            info.vendor = vendor;
-            assert!(validate(&info).is_ok());
-        }
-        info.device_type = wgpu::DeviceType::IntegratedGpu;
-        info.vendor = 0x8086;
-        assert!(validate(&info).is_ok());
     }
 
     #[test]
@@ -1363,7 +1559,7 @@ mod tests {
     /// A real loss, not a flag flipped by hand: `Device::destroy` fires the
     /// lost callback, and a device opened again renders.
     #[test]
-    #[ignore = "requires a native adapter with Vello compute support"]
+    #[ignore = "requires a native adapter"]
     fn a_destroyed_device_is_seen_and_a_new_one_renders() {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -1406,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a native adapter with Vello compute support"]
+    #[ignore = "requires a native adapter"]
     fn a_failed_replacement_state_requires_a_surface_before_presenting() {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -1417,10 +1613,11 @@ mod tests {
         // device until the caller supplies a new surface.
         let mut host = Host {
             instance,
+            shared: None,
             surface: None,
             gpu,
             wanted: Some((16, 16)),
-            retry_at: None,
+            retry: Retry::default(),
             generation: 4,
             transparency: Transparency::Opaque,
             first_frame: true,
@@ -1431,6 +1628,12 @@ mod tests {
             host.present(&scene, Affine::IDENTITY),
             Ok(Frame::SurfaceLost)
         ));
+        host.retry.fail(Instant::now(), FailureClass::Transient);
+        assert!(matches!(
+            host.present(&scene, Affine::IDENTITY),
+            Ok(Frame::Skipped)
+        ));
+        host.retry.reset();
         host.gpu.device.destroy();
         assert!(matches!(
             host.present(&scene, Affine::IDENTITY),
@@ -1441,73 +1644,5 @@ mod tests {
             4,
             "missing surface cannot trigger a device rebuild"
         );
-    }
-    #[test]
-    #[ignore = "requires a native adapter with Vello compute support"]
-    fn expose_and_same_size_restore_require_full_repaint() {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let gpu = OnDevice::open(&instance, None, (16, 16), Transparency::Opaque).unwrap();
-        let mut host = Host {
-            instance,
-            surface: None,
-            gpu,
-            wanted: Some((16, 16)),
-            retry_at: None,
-            generation: 0,
-            transparency: Transparency::Opaque,
-            first_frame: true,
-        };
-        let scene = resolve(&SceneSpec::new(block(16., 16.).fill(Role::Primary))).unwrap();
-        let target = host.gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("first-frame regression"),
-            size: wgpu::Extent3d {
-                width: 16,
-                height: 16,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let first = host
-            .gpu
-            .renderer
-            .render(&scene, Affine::IDENTITY, &view)
-            .unwrap();
-        assert_eq!(first.encoded_scenes, 1);
-        assert!(host.gpu.renderer.is_current(&scene, Affine::IDENTITY));
-        host.first_frame = false;
-        host.invalidate();
-        assert!(host.first_frame);
-        assert!(!host.gpu.renderer.is_current(&scene, Affine::IDENTITY));
-        assert_eq!(
-            host.gpu
-                .renderer
-                .render(&scene, Affine::IDENTITY, &view)
-                .unwrap()
-                .encoded_scenes,
-            1
-        );
-        host.first_frame = false;
-        host.resize(0, 0).unwrap();
-        host.resize(16, 16).unwrap();
-        assert!(
-            host.first_frame,
-            "restore at the same size must force first present"
-        );
-        assert!(!host.gpu.renderer.is_current(&scene, Affine::IDENTITY));
-        host.gpu
-            .renderer
-            .render(&scene, Affine::IDENTITY, &view)
-            .unwrap();
-        host.first_frame = false;
-        host.resize(32, 32).unwrap();
-        assert!(host.first_frame);
-        assert!(!host.gpu.renderer.is_current(&scene, Affine::IDENTITY));
     }
 }

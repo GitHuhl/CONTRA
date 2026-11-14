@@ -2,11 +2,10 @@
 //! hold: the browser's data, found by naming a folder and nothing else.
 //!
 //! A root is a folder of libraries, searched a few levels down, or one folder
-//! (or `.ufs` bank) that is a library. A folder is a library when it holds a
+//! that is a library. A folder is a library when it holds a
 //! `.nicnt` (registered), an `Instruments` or `Multis` folder, presets beside
 //! a `Samples` folder or a monolith (`.nkx`/`.nkc`/`.nkr`), or, below the
-//! root, presets of its own. Loose `.ufs` banks at a root are libraries of
-//! their own. The search stops at a library, skips sample folders, and gives
+//! root, presets of its own. The search stops at a library, skips sample folders, and gives
 //! up on a folder of many audio files with no presets. A library shows only
 //! when it holds a preset.
 //!
@@ -14,9 +13,8 @@
 //! versions, brackets and underscores; the vendor comes from the product, a
 //! bracketed name or the vendor folder it sits in.
 //!
-//! The crate reads no instrument: a bank's program list comes from the
-//! lister the host passes (`contra_format_uvi::programs`), and what a scan
-//! reads once is kept in a [`Cache`] keyed by file size and time.
+//! The crate reads no instrument; what a scan reads once is kept in a
+//! [`Cache`] keyed by file size and time.
 
 pub mod kontakt;
 pub mod presets;
@@ -35,7 +33,7 @@ pub use folder::{Folder, natural};
 pub use name::{clean_name, product};
 pub use prefs::Prefs;
 
-/// A folder or `.ufs` bank the player added.
+/// A folder the player added.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Root {
     pub path: PathBuf,
@@ -44,34 +42,24 @@ pub struct Root {
     pub single: bool,
 }
 
-/// Which player a library was made for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Format {
-    #[default]
-    Kontakt,
-    Uvi,
-}
-
 /// One library found.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
-    /// Its folder, or the bank file for a loose `.ufs`.
+    /// Its folder.
     pub dir: PathBuf,
     /// Its name, unique among the catalog's libraries.
     pub name: String,
     pub vendor: String,
-    pub format: Format,
     /// It has a `.nicnt`; otherwise it was recognised from its folders.
     pub registered: bool,
-    /// Its instruments and snapshots, sorted naturally by path. A UVI
-    /// program is `bank.ufs/Folder/Name.uvip`.
+    /// Its instruments and snapshots, sorted naturally by path.
     pub presets: Vec<PathBuf>,
     /// How many multis (`.nkm`) it holds, not among `presets`.
     pub multis: usize,
     /// Pictures that may be its banner, best first: `wallpaper.png`, a
     /// library-browser picture, the `.nicnt`/`.nkr` (which holds pictures),
     /// then any picture named cover, artwork, banner, logo or background,
-    /// then the rest. A bank's are its `.png`/`.jpg` sidecars. Decoding and
+    /// then the rest. Decoding and
     /// the size check are the viewer's.
     pub art: Vec<PathBuf>,
 }
@@ -122,9 +110,6 @@ impl Progress {
     }
 }
 
-/// Lists a bank's programs as paths inside it, or says why it can't.
-pub type Programs<'a> = &'a dyn Fn(&Path) -> Result<Vec<String>, String>;
-
 /// How many levels under a root libraries are looked for.
 const DEPTH: usize = 4;
 /// A folder with this many audio files and no presets holds samples only.
@@ -140,12 +125,7 @@ const SKIP: [&str; 6] = [
 ];
 
 /// Every library in `roots` and its presets; `None` once canceled.
-pub fn scan(
-    roots: &[Root],
-    progress: &Progress,
-    cache: &mut Cache,
-    programs: Programs<'_>,
-) -> Option<Catalog> {
+pub fn scan(roots: &[Root], progress: &Progress, cache: &mut Cache) -> Option<Catalog> {
     let mut issues = Vec::new();
     let mut libraries = Vec::new();
     let mut seen = BTreeSet::new();
@@ -161,7 +141,7 @@ pub fn scan(
             if !seen.insert(key) {
                 continue;
             }
-            let library = catalog(found, &dirs, progress, cache, programs, &mut issues);
+            let library = catalog(found, &dirs, progress, cache, &mut issues);
             if progress.canceled() {
                 return None;
             }
@@ -175,7 +155,7 @@ pub fn scan(
     })
 }
 
-/// A library folder or loose bank found under a root.
+/// A library folder found under a root.
 struct Found {
     dir: PathBuf,
     nicnt: Option<PathBuf>,
@@ -192,7 +172,6 @@ struct Listing {
     samples: bool,
     monolith: bool,
     presets: usize,
-    banks: Vec<PathBuf>,
     audio: usize,
     folders: Vec<PathBuf>,
 }
@@ -234,17 +213,12 @@ fn list(dir: &Path, issues: &mut Vec<Issue>) -> Listing {
         match ext(&path).as_str() {
             "nicnt" => out.nicnt = out.nicnt.take().or(Some(path)),
             "nkx" | "nkc" | "nkr" => out.monolith = true,
-            "ufs" => {
-                out.presets += 1;
-                out.banks.push(path);
-            }
-            "nki" | "nkm" | "uvip" => out.presets += 1,
+            "nki" | "nkm" => out.presets += 1,
             "wav" | "ncw" | "aif" | "aiff" | "flac" | "ogg" => out.audio += 1,
             _ => {}
         }
     }
     out.folders.sort();
-    out.banks.sort();
     out
 }
 
@@ -255,18 +229,13 @@ fn issue(path: &Path, reason: impl ToString) -> Issue {
     }
 }
 
-/// The library folders and loose banks in `root`.
+/// The library folders in `root`.
 fn detect(root: &Root, progress: &Progress, issues: &mut Vec<Issue>) -> Vec<Found> {
     let dir = root.path.clone();
     let mut out = Vec::new();
     match std::fs::metadata(&dir) {
         Err(e) => issues.push(issue(&dir, e)),
-        Ok(m) if m.is_file() && ext(&dir) == "ufs" => out.push(Found {
-            dir,
-            nicnt: None,
-            vendor: None,
-        }),
-        Ok(m) if !m.is_dir() => issues.push(issue(&dir, "not a library folder or UFS bank")),
+        Ok(m) if !m.is_dir() => issues.push(issue(&dir, "not a library folder")),
         Ok(_) if root.single => {
             let nicnt = list(&dir, issues).nicnt;
             out.push(Found {
@@ -324,9 +293,7 @@ fn visit_within(
     }
     progress.folders.fetch_add(1, Ordering::Relaxed);
     let l = list(dir, issues);
-    // Loose banks at the root are libraries of their own, not the root's presets.
-    let presets = l.presets - if depth == 0 { l.banks.len() } else { 0 };
-    let strong = l.nicnt.is_some() || l.instruments || (presets > 0 && (l.samples || l.monolith));
+    let strong = l.nicnt.is_some() || l.instruments || (l.presets > 0 && (l.samples || l.monolith));
     // Below the root, a folder of presets; at the root, stray presets must not
     // hide the libraries beside them. Inside a library, only a `.nicnt` makes
     // a folder a library of its own.
@@ -344,15 +311,6 @@ fn visit_within(
             // one's: it is a different publisher entry in Kontakt's list.
             vendor: vendor.clone(),
         });
-    } else if depth == 0 {
-        for bank in l.banks {
-            progress.found.fetch_add(1, Ordering::Relaxed);
-            out.push(Found {
-                dir: bank,
-                nicnt: None,
-                vendor: vendor.clone(),
-            });
-        }
     }
     if depth >= DEPTH || (l.audio >= SAMPLE_ONLY && l.presets == 0) {
         return;
@@ -385,37 +343,23 @@ fn file_name(path: &Path) -> String {
         .into_owned()
 }
 
-/// What a library folder holds: its presets (banks opened through
-/// `programs`) and its banner candidates, from one walk that skips samples.
+/// What a library folder holds: its presets and its banner candidates, from
+/// one walk that skips samples.
 fn catalog(
     found: Found,
     nested: &BTreeSet<PathBuf>,
     progress: &Progress,
     cache: &mut Cache,
-    programs: Programs<'_>,
     issues: &mut Vec<Issue>,
 ) -> Option<Library> {
     let mut presets = Vec::new();
     let mut art = Vec::new();
-    let bank = found.dir.is_file();
-    if bank {
-        bank_presets(&found.dir, cache, programs, issues, &mut presets);
-        art.extend(
-            ["png", "jpg", "jpeg"]
-                .iter()
-                .map(|e| found.dir.with_extension(e))
-                .filter(|p| p.is_file()),
-        );
-    } else {
-        let mut state = Walk {
-            nested,
-            progress,
-            cache,
-            programs,
-            issues,
-        };
-        walk(&found.dir, &mut state, &mut presets, &mut art);
-    }
+    let mut state = Walk {
+        nested,
+        progress,
+        issues,
+    };
+    walk(&found.dir, &mut state, &mut presets, &mut art);
     // A multi fills a rack, not a part: nothing plays one yet.
     let multis = presets.len();
     presets.retain(|p| ext(p) != "nkm");
@@ -428,16 +372,7 @@ fn catalog(
         (natural(&inside.to_string_lossy()), p.clone())
     });
     art.sort_by_cached_key(|p| (art_rank(p), p.clone()));
-    let stem = if bank {
-        found
-            .dir
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        file_name(&found.dir)
-    };
+    let stem = file_name(&found.dir);
     let (folder_name, bracket) = clean_name(&stem);
     let (name, company) = found
         .nicnt
@@ -448,15 +383,9 @@ fn catalog(
         .into_iter()
         .find(|v| !v.is_empty())
         .unwrap_or_default();
-    let uvi = presets.iter().filter(|p| ext(p) == "uvip").count();
     Some(Library {
         name: if name.is_empty() { folder_name } else { name },
         vendor,
-        format: if uvi * 2 > presets.len() {
-            Format::Uvi
-        } else {
-            Format::Kontakt
-        },
         registered: found.nicnt.is_some(),
         multis,
         presets,
@@ -465,13 +394,11 @@ fn catalog(
     })
 }
 
-/// What one library's walk shares: where to report, how to read a bank, and
-/// which folders are libraries of their own.
+/// What one library's walk shares: where to report, and which folders are
+/// libraries of their own.
 struct Walk<'a> {
     nested: &'a BTreeSet<PathBuf>,
     progress: &'a Progress,
-    cache: &'a mut Cache,
-    programs: Programs<'a>,
     issues: &'a mut Vec<Issue>,
 }
 
@@ -508,31 +435,11 @@ fn walk(dir: &Path, state: &mut Walk<'_>, presets: &mut Vec<PathBuf>, art: &mut 
                 continue;
             }
             match ext(&path).as_str() {
-                "nki" | "nkm" | "nksn" | "uvip" => presets.push(path),
-                "ufs" => bank_presets(
-                    &path,
-                    &mut *state.cache,
-                    state.programs,
-                    &mut *state.issues,
-                    presets,
-                ),
+                "nki" | "nkm" | "nksn" => presets.push(path),
                 "png" | "jpg" | "jpeg" | "nicnt" | "nkr" => art.push(path),
                 _ => {}
             }
         }
-    }
-}
-
-fn bank_presets(
-    bank: &Path,
-    cache: &mut Cache,
-    programs: Programs<'_>,
-    issues: &mut Vec<Issue>,
-    presets: &mut Vec<PathBuf>,
-) {
-    match cache.programs(bank, programs) {
-        Ok(members) => presets.extend(members.iter().map(|m| bank.join(m))),
-        Err(reason) => issues.push(issue(bank, reason)),
     }
 }
 

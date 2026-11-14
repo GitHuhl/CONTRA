@@ -10,7 +10,7 @@ description = "The plugin's real editor in a real window, standalone: the gate f
 workspace = true
 
 [dependencies]
-contra-plugin = { path = "../../plugin", default-features = false }
-contra-host = { path = "../../crates/app/host" }
-moose = { workspace = true, features = ["mui"] }
-moose-standalone = { workspace = true, features = ["gui"] }
+contra-plugin = {path = "../../plugin", default-features = false}
+contra-host = {path = "../../crates/app/host"}
+moose = {workspace = true, features = ["mui"]}
+moose-standalone = {workspace = true, features = ["gui"]}

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 pub(crate) use xcb_connection::X11Connection;
 
+mod dock;
 mod window;
 pub use window::*;
 
@@ -17,13 +18,16 @@ mod drag_n_drop;
 mod error;
 mod event_loop;
 mod ime;
-mod keyboard;
+pub(super) mod keyboard;
 mod visual_info;
 mod xcb_window;
 
+#[cfg(test)]
+mod tests;
 mod visibility_tree;
 mod window_shared;
 mod window_thread;
+pub(crate) use window_thread::WindowThreadControl;
 
 pub use error::{CookieExt as _, PlatformError};
 pub(crate) type Result<T> = std::result::Result<T, PlatformError>;

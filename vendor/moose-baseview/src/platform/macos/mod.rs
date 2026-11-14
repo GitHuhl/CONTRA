@@ -1,8 +1,10 @@
 mod context;
 mod cursor;
+mod drag_geometry;
 mod error;
 mod ime;
 mod keyboard;
+mod policy;
 mod view;
 mod window;
 

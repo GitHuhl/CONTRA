@@ -1,11 +1,11 @@
 use crate::dpi::{LogicalSize, Size};
-use objc2::rc::{autoreleasepool, Retained, Weak};
+use objc2::rc::{Retained, Weak};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSPasteboard, NSPasteboardTypeString, NSView,
-    NSWindow,
+    NSApplication, NSApplicationActivationPolicy, NSFloatingWindowLevel, NSPasteboard,
+    NSPasteboardTypeString, NSScreen, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -13,7 +13,7 @@ use crate::platform::macos::view::{BaseviewView, ViewParentingType};
 use crate::platform::ParentWindowHandle;
 use crate::platform::Result;
 use crate::utils::SizingStrategy;
-use crate::wrappers::appkit::{create_window, View};
+use crate::wrappers::appkit::{callback, create_window, View};
 use crate::*;
 
 pub struct WindowHandle {
@@ -28,26 +28,46 @@ impl Drop for WindowHandle {
         let Some(view) = self.view.load() else { return };
         let Some(view) = view.inner_ref() else { return };
 
-        BaseviewView::close(view, true);
+        callback("drop window handle", (), || BaseviewView::close(view, true));
     }
 }
 
 impl WindowHandle {
     pub fn create_window(mut init: WindowInitializer) -> Result<Self> {
-        autoreleasepool(|_| {
-            let Some(mtm) = MainThreadMarker::new() else {
-                panic!("macOS: Windows can only be created on the main thread!")
-            };
+        callback(
+            "create window",
+            Err(crate::platform::PlatformError::CreationFailed("panic while creating window")),
+            || {
+                let mtm = MainThreadMarker::new().ok_or(
+                    crate::platform::PlatformError::CreationFailed(
+                        "macOS windows require the main thread",
+                    ),
+                )?;
 
-            // Creates the global NSApplication instance, if it doesn't exist yet
-            let _ = NSApplication::sharedApplication(mtm);
+                if let Some(name) = init.settings.dock.as_ref().and_then(|d| d.output.as_ref()) {
+                    if !NSScreen::screens(mtm)
+                        .iter()
+                        .any(|s| s.localizedName().to_string() == *name)
+                    {
+                        return Err(crate::platform::PlatformError::CreationFailed(
+                            "selected dock display is unavailable",
+                        ));
+                    }
+                }
+                // Creates the global NSApplication instance, if it doesn't exist yet
+                let _ = NSApplication::sharedApplication(mtm);
 
-            if let Some(parent) = init.settings.parent.take() {
-                return Self::create_window_parented(init, parent.inner.view.into_inner(mtm), mtm);
-            }
+                if let Some(parent) = init.settings.parent.take() {
+                    return Self::create_window_parented(
+                        init,
+                        parent.inner.view.into_inner(mtm),
+                        mtm,
+                    );
+                }
 
-            Self::create_window_standalone(init, mtm)
-        })
+                Self::create_window_standalone(init, mtm)
+            },
+        )
     }
 
     pub fn create_window_parented(
@@ -66,10 +86,11 @@ impl WindowHandle {
     }
 
     pub fn create_window_standalone(
-        init: WindowInitializer, mtm: MainThreadMarker,
+        mut init: WindowInitializer, mtm: MainThreadMarker,
     ) -> Result<Self> {
+        let owner_window =
+            init.settings.owner.take().and_then(|owner| owner.inner.view.into_inner(mtm).window());
         let window = create_window_with_options(&init.settings, mtm);
-        window.setAcceptsMouseMovedEvents(true);
 
         let final_size = window.contentRectForFrameRect(window.frame()).size;
         let final_size = LogicalSize::new(final_size.width, final_size.height);
@@ -78,23 +99,36 @@ impl WindowHandle {
 
         let (view, state) = BaseviewView::new(init, parenting, final_size, mtm)?;
 
+        if let Some(owner_window) = owner_window {
+            // SAFETY: both retained windows are live on the AppKit main thread.
+            unsafe {
+                owner_window.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
+            }
+        }
+
         Ok(Self { mtm, state, view: Weak::from_retained(&view), _window: Some(window) })
     }
 
     pub fn run_until_closed(self) -> Result<()> {
-        let Some(view) = self.view.load() else { return Ok(()) };
-        let Some(view) = view.inner_ref() else { return Ok(()) };
+        objc2::rc::autoreleasepool(|_| {
+            let Some(view) = self.view.load() else {
+                return Ok(());
+            };
+            let Some(view) = view.inner_ref() else {
+                return Ok(());
+            };
 
-        BaseviewView::show(view);
+            BaseviewView::show(view);
 
-        let app = NSApplication::sharedApplication(self.mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            let app = NSApplication::sharedApplication(self.mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-        view.lifetime_tied_to_app.set(Some(Weak::from_retained(&app)));
-        app.run();
-        view.lifetime_tied_to_app.set(None);
+            view.lifetime_tied_to_app.set(Some(Weak::from_retained(&app)));
+            app.run();
+            view.lifetime_tied_to_app.set(None);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn is_open(&self) -> bool {
@@ -123,12 +157,18 @@ impl WindowHandle {
     }
 
     pub fn resize(&self, size: Size) -> Result<()> {
-        let Some(view) = self.view.load() else { return Ok(()) };
-        let Some(view) = view.inner_ref() else { return Ok(()) };
+        objc2::rc::autoreleasepool(|_| {
+            let Some(view) = self.view.load() else {
+                return Ok(());
+            };
+            let Some(view) = view.inner_ref() else {
+                return Ok(());
+            };
 
-        BaseviewView::resize(view, size, false, false);
+            BaseviewView::resize(view, size, false, false);
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn suggest_scale_factor(&self, _scale_factor: f64) -> Result<()> {
@@ -136,8 +176,45 @@ impl WindowHandle {
         Ok(())
     }
 
-    pub fn set_keyboard_capture(&self, _capture: bool) {
-        // No-op: ignored key events already propagate to the host on this platform.
+    pub fn set_keyboard_capture(&self, capture: bool) {
+        let Some(view) = self.view.load() else { return };
+        let Some(view) = view.inner_ref() else { return };
+        callback("keyboard capture", (), || BaseviewView::set_keyboard_capture(view, capture));
+    }
+
+    pub fn visibility_control(&self) -> WindowVisibility {
+        let view =
+            std::sync::Arc::new(dispatch2::MainThreadBound::new(self.view.clone(), self.mtm));
+        WindowVisibility::new(move |visible| {
+            let view = std::sync::Arc::clone(&view);
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Some(view) = view.get(mtm).load() else {
+                    return;
+                };
+                let Some(view) = view.inner_ref() else {
+                    return;
+                };
+                callback("external visibility", (), || {
+                    if visible {
+                        BaseviewView::show(view);
+                    } else {
+                        BaseviewView::hide(view);
+                    }
+                });
+            });
+        })
+    }
+    pub fn frame_requester(&self) -> FrameRequester {
+        let Some(view) = self.view.load() else {
+            return FrameRequester::new(|| {});
+        };
+        let Some(view) = view.inner_ref() else {
+            return FrameRequester::new(|| {});
+        };
+        BaseviewView::frame_requester(view)
     }
 
     pub fn set_scale_factor_override(&self, _scale_factor: Option<f64>) -> Result<()> {
@@ -146,28 +223,46 @@ impl WindowHandle {
     }
 
     pub fn set_parent(&self, new_parent: ParentWindowHandle) -> Result<()> {
-        let Some(view) = self.view.load() else { return Ok(()) };
-        let Some(view) = view.inner_ref() else { return Ok(()) };
+        objc2::rc::autoreleasepool(|_| {
+            let Some(view) = self.view.load() else {
+                return Ok(());
+            };
+            let Some(view) = view.inner_ref() else {
+                return Ok(());
+            };
 
-        BaseviewView::set_parent(view, new_parent.view.into_inner(view.mtm));
+            BaseviewView::set_parent(view, new_parent.view.into_inner(view.mtm));
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn show(&self) -> Result<()> {
-        let Some(view) = self.view.load() else { return Ok(()) };
-        let Some(view) = view.inner_ref() else { return Ok(()) };
+        objc2::rc::autoreleasepool(|_| {
+            let Some(view) = self.view.load() else {
+                return Ok(());
+            };
+            let Some(view) = view.inner_ref() else {
+                return Ok(());
+            };
 
-        BaseviewView::show(view);
-        Ok(())
+            BaseviewView::show(view);
+            Ok(())
+        })
     }
 
     pub fn hide(&self) -> Result<()> {
-        let Some(view) = self.view.load() else { return Ok(()) };
-        let Some(view) = view.inner_ref() else { return Ok(()) };
+        objc2::rc::autoreleasepool(|_| {
+            let Some(view) = self.view.load() else {
+                return Ok(());
+            };
+            let Some(view) = view.inner_ref() else {
+                return Ok(());
+            };
 
-        BaseviewView::hide(view);
-        Ok(())
+            BaseviewView::hide(view);
+            Ok(())
+        })
     }
 }
 
@@ -186,20 +281,65 @@ fn create_window_with_options(
     let title = NSString::from_str(&settings.title);
     window.setTitle(&title);
 
+    if let Some(dock) = &settings.dock {
+        let screens = NSScreen::screens(mtm);
+        let screen = screens.iter().find(|screen| {
+            dock.output.as_ref().is_none_or(|name| screen.localizedName().to_string() == *name)
+        });
+        if let Some(screen) = screen {
+            // macOS has no AppBar work-area contract. This is deliberately an
+            // edge overlay; it never changes another application's windows.
+            let frame = screen.visibleFrame();
+            let span = if dock.edge.is_vertical() { frame.size.width } else { frame.size.height };
+            let thickness = f64::from(dock.height).min(span * 0.5);
+            let (x, y, width, height) = match dock.edge {
+                crate::DockEdge::Top => (
+                    frame.origin.x,
+                    frame.origin.y + frame.size.height - thickness,
+                    frame.size.width,
+                    thickness,
+                ),
+                crate::DockEdge::Bottom => {
+                    (frame.origin.x, frame.origin.y, frame.size.width, thickness)
+                }
+                crate::DockEdge::Left => {
+                    (frame.origin.x, frame.origin.y, thickness, frame.size.height)
+                }
+                crate::DockEdge::Right => (
+                    frame.origin.x + frame.size.width - thickness,
+                    frame.origin.y,
+                    thickness,
+                    frame.size.height,
+                ),
+            };
+            window.setStyleMask(NSWindowStyleMask::Borderless);
+            window.setLevel(NSFloatingWindowLevel);
+            window.setFrame_display(
+                NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)),
+                false,
+            );
+        }
+    }
+
     window
 }
 
 pub(crate) struct WindowSharedState {
     pub closed: Cell<bool>,
+    pub defer_user_close: bool,
     pub size: Cell<LogicalSize<f64>>,
     pub scale_factor: Cell<f64>,
     pub sizing_strategy: SizingStrategy,
 }
 
 impl WindowSharedState {
-    pub fn new(size: LogicalSize<f64>, scale_factor: f64, sizing_strategy: SizingStrategy) -> Self {
+    pub fn new(
+        size: LogicalSize<f64>, scale_factor: f64, sizing_strategy: SizingStrategy,
+        defer_user_close: bool,
+    ) -> Self {
         Self {
             closed: false.into(),
+            defer_user_close,
             size: size.into(),
             scale_factor: scale_factor.into(),
             sizing_strategy,
@@ -208,9 +348,11 @@ impl WindowSharedState {
 }
 
 pub fn copy_to_clipboard(string: &str) {
-    let pb = NSPasteboard::generalPasteboard();
-    let ns_str = NSString::from_str(string);
+    objc2::rc::autoreleasepool(|_| {
+        let pb = NSPasteboard::generalPasteboard();
+        let ns_str = NSString::from_str(string);
 
-    pb.clearContents();
-    pb.setString_forType(&ns_str, unsafe { NSPasteboardTypeString });
+        pb.clearContents();
+        pb.setString_forType(&ns_str, unsafe { NSPasteboardTypeString });
+    })
 }

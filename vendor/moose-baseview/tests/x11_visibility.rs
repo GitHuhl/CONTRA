@@ -108,7 +108,11 @@ fn exercise(reparent: bool) {
     // SAFETY: operate on live windows; synchronize before checking their state.
     unsafe {
         if reparent {
-            (host.lib.XReparentWindow)(host.display, child_id, host.root, 0, 0);
+            let frame =
+                (host.lib.XCreateSimpleWindow)(host.display, host.root, 0, 0, 64, 64, 0, 0, 0);
+            (host.lib.XReparentWindow)(host.display, host.parent, frame, 0, 0);
+            (host.lib.XMapWindow)(host.display, host.parent);
+            (host.lib.XMapWindow)(host.display, frame);
         } else {
             (host.lib.XMapWindow)(host.display, host.parent);
         }
@@ -126,13 +130,13 @@ fn exercise(reparent: bool) {
 }
 
 #[test]
-#[ignore = "requires an isolated X11 server; see PATCHES.md"]
+#[ignore = "requires an isolated X11 server; run with xvfb-run"]
 fn late_parent_map_receives_frames() {
     exercise(false);
 }
 
 #[test]
-#[ignore = "requires an isolated X11 server; see PATCHES.md"]
-fn reparent_to_root_receives_frames() {
+#[ignore = "requires an isolated X11 server; run with xvfb-run"]
+fn host_reparented_into_frame_receives_frames() {
     exercise(true);
 }

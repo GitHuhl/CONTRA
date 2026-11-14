@@ -6,6 +6,8 @@
 
 use super::*;
 
+type Placements = smallvec::SmallVec<[Option<([f64; 2], Size)>; 8]>;
+
 /// Resolve flexible lengths from unclamped bases and constrained hypothetical
 /// sizes. Frozen items keep their min/max bound; remaining items redistribute
 /// free space using grow factors or basis-scaled shrink factors.
@@ -14,13 +16,13 @@ pub(crate) fn distribute<P>(
     gap: f64,
     vertical: bool,
     inner: Size,
-) -> Vec<f64> {
+) -> smallvec::SmallVec<[f64; 8]> {
     let available = inner.main(vertical) - gap * children.len().saturating_sub(1) as f64;
-    let bases: Vec<_> = children
+    let bases: smallvec::SmallVec<[_; 8]> = children
         .iter()
         .map(|c| c.flex_basis(vertical, Some(inner)))
         .collect();
-    let hypothetical: Vec<_> = children
+    let hypothetical: smallvec::SmallVec<[_; 8]> = children
         .iter()
         .map(|c| c.base(vertical, Some(inner)))
         .collect();
@@ -34,7 +36,7 @@ pub(crate) fn distribute<P>(
     };
     let weight = |i: usize| factor(i) * if growing { 1.0 } else { bases[i] };
     let mut sizes = hypothetical.clone();
-    let mut frozen: Vec<_> = (0..children.len())
+    let mut frozen: smallvec::SmallVec<[_; 8]> = (0..children.len())
         .map(|i| {
             factor(i) == 0.0
                 || if growing {
@@ -54,7 +56,7 @@ pub(crate) fn distribute<P>(
     // ponytail: CSS's freeze loop is O(n²) in the worst case (one bound per
     // round). Keep this direct algorithm until large constrained rows warrant
     // a sorted solver that also handles mixed min/max violations.
-    let mut violations = vec![0.0; children.len()];
+    let mut violations: smallvec::SmallVec<[f64; 8]> = smallvec::smallvec![0.0; children.len()];
     while frozen.iter().any(|f| !f) {
         let mut free = remaining(&sizes, &frozen);
         let factors: f64 = (0..children.len())
@@ -139,8 +141,9 @@ pub(crate) fn cell<P>(
 pub(crate) fn hide<P>(
     m: &Measured<'_, P>,
     origin: [f64; 2],
-    out: &mut (Vec<(Id, u32)>, Vec<Frame>),
+    out: &mut (Vec<(Id, u32)>, Vec<Frame>, Vec<Size>),
 ) {
+    let children = crate::incremental::Frozen::children(m);
     let frame = Frame {
         x: origin[0],
         y: origin[1],
@@ -150,7 +153,8 @@ pub(crate) fn hide<P>(
         out.0.push((id, out.1.len() as u32));
     }
     out.1.push(frame);
-    for c in &m.children {
+    out.2.push(m.floor);
+    for c in children.iter() {
         hide(c, origin, out);
     }
 }
@@ -162,8 +166,9 @@ pub(crate) fn arrange<P>(
     size: Size,
     pins: &Pins<'_>,
     viewport: Option<Viewport>,
-    out: &mut (Vec<(Id, u32)>, Vec<Frame>),
+    out: &mut (Vec<(Id, u32)>, Vec<Frame>, Vec<Size>),
 ) -> Result<(), Error> {
+    let children = crate::incremental::Frozen::children(m);
     let n = m.node;
     if !size.valid(m.extent_limit) || !origin.iter().all(|v| v.is_finite()) {
         return Err(Error::BudgetExceeded);
@@ -180,6 +185,7 @@ pub(crate) fn arrange<P>(
         out.0.push((id, out.1.len() as u32));
     }
     out.1.push(frame);
+    out.2.push(m.floor);
     let inner = Size::new(
         (size.width - m.padding.horizontal()).max(0.0),
         (size.height - m.padding.vertical()).max(0.0),
@@ -191,7 +197,7 @@ pub(crate) fn arrange<P>(
         ]
     };
     let default = cell_default(n);
-    let flow = m.flow();
+    let flow = super::measure::flow_of(&children);
     // The box a sticky child travels in -- this node's content box, which for
     // a scroll node is the whole extent its children were laid into.
     let mut section = inner;
@@ -206,7 +212,7 @@ pub(crate) fn arrange<P>(
     // Where each in-flow child goes, then every child in declaration order
     // so frames stay in tree order; a float sits in the padding box like an
     // overlay child, unscrolled.
-    let mut placed: Vec<Option<([f64; 2], Size)>> = vec![None; m.children.len()];
+    let mut placed: Placements = smallvec::smallvec![None; children.len()];
     match &n.kind {
         Kind::Leaf => {}
         Kind::Overlay(_) | Kind::Content(_) => {
@@ -226,7 +232,7 @@ pub(crate) fn arrange<P>(
             }
         }
         Kind::Fits(_) => {
-            for (i, c) in m.children.iter().enumerate() {
+            for (i, c) in children.iter().enumerate() {
                 if i == m.pick && !c.node.float {
                     let (p, s) = cell(c, inner, default);
                     placed[i] = Some((at(p[0], p[1]), s));
@@ -237,7 +243,7 @@ pub(crate) fn arrange<P>(
         }
         Kind::Grid { .. } if !m.columns.is_empty() => {
             for p in crate::grid::placements(&flow, m.cols, usize::MAX)? {
-                let child = &m.children[p.index];
+                let child = &children[p.index];
                 let width = m.columns[p.column..p.column + p.column_span]
                     .iter()
                     .sum::<f64>()
@@ -262,10 +268,10 @@ pub(crate) fn arrange<P>(
             let grid = grid_rows(&flow, cols);
             let col_w =
                 (inner.width - m.gap * cols.saturating_sub(1) as f64).max(0.0) / cols as f64;
-            let columns = if m.columns.is_empty() {
-                vec![col_w; cols]
+            let columns: std::borrow::Cow<'_, [f64]> = if m.columns.is_empty() {
+                std::borrow::Cow::Owned(vec![col_w; cols])
             } else {
-                m.columns.clone()
+                std::borrow::Cow::Borrowed(&m.columns)
             };
             let heights: Vec<f64> = grid
                 .iter()
@@ -321,7 +327,7 @@ pub(crate) fn arrange<P>(
             let lines = if n.wrap {
                 wrap_lines(&flow, m.gap, v, inner.main(v))
             } else {
-                vec![(0, flow.len())]
+                smallvec::smallvec![(0, flow.len())]
             };
             let line_cross = |(a, b): (usize, usize)| {
                 flow[a..b]
@@ -400,7 +406,7 @@ pub(crate) fn arrange<P>(
             }
         }
     }
-    for (i, c) in m.children.iter().enumerate() {
+    for (i, c) in children.iter().enumerate() {
         // A candidate that lost keeps its place in the frame list, empty, so
         // a walk of the tree still lines up with it.
         if matches!(n.kind, Kind::Fits(_)) && i != m.pick && !c.node.float {
@@ -408,7 +414,16 @@ pub(crate) fn arrange<P>(
             continue;
         }
         let (pos, s) = if c.node.float {
-            let (p, s) = cell(c, inner, default);
+            // A pin is placed against the root, so it is sized against it
+            // too: a menu pinned from inside a short row is not squeezed to
+            // that row. Nor does it stretch: it has no flow to fill, so it
+            // takes its content size unless it anchors itself otherwise. Any
+            // other float belongs to this box.
+            let (p, s) = if c.node.rare().pin.is_some() {
+                cell(c, pins.root, (Align::Start, Align::Start))
+            } else {
+                cell(c, inner, default)
+            };
             match c
                 .node
                 .rare()

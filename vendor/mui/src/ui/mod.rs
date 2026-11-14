@@ -3,6 +3,7 @@ use std::any::Any;
 mod wake;
 use crate::SemanticAction;
 use std::collections::{BTreeSet, HashMap};
+use wake::CallerWake;
 
 use mui_geometry::{Point, Vec2};
 use mui_input::{
@@ -137,12 +138,6 @@ pub struct Ui {
     actions: Vec<SemanticAction>,
     hit: Hit,
     scene: Option<Arc<ResolvedScene>>,
-    /// A failed walk can change the glyph coordinate cache without a commit.
-    glyph_recovery: bool,
-    /// Scene-copy admission owes a fresh walk after a font-chain/grid change.
-    scene_environment_changed: bool,
-    /// Most nodes one frame's tree may hold; see [`Ui::set_node_limit`].
-    node_limit: usize,
     /// Everything kept under a node key between frames: see [`NodeState`].
     nodes: Nodes,
     /// Nodes that left the tree, still fading out where they stood.
@@ -152,6 +147,8 @@ pub struct Ui {
     identities: HashMap<u64, (Option<String>, String)>,
     /// The runtime clock at which the last playing key lands.
     play_until: f64,
+    /// The per-window budget used before traversal and during scene resolution.
+    layout_limits: mui_layout::Limits,
     resolver: Resolver,
     /// Scratch for the tree path of the node a walk is on: an unnamed node's
     /// key, built without a heap copy per node.
@@ -174,16 +171,18 @@ pub struct Ui {
     drag: Option<(String, Box<dyn Any + Send>)>,
     /// A press that landed on the same target within [`DOUBLE_CLICK`].
     double: Option<String>,
-    last_press: Option<(String, f64)>,
+    last_click: Option<ClickPress>,
+    pending_click: Option<ClickPress>,
+    /// Host timestamps are independent of per-frame animation delta.
+    pointer_time: Option<std::time::Instant>,
     /// This frame's wheel, for [`Response::wheel`].
     wheel: Vec2,
-    /// The clock when the wheel last moved, for a roll's end: see
-    /// [`crate::host::WHEEL_ROLL`].
     wheel_turned: Option<f64>,
-    /// Topmost capture boundary for this wheel frame; descendants alone read it.
     wheel_capture: Option<Id>,
-    /// Popup input scopes stay registered while their named surface is mounted.
     popup_wheel_scopes: Vec<Id>,
+    /// Open modals, innermost last, each with the focus it took over and
+    /// gives back when it goes. Only the innermost holds the keyboard.
+    focus_traps: Vec<(Id, Option<String>)>,
     /// Ids that read [`Ui::wheel`] while the tree now being handed in was
     /// built: no scroll node they sit in takes the wheel over them.
     wheel_claims: Vec<String>,
@@ -211,8 +210,7 @@ pub struct Ui {
     /// still reports the knot it grabbed.
     tagged: Option<(String, String)>,
     time: f64,
-    /// When the caller asked to be drawn again ([`Ui::repaint_in`]).
-    wake: Option<f64>,
+    wake: Option<CallerWake>,
     /// The last frame resolved: see [`Ui::inert`].
     resolved: bool,
     /// Where along a held scrollbar's thumb the pointer took it, so the
@@ -237,7 +235,10 @@ pub struct Ui {
     /// its reads start in `read`, and whether all it read was at rest.
     building: Vec<(u64, usize, bool)>,
     /// The tween and play ids the running closures read.
-    read: Vec<String>,
+    read: Vec<mui_scene::Id>,
+    // A fully settled, whole-root memo can keep the scene allocation too.
+    retained_root: Option<(u64, Option<Size>)>,
+    retained_frame: bool,
 }
 
 fn same_hit_geometry(a: &ResolvedScene, b: &ResolvedScene) -> bool {
@@ -300,13 +301,11 @@ impl Ui {
             actions: Vec::new(),
             hit: Hit::default(),
             scene: None,
-            glyph_recovery: false,
-            scene_environment_changed: false,
-            node_limit: DEFAULT_NODE_LIMIT,
             nodes: Nodes::default(),
             ghosts: Vec::new(),
             identities: HashMap::new(),
             play_until: 0.0,
+            layout_limits: mui_layout::Limits::default(),
             resolver: Resolver::default(),
             path: String::new(),
             pasted: None,
@@ -320,9 +319,12 @@ impl Ui {
             wheel_turned: None,
             wheel_capture: None,
             popup_wheel_scopes: Vec::new(),
+            focus_traps: Vec::new(),
             wheel_claims: Vec::new(),
             press_at: None,
-            last_press: None,
+            last_click: None,
+            pending_click: None,
+            pointer_time: None,
             focus: None,
             focus_visible: false,
             edits: Vec::new(),
@@ -348,6 +350,8 @@ impl Ui {
             issued: 0,
             building: Vec::new(),
             read: Vec::new(),
+            retained_root: None,
+            retained_frame: false,
         }
     }
     /// The theme every frame resolves with.
@@ -357,12 +361,41 @@ impl Ui {
     /// Resolve the next frame with `theme`: a light/dark switch, a new
     /// control size.
     pub fn set_theme(&mut self, theme: Theme) {
+        if self.theme != theme {
+            self.retained_root = None;
+        }
         self.theme = theme;
+    }
+    /// The budget used for this UI's trees, including expanded memo subtrees.
+    /// New UIs use [`mui_layout::Limits::default`].
+    pub fn layout_limits(&self) -> mui_layout::Limits {
+        self.layout_limits
+    }
+    /// Resolve subsequent frames with this per-window layout budget.
+    ///
+    /// A larger node budget permits larger bounded interfaces; it does not
+    /// reduce their construction or rendering cost. Depth remains independently
+    /// bounded, and virtual collections keep their declared content allowance.
+    /// Invalid budgets leave the current limits and last scene unchanged.
+    /// A host changing the limits should request a redraw.
+    pub fn set_layout_limits(
+        &mut self,
+        limits: mui_layout::Limits,
+    ) -> Result<(), mui_layout::Error> {
+        limits.validate()?;
+        if self.layout_limits != limits {
+            self.retained_root = None;
+            self.layout_limits = limits;
+            self.resolved = false;
+        }
+        Ok(())
     }
     /// Swap the primary font after construction; `None` measures with the
     /// 0.6em guess. [`Ui::font`] is the builder form.
     pub fn set_font(&mut self, font: Option<Font>) {
-        self.scene_environment_changed |= self.font != font;
+        if self.font != font {
+            self.retained_root = None;
+        }
         self.font = font;
     }
     /// The window's device pixels per logical unit, if the host set one.
@@ -379,7 +412,9 @@ impl Ui {
     /// assert_eq!(ui.scale(), Some(2.0));
     /// ```
     pub fn set_scale(&mut self, scale: Option<f64>) {
-        self.scene_environment_changed |= self.scale != scale;
+        if self.scale != scale {
+            self.retained_root = None;
+        }
         self.scale = scale;
     }
     /// Seconds between two presses on one target that still make a double
@@ -396,14 +431,22 @@ impl Ui {
     }
     /// Set the font.
     pub fn font(mut self, font: Font) -> Self {
-        self.set_font(Some(font));
+        self.retained_root = None;
+        self.font = Some(font);
+        self
+    }
+    /// Where to find a face for text the fonts have no glyph for, such as
+    /// `mui_text::FontDatabase::fallbacks` (feature `system-fonts`). A face
+    /// it finds joins the fallback fonts and the frame after reshapes with it.
+    pub fn fallback_source(mut self, source: mui_scene::FallbackSource) -> Self {
+        self.resolver.set_fallback_source(Some(source));
         self
     }
     /// Add a font used when the primary face has no glyph for a grapheme.
     /// The selected face is retained in the scene text payload, so CPU and
     /// GPU renderers use the same fallback choice.
     pub fn fallback_font(mut self, font: Font) -> Self {
-        self.scene_environment_changed = true;
+        self.retained_root = None;
         self.fallback_fonts.push(font);
         self.runs.set_fallbacks(self.fallback_fonts.clone());
         self
@@ -411,6 +454,7 @@ impl Ui {
     /// Run `.weld(..)` / `weld!` on the analytic GPU backend: this `Ui`'s
     /// [`SceneSpec::weld_backend`](mui_scene::SceneSpec::weld_backend).
     pub fn gpu_welding(mut self) -> Self {
+        self.retained_root = None;
         self.weld_backend = mui_scene::WeldBackend::AnalyticGpu;
         self
     }
@@ -419,6 +463,7 @@ impl Ui {
     /// Rebuild cached material scenes without changing the application's preference.
     pub fn set_gpu_welding_available(&mut self, available: bool) {
         if self.gpu_welding_available != available {
+            self.retained_root = None;
             self.gpu_welding_available = available;
             self.scene = None;
             self.resolver = Resolver::default();
@@ -429,6 +474,7 @@ impl Ui {
     /// Input reads the live scene's analytic predicate, so no hit-mask or closure
     /// has to be recreated on every animation tick.
     pub fn set_weld_morph(&mut self, id: impl Into<Id>, progress: f64) -> Result<bool, SceneError> {
+        self.retained_root = None;
         let id: Id = id.into();
         let id = id.as_str();
         self.scene
@@ -445,6 +491,7 @@ impl Ui {
         border: Option<Color>,
         width: f64,
     ) -> Result<bool, SceneError> {
+        self.retained_root = None;
         let id: Id = id.into();
         let id = id.as_str();
         self.scene
@@ -458,6 +505,7 @@ impl Ui {
         id: impl Into<Id>,
         blend: f64,
     ) -> Result<bool, SceneError> {
+        self.retained_root = None;
         let id: Id = id.into();
         let id = id.as_str();
         self.scene
@@ -478,20 +526,39 @@ impl Ui {
     }
 
     pub fn layout_stats(&self) -> mui_layout::LayoutStats {
-        self.resolver.layout_stats()
+        if self.retained_frame {
+            mui_layout::LayoutStats::default()
+        } else {
+            self.resolver.layout_stats()
+        }
+    }
+    /// Opt-in exact layout work tracing. Keep disabled for latency measurements.
+    pub fn trace_layout_requests(&mut self, enabled: bool) {
+        self.resolver.trace_layout_requests(enabled);
+    }
+    /// Export bounded owned work records and stop tracing.
+    pub fn take_layout_request_trace(&mut self) -> Option<mui_layout::LayoutRequestTrace> {
+        self.resolver.take_layout_request_trace()
     }
     /// Borrow the last successfully resolved scene.
     pub fn scene(&self) -> Option<&ResolvedScene> {
         self.scene.as_deref()
     }
-    /// Keep wheel events inside this popup and its descendants. Its own scroll
-    /// node still scrolls; an exhausted list never hands wheel to the background.
-    /// Registration lasts while the named surface remains in the scene, so
-    /// retained popup subtrees need no new wrapper or layout changes.
+    /// Confine wheel input to this popup and its descendants while it is mounted.
     pub fn capture_popup_wheel(&mut self, id: impl Into<Id>) {
         let id = id.into();
         if !self.popup_wheel_scopes.contains(&id) {
             self.popup_wheel_scopes.push(id);
+        }
+    }
+    /// Keep keyboard focus inside this modal and its descendants while it is
+    /// mounted: focus moves to its first stop, Tab cycles only its stops, and
+    /// whatever was focused before gets focus back when it goes.
+    pub fn trap_focus(&mut self, id: impl Into<Id>) {
+        let id = id.into();
+        if !self.focus_traps.iter().any(|(t, _)| *t == id) {
+            let before = self.focus.clone();
+            self.focus_traps.push((id, before));
         }
     }
     /// Retain the last scene in O(1), without borrowing this `Ui`.
@@ -533,6 +600,7 @@ impl Ui {
         id: impl Into<Id>,
         s: impl AsRef<str>,
     ) -> Result<(), mui_scene::SceneError> {
+        self.retained_root = None;
         let id: Id = id.into();
         let id = id.as_str();
         self.scene
@@ -554,6 +622,9 @@ impl Ui {
         self.preedit = None;
         self.drag = None;
         self.tagged = None;
+        self.double = None;
+        self.last_click = None;
+        self.pending_click = None;
         self.interaction.cancel();
     }
 
@@ -601,11 +672,22 @@ impl Ui {
         let id: Id = id.into();
         let id = id.as_str();
         let mut response = self.interaction.get(id);
+        if self.disabled_target(id) {
+            // A release may close a custom control's bookkeeping even when
+            // the target was disabled on that frame. Never turn it into an
+            // activation or expose stale motion/keys.
+            return Response {
+                released: response.released,
+                button: response.button.filter(|_| response.released),
+                ..Response::default()
+            };
+        }
         if self.interaction.held() == Some(id)
             && let Some(pose) = self.capture_pose
         {
             response.drag_delta = pose.delta(response.drag_delta);
             response.drag_total = pose.delta(response.drag_total);
+            response.drag_shifted = pose.delta(response.drag_shifted);
         }
         response.double_clicked = self.double.as_deref() == Some(id);
         response.key_activated = self
@@ -613,10 +695,15 @@ impl Ui {
             .iter()
             .any(|k| matches!(k.key, Key::Enter | Key::Space));
         if self.wheel != Vec2::ZERO
-            && let Some(scene) = self.scene.as_deref()
-            && let (Some(p), Some(s)) = (self.pointer.pos, scene.surface(id))
+            && let (Some(p), Some(s)) = (
+                self.pointer.pos,
+                self.scene.as_deref().and_then(|s| s.surface(id)),
+            )
             && self.inside_surface(s, p)
-            && self.owns_wheel(scene, s)
+            && self
+                .scene
+                .as_deref()
+                .is_some_and(|scene| self.owns_wheel(scene, s))
         {
             response.wheel = s.local_pose().delta(self.wheel);
         }
@@ -642,14 +729,20 @@ impl Ui {
         if surface.disabled {
             return false;
         }
+        // Behind an open modal nothing answers, whatever route asks: the
+        // scrim stops presses and the trap keys, this stops assistive tech.
+        if let Some(trap) = self.focus_trap()
+            && !self.in_group(trap.as_str(), Some(action.id()))
+        {
+            return false;
+        }
         let role = surface.semantics.as_ref().map(|s| &s.role);
         let sign = if matches!(action, SemanticAction::Decrement { .. }) {
             -1.0
         } else {
             1.0
         };
-        let target = action.id().to_owned();
-        let accepted = match action {
+        match action {
             SemanticAction::Focus { id } if surface.focusable => {
                 self.focus(Id::runtime(&id));
                 true
@@ -663,6 +756,12 @@ impl Ui {
                     .iter()
                     .any(|a| matches!(a, SemanticAction::Activate { id: old } if old == &id))
                 {
+                    self.hot.extend(
+                        self.scene
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|s| s.memos_at(&id).map(|(id, _)| id)),
+                    );
                     self.actions.push(SemanticAction::Activate { id });
                 }
                 true
@@ -678,6 +777,12 @@ impl Ui {
                 // Coalesce repeated requests, while leaving pointer capture untouched.
                 self.actions.retain(
                     |a| !matches!(a, SemanticAction::SetValue { id: old, .. } if old == &id),
+                );
+                self.hot.extend(
+                    self.scene
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|s| s.memos_at(&id).map(|(id, _)| id)),
                 );
                 self.actions.push(SemanticAction::SetValue { id, value });
                 true
@@ -696,7 +801,10 @@ impl Ui {
                         _ => None,
                     })
                     .unwrap_or(value);
-                let step = crate::widgets::step(&(min..=max)) * sign;
+                let step = surface.numeric_step.map_or_else(
+                    || crate::widgets::step(&(min..=max)),
+                    |step| step.copysign(max - min),
+                ) * sign;
                 self.request_action(SemanticAction::SetValue {
                     id,
                     value: value + step,
@@ -715,13 +823,7 @@ impl Ui {
                 true
             }
             _ => false,
-        };
-        if accepted && let Some(scene) = self.scene.as_deref() {
-            // Requests arrive before the next build. A cold retained ancestor
-            // must run its control closure to consume this action this frame.
-            self.hot.extend(scene.memos_at(&target).map(|(id, _)| id));
         }
-        accepted
     }
 
     /// All gesture edges for a control. Unlike `edit`, this preserves an atomic
@@ -753,15 +855,6 @@ impl Ui {
         self.keys.clear();
         self.typed.clear();
         self.delivered.clear();
-        // Render closures belong to the GUI thread, which may not drop the model.
-        self.release_thread_memos();
-        self.kept.clear();
-        self.memo_ids.clear();
-        self.scene = None;
-        self.glyph_recovery = false;
-        self.scene_environment_changed = false;
-        self.ghosts.clear();
-        self.resolver = Resolver::default();
         std::mem::take(&mut self.edits)
     }
     /// The smallest the last resolved tree can be squeezed to, for a host that
@@ -817,10 +910,12 @@ impl Ui {
             None => ((x / (size * 0.6)).round().max(0.0) as usize).min(s.chars().count()),
         }
     }
-    /// Every char boundary of `s` with the x of a caret there, ascending by
-    /// byte: the inverse of [`Ui::hit`], ending at the whole string's
-    /// advance. Shaped once, however many carets a field asks for.
-    pub(crate) fn carets(&self, s: &str, size: f64) -> Vec<(usize, f64)> {
+    /// Byte offsets and logical x positions for custom single-line text editors.
+    /// Uses the scene's primary font and fallbacks at `size`, ending at the
+    /// string's advance. Boundaries inside one shaping cluster share its
+    /// leading edge. Without a font, positions use the scene's 0.6em estimate.
+    /// Returns an empty vector when configured fonts cannot shape the text.
+    pub fn carets(&self, s: &str, size: f64) -> Vec<(usize, f64)> {
         match self.fonts() {
             Some(fonts) => mui_text::caret_positions(&fonts, s, size, &[]).unwrap_or_default(),
             // ponytail: the 0.6em guess the scene itself falls back to
@@ -867,21 +962,6 @@ impl Ui {
         (self.time * 1.6) as i64 % 2 == 0
     }
 
-    /// Most nodes a frame's tree may hold before it is refused with
-    /// `BudgetExceeded`. The default (65536) suits a dense instrument face;
-    /// the layout work and its buffers grow linearly with the nodes present, and
-    /// the depth limit still bounds recursion. Clamped to at least 1.
-    pub fn set_node_limit(&mut self, nodes: usize) {
-        self.node_limit = nodes.max(1);
-    }
-
-    pub(super) fn limits(&self) -> mui_layout::Limits {
-        mui_layout::Limits {
-            nodes: self.node_limit,
-            ..mui_layout::Limits::default()
-        }
-    }
-
     /// Advance gestures and springs, style the tree by state, resolve it.
     ///
     /// The phases run in this order, each reading what the one before left:
@@ -900,7 +980,52 @@ impl Ui {
             Self::discard_tree(root);
             return Err(SceneError::InvalidFrameDelta);
         }
-        if let Err(error) = Self::validate_tree_budget(&root, self.limits())
+        let input = input.into();
+        let memo = root
+            .payload()
+            .extras()
+            .memo
+            .as_ref()
+            .map(|m| (m.id, m.reused));
+        let previous_root = self.retained_root.take();
+        self.retained_frame = false;
+        let quiet = input.pointer == self.pointer
+            && input.pointer.buttons.is_empty()
+            && input.wheel == Vec2::ZERO
+            && input.keys.is_empty()
+            && input.text.is_empty()
+            && input.ime.is_empty()
+            && input.trail.is_empty()
+            && input.clipboard.is_none()
+            && self.focus.is_none()
+            && self.interaction.held().is_none()
+            && self.interaction.hovered().is_none()
+            && self.tagged.is_none()
+            && self.actions.is_empty()
+            && self.edits.is_empty()
+            && self.delivered.is_empty()
+            && self.cancelled.is_none()
+            && self.ime_caret.is_none();
+        if quiet
+            && memo.is_some_and(|(id, reused)| reused && previous_root == Some((id, offered)))
+            && let Some(scene) = self.scene.as_ref().map(Arc::clone)
+        {
+            let previous_blink = self.blink();
+            self.time += dt;
+            self.advance_caller_wake();
+            self.play_until = self.time;
+            self.issued = 0;
+            // This root owns every retained subtree. No new build ran, so
+            // consume liveness without discarding nested retained declarations.
+            self.kept.values_mut().for_each(|k| k.live = false);
+            self.retained_root = previous_root;
+            self.retained_frame = true;
+            // The issued placeholder is not the retained declaration tree.
+            // Return its rare-field box even on the no-resolve fast path.
+            Self::discard_tree(root);
+            return Ok(self.commit(scene, None, None, previous_blink, false, true));
+        }
+        if let Err(error) = Self::validate_tree_budget(&root, self.layout_limits)
             .and_then(|()| self.validate_expanded_tree_budget(&root))
         {
             Self::discard_tree(root);
@@ -917,7 +1042,7 @@ impl Ui {
             ime,
             // The view's, read in its build; the `Ui` hit-tests the newest.
             trail: _,
-        } = input.into();
+        } = input;
         let previous_pointer = std::mem::replace(&mut self.pointer, pointer);
         let was = previous_pointer.buttons;
         let was_buttons = was;
@@ -941,6 +1066,7 @@ impl Ui {
         // Even a frame crossing the last key owes the tree drawing its endpoint.
         let playing = self.time < self.play_until;
         self.time += dt;
+        self.advance_caller_wake();
         if self.wheel != Vec2::ZERO {
             self.wheel_turned = Some(self.time);
         }
@@ -959,7 +1085,7 @@ impl Ui {
         // the whole tree.
         let mut root = root;
         let mut memos = self.splice(&mut root);
-        if let Err(error) = Self::validate_tree_budget(&root, self.limits()) {
+        if let Err(error) = Self::validate_tree_budget(&root, self.layout_limits) {
             Self::discard_tree(root);
             return Err(error);
         }
@@ -995,30 +1121,40 @@ impl Ui {
             memos.iter_mut().for_each(|(p, _)| p.insert(0, 0));
         }
         let mut root = Self::wrap_tip(root, tip.as_ref());
-        if let Err(error) = Self::validate_tree_budget(&root, self.limits()) {
+        if let Err(error) = Self::validate_tree_budget(&root, self.layout_limits) {
             Self::discard_tree(root);
             return Err(error);
         }
         let heats = self.bar_heats();
         let (moving, shaped) = self.sweep(&mut root, dt);
         animating |= moving;
-        let (mut scene, glided, root) = match self.resolve(root, offered, dt, heats, &memos) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                // Keep the committed scene, but it no longer proves what
-                // the resolver's last_coords saw before this walk failed.
-                self.glyph_recovery = true;
-                return Err(error);
-            }
-        };
+        let (mut scene, glided, root) = self.resolve(root, offered, dt, heats)?;
         self.capture(root, &memos);
         animating |= glided;
         animating |= self.after_motion(&mut scene, shaped, dt);
         self.wheel_capture = self.wheel_capture_for(&scene);
         animating |= self.settle(&scene, wheel);
+        // Keys and typed text are read by the next build, like a release:
+        // a host that sleeps between events owes it that frame.
+        animating |= !self.keys.is_empty() || !self.typed.is_empty();
         self.wheel_claims.clear();
-        animating |= self.heat(&scene, &before, self.pointer.buttons != was_buttons);
-        Ok(self.commit(scene, hovered.as_deref(), tip, previous_blink, animating))
+        self.heat(&scene, &before, self.pointer.buttons != was_buttons);
+        if !animating
+            && self.focus.is_none()
+            && self.interaction.held().is_none()
+            && self.interaction.hovered().is_none()
+            && self.tagged.is_none()
+        {
+            self.retained_root = memo.map(|(id, _)| (id, offered));
+        }
+        Ok(self.commit(
+            Arc::new(scene),
+            hovered.as_deref(),
+            tip,
+            previous_blink,
+            animating,
+            false,
+        ))
     }
 
     /// The caller has now built its tree and consumed these commands. Drain
@@ -1187,7 +1323,8 @@ impl Ui {
             .filter_map(|(was, now)| Some((mui_scene::Id::runtime(&now), self.nodes.remove(&was)?)))
             .collect();
         self.nodes.extend(moved);
-        for k in [&mut self.focus, &mut self.double] {
+        let saved = self.focus_traps.iter_mut().map(|(_, f)| f);
+        for k in [&mut self.focus, &mut self.double].into_iter().chain(saved) {
             if let Some(new) = k.as_deref().and_then(to) {
                 *k = Some(new);
             }
@@ -1196,7 +1333,8 @@ impl Ui {
             self.hover.as_mut().map(|h| &mut h.0),
             self.tagged.as_mut().map(|t| &mut t.0),
             self.drag.as_mut().map(|d| &mut d.0),
-            self.last_press.as_mut().map(|p| &mut p.0),
+            self.last_click.as_mut().map(|p| &mut p.id),
+            self.pending_click.as_mut().map(|p| &mut p.id),
         ]
         .into_iter()
         .flatten()
@@ -1216,10 +1354,9 @@ impl Ui {
         offered: Option<Size>,
         dt: f64,
         heats: rustc_hash::FxHashMap<Id, f64>,
-        memos: &[(Vec<usize>, u64)],
     ) -> Result<(ResolvedScene, bool, El), SceneError> {
         let mut spec = SceneSpec::new(root).theme(self.theme.clone());
-        spec.limits = self.limits();
+        spec.limits = self.layout_limits;
         spec.limits.extent = Self::virtual_scroll_extent(&mut spec.root, spec.limits, self.scale)?;
         spec.offered = offered;
         spec.font = self.font.clone();
@@ -1253,35 +1390,15 @@ impl Ui {
                     size: Size::new(s[2].value, s[3].value),
                 }
             },
-            // ponytail: one environment change rewalks scene paint, including
-            // nested spans and text that previously had no font/glyph paint.
-            // Memo trees/closures still reuse. Selective paint admission would
-            // require dependency stamps in the locked scene-copy API.
-            self.scene
-                .as_deref()
-                .filter(|_| !self.scene_environment_changed),
-        );
-        let scene = match scene {
-            Ok(scene) => scene,
-            Err(error) => {
-                // Splice took these trees out of TREES. Return them even
-                // without a scene commit, so unrelated memos can still reuse.
-                // Fresh trees have no matching committed paint yet: retry
-                // their closures rather than labelling that paint reusable.
-                for (path, id) in memos {
-                    if memo::node_at(&mut spec.root, path)
-                        .payload()
-                        .extras()
-                        .memo
-                        .is_some_and(|m| !m.reused)
-                    {
-                        self.hot.insert(*id);
-                    }
-                }
-                self.capture(spec.root, memos);
-                return Err(error);
-            }
-        };
+            self.scene.as_deref(),
+        )?;
+        let found = self.resolver.take_found_fallbacks();
+        if !found.is_empty() {
+            self.retained_root = None;
+            self.fallback_fonts.extend(found);
+            self.runs.set_fallbacks(self.fallback_fonts.clone());
+            self.repaint_in(0.0);
+        }
         if self
             .scene
             .as_ref()
@@ -1322,7 +1439,6 @@ impl Ui {
         // the gesture map is reused. Register only this frame's list keys.
         self.hit
             .prepare_clips(scene.surfaces().filter_map(|s| s.clip_paths()))?;
-        self.scene_environment_changed = false;
         Ok((scene, glided, spec.root))
     }
 
@@ -1372,11 +1488,12 @@ impl Ui {
     /// to schedule another frame.
     fn commit(
         &mut self,
-        scene: ResolvedScene,
+        scene: Arc<ResolvedScene>,
         hovered: Option<&str>,
         tip: Option<(Arc<str>, String)>,
         previous_blink: bool,
         mut animating: bool,
+        retained_root: bool,
     ) -> Frame<'_> {
         let held = self.interaction.held();
         let cursor = held
@@ -1416,20 +1533,23 @@ impl Ui {
         // A reused memo's nodes were not visited, and are still there.
         self.nodes.retain(|k, n| {
             n.prune(
-                || scene.memos_at(k).any(|(_, reused)| reused),
+                || retained_root || scene.memos_at(k).any(|(_, reused)| reused),
                 scene.surface(k).is_some(),
             )
         });
         self.delivered = std::mem::take(&mut self.edits);
         self.popup_wheel_scopes
             .retain(|id| scene.surface(id.as_str()).is_some());
-        if let Some(old) = self.scene.replace(Arc::new(scene))
+        if let Some(old) = self.scene.replace(scene)
             && let Ok(old) = Arc::try_unwrap(old)
         {
             // A host retaining the previous frame still owns its buffers.
             // Recycling is an allocation optimization, never a scene clone.
             self.resolver.recycle(old);
         }
+        // A field that gets focus back builds its IME caret next frame:
+        // ask for that frame now rather than when input next arrives.
+        animating |= self.settle_focus_trap();
         let repaint_after = self.repaint_after();
         // Widgets read the clock while constructing the tree, before this frame
         // advances it. One catch-up frame makes the blink edge visible now,
@@ -1573,9 +1693,6 @@ impl NodeState {
 
 /// `nodes[k]`, inserted empty when absent: the key is copied once, on
 /// insertion, and not on every frame's lookup.
-/// Upstream's 4096 refused real instrument faces (thousands of controls).
-const DEFAULT_NODE_LIMIT: usize = 65536;
-
 fn node<'m>(nodes: &'m mut Nodes, k: &str) -> &'m mut NodeState {
     if !nodes.contains_key(k) {
         nodes.insert(mui_scene::Id::runtime(k), NodeState::default());

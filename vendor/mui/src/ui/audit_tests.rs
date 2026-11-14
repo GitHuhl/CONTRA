@@ -222,7 +222,6 @@ fn model_identity_survives_reorder_and_display_rename() {
     );
 }
 
-
 #[test]
 fn semantic_actions_wake_targeted_nested_memos_without_rebuilding_siblings() {
     fn tree(ui: &mut Ui, builds: &mut [usize; 3], value: &mut f64, activations: &mut usize) -> El {
@@ -234,10 +233,7 @@ fn semantic_actions_wake_targeted_nested_memos_without_rebuilding_siblings() {
                 if ui.get("go").activated() {
                     *activations += 1;
                 }
-                col([
-                    gain(),
-                    block(120.0, 40.0).id("go").a11y(A11y::Button),
-                ])
+                col([gain(), block(120.0, 40.0).id("go").a11y(A11y::Button)])
             });
             col([nested])
         });
@@ -257,13 +253,18 @@ fn semantic_actions_wake_targeted_nested_memos_without_rebuilding_siblings() {
     }
     let baseline = builds;
     assert!(ui.request_action(SemanticAction::set_value("gain", 0.75)));
+    assert_eq!(ui.requested_value("gain"), Some(0.75));
     let root = tree(&mut ui, &mut builds, &mut value, &mut activations);
-    assert_eq!(value, 0.75, "an idle retained control consumes authored units before frame commit");
+    assert_eq!(
+        value, 0.75,
+        "an idle retained control consumes authored units before frame commit"
+    );
     assert_eq!(builds, [baseline[0] + 1, baseline[1] + 1, baseline[2]]);
-    assert_eq!(idle(&mut ui, root), vec![("gain".into(), Edit::Begin), ("gain".into(), Edit::End)]);
+    assert_eq!(
+        idle(&mut ui, root),
+        vec![("gain".into(), Edit::Begin), ("gain".into(), Edit::End)]
+    );
 
-    // Let normal edit-edge delivery settle before observing the next request's
-    // targeted invalidation; delivered input intentionally heats the next frame.
     for _ in 0..3 {
         let root = tree(&mut ui, &mut builds, &mut value, &mut activations);
         idle(&mut ui, root);
@@ -271,7 +272,10 @@ fn semantic_actions_wake_targeted_nested_memos_without_rebuilding_siblings() {
     let baseline = builds;
     assert!(ui.request_action(SemanticAction::activate("go")));
     let root = tree(&mut ui, &mut builds, &mut value, &mut activations);
-    assert_eq!(activations, 1, "an unfocused retained button consumes activation once");
+    assert_eq!(
+        activations, 1,
+        "an unfocused retained button consumes activation once"
+    );
     assert_eq!(builds, [baseline[0] + 1, baseline[1] + 1, baseline[2]]);
     idle(&mut ui, root);
     let root = tree(&mut ui, &mut builds, &mut value, &mut activations);

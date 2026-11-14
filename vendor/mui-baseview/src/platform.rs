@@ -1,96 +1,8 @@
-//! Host-window helpers for an editor embedded in a DAW's parent window.
+//! Visibility guards for editors embedded in host-owned windows.
 //!
-//! Copied from truce-gui-utils 6.3.0 (`should_skip_frame`,
-//! `reanchor_to_superview_top`; MIT/Apache-2.0, the truce authors) so this
-//! crate does not depend on it. The bodies are verbatim; only lint
-//! attributes and SAFETY comments were added, and the handles moved to
-//! raw-window-handle 0.6, whose pointers are never null. No-ops off
-//! macOS/Windows.
+//! `should_skip_frame` originated in truce-gui-utils 6.3.0 (MIT/Apache-2.0).
+//! The native baseview fork owns macOS anchoring, including flipped parents.
 use raw_window_handle::RawWindowHandle;
-
-/// AppKit requires the process main thread, not merely a named UI thread.
-#[cfg(target_os = "macos")]
-#[expect(unsafe_code, reason = "pure libSystem query of the current thread")]
-pub fn main_thread_status() -> Option<bool> {
-    unsafe extern "C" {
-        fn pthread_main_np() -> std::ffi::c_int;
-    }
-    // SAFETY: pthread_main_np takes no arguments and only reads thread state.
-    Some(unsafe { pthread_main_np() } != 0)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn main_thread_status() -> Option<bool> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NsPoint {
-    x: f64,
-    y: f64,
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NsSize {
-    width: f64,
-    height: f64,
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NsRect {
-    origin: NsPoint,
-    size: NsSize,
-}
-
-/// Re-anchor the editor's `NSView` to the **top** of its superview in
-/// unflipped Cocoa coordinates: resizing the child leaves its origin alone,
-/// so a taller child would grow *down* off the parent's top. Call each
-/// frame. No-op on non-macOS.
-#[cfg(target_os = "macos")]
-#[expect(unsafe_code, reason = "Objective-C messages to the host's views")]
-#[expect(
-    unexpected_cfgs,
-    reason = "objc 0.2's msg_send! tests the retired `cargo-clippy` feature"
-)]
-pub fn reanchor_to_superview_top(handle: RawWindowHandle) {
-    use objc::{msg_send, sel, sel_impl};
-
-    let view_ptr = match handle {
-        RawWindowHandle::AppKit(h) => h.ns_view.as_ptr(),
-        _ => return,
-    };
-
-    // SAFETY: `view_ptr` is baseview's live, non-null NSView for this
-    // window; `superview`, `frame` and `setFrameOrigin:` are plain AppKit
-    // messages on the main thread that owns it.
-    unsafe {
-        let view = view_ptr.cast::<objc::runtime::Object>();
-        let superview: *mut objc::runtime::Object = msg_send![view, superview];
-        if superview.is_null() {
-            return;
-        }
-        let parent_frame: NsRect = msg_send![superview, frame];
-        let child_frame: NsRect = msg_send![view, frame];
-        let new_y = parent_frame.size.height - child_frame.size.height;
-        if (new_y - child_frame.origin.y).abs() < f64::EPSILON {
-            return;
-        }
-        let new_origin = NsPoint {
-            x: child_frame.origin.x,
-            y: new_y,
-        };
-        let _: () = msg_send![view, setFrameOrigin: new_origin];
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn reanchor_to_superview_top(_handle: RawWindowHandle) {}
 
 /// Whether this tick's frame should be skipped: the editor's view is
 /// detached from any window, or the host window is not visible (macOS
@@ -153,7 +65,31 @@ pub fn should_skip_frame(_handle: RawWindowHandle) -> bool {
     false
 }
 
-/// KONTAKTO patch: put the pointer at `x`, `y` physical pixels from the top
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsSize {
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsRect {
+    origin: NsPoint,
+    size: NsSize,
+}
+
+/// Put the pointer at `x`, `y` physical pixels from the top
 /// left of `window`'s view, where a drag that hid it began. X11 (through
 /// Xlib, loaded at run time as baseview loads it), Windows and macOS; a
 /// no-op anywhere else, and wherever the handles are not those.
@@ -170,7 +106,6 @@ pub fn warp_pointer(window: &baseview::WindowContext, x: f64, y: f64, _scale: f6
         return;
     };
     let Some(display) = d.display else { return };
-    // ponytail: loads libX11 on each call; it runs once per drag let go.
     let Ok(xlib) = x11_dl::xlib::Xlib::open() else {
         return;
     };

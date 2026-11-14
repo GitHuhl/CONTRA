@@ -10,5 +10,5 @@ description = "Live behaviour state on top of a plan: articulation switch, contr
 workspace = true
 
 [dependencies]
-contra-ir = { path = "../../model/ir" }
-contra-plan = { path = "../plan" }
+contra-ir = {path = "../../model/ir"}
+contra-plan = {path = "../plan"}

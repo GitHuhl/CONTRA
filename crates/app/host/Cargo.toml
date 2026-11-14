@@ -9,24 +9,24 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-engine = { path = "../../engine/engine" }
-contra-prepare = { path = "../../engine/prepare" }
-contra-format = { path = "../../format/common" }
-contra-format-kontakt = { path = "../../format/kontakt" }
-contra-ksp = { path = "../../script/ksp" }
-contra-face = { path = "../face" }
-contra-library = { path = "../library" }
-contra-protocol = { path = "../../model/protocol" }
-contra-stream = { path = "../../engine/stream" }
-contra-ui-model = { path = "../../model/ui-model" }
+contra-engine = {path = "../../engine/engine"}
+contra-prepare = {path = "../../engine/prepare"}
+contra-format = {path = "../../format/common"}
+contra-format-kontakt = {path = "../../format/kontakt"}
+contra-ksp = {path = "../../script/ksp"}
+contra-face = {path = "../face"}
+contra-library = {path = "../library"}
+contra-protocol = {path = "../../model/protocol"}
+contra-stream = {path = "../../engine/stream"}
+contra-ui-model = {path = "../../model/ui-model"}
 dirs = "5"
-serde.workspace = true
 serde_json = "1"
-contra-align = { path = "../align", optional = true }
+contra-align = {path = "../align", optional = true}
+serde = {workspace = true}
 
 [features]
 align = ["dep:contra-align"]
-heap-profile = ["contra-lua/system-allocator"]
+heap-profile = []
 
 [[example]]
 name = "align"

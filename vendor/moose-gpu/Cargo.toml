@@ -26,7 +26,7 @@ log = "0.4"
 # iOS build. `moose-gpu` only uses baseview indirectly through
 # `WgpuBackend::from_window` (a baseview::Window parameter).
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-baseview = {package = "moose-baseview", version = "0.3.4-moose.1", path = "../moose-baseview"}
+baseview = {package = "moose-baseview", path = "../moose-baseview"}
 
 # wgpu backend features, gated per OS so the macOS / Windows builds
 # don't drag in the Linux Vulkan + GLES stacks (and vice versa).

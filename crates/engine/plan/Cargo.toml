@@ -10,8 +10,8 @@ description = "What the engine plays: an instrument prepared for it, and its scr
 workspace = true
 
 [dependencies]
-contra-effects = { path = "../effects" }
-contra-ir = { path = "../../model/ir" }
-contra-script-ui = { path = "../script-ui" }
-contra-vm = { path = "../vm" }
-contra-voice = { path = "../voice" }
+contra-effects = {path = "../effects"}
+contra-ir = {path = "../../model/ir"}
+contra-script-ui = {path = "../script-ui"}
+contra-vm = {path = "../vm"}
+contra-voice = {path = "../voice"}

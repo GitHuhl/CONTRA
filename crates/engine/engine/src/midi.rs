@@ -55,15 +55,6 @@ impl Engine {
                 self.set_control(slot, link.id, link.value(value));
             }
         }
-        for k in plan.knob_mods.iter().filter(|k| k.cc == controller) {
-            self.set_control_mod(
-                k.slot,
-                k.id,
-                f64::from(k.saved),
-                f64::from(k.ratio),
-                f64::from(value) / 127.0,
-            );
-        }
         for (slot, script) in (0u8..).zip(&plan.scripts) {
             let Some(entry) = script.callbacks.controller else {
                 continue;
@@ -95,10 +86,8 @@ impl Engine {
                         if let Some(n) = self.notes.get_mut(note) {
                             n.pedal_held = false;
                         }
-                        let script = self.plan.scripts.get(usize::from(slot));
-                        if script.is_some_and(|s| s.held_release_ends_children) {
-                            self.end_children(note);
-                        }
+                        let _ = slot;
+                        self.end_children(note);
                     } else {
                         self.release(note);
                     }

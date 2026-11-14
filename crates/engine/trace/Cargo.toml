@@ -9,6 +9,6 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-ir = { path = "../../model/ir" }
-contra-vm = { path = "../vm" }
-contra-voice = { path = "../voice" }
+contra-ir = {path = "../../model/ir"}
+contra-vm = {path = "../vm"}
+contra-voice = {path = "../voice"}

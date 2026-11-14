@@ -1,22 +1,21 @@
-# Vendored from moose bffa467 with CONTRA's output port name patch; see vendor/MOOSE-PATCHES.md.
 [package]
 name = "moose-clap"
+description = "CLAP format wrapper for moose"
 version = "7.0.0"
 repository = "https://github.com/Matari-Audio/moose"
 homepage = "https://github.com/Matari-Audio/moose"
 edition = "2024"
 license = "LicenseRef-TruceLicense-1.0"
 rust-version = "1.92"
-description = "CLAP format wrapper for moose"
 
 [features]
-# Opt in only when the consuming plugin implements raw MIDI MPE expression.
-# Advertises input capability; it does not configure or negotiate an MPE zone.
+default = []
 mpe-input = []
+rt-paranoid = ["moose-core/rt-paranoid"]
 
 [dependencies]
-moose-core = {path = "../moose-core"}
-moose-params = {path = "../moose-params"}
+moose-core = {version = "7.0.0", path = "../moose-core"}
+moose-params = {version = "7.0.0", path = "../moose-params"}
 clap-sys = "0.5"
 log = "0.4"
 # Wait-free bounded MPMC queue. Used for the GUI → audio param change
@@ -28,3 +27,5 @@ crossbeam-queue = "0.3"
 # top in unflipped Cocoa coordinates so the editor doesn't render
 # in the bottom-left of any extra plugin-window space Reaper
 # leaves around it. Pure `msg_send!` against AppKit.
+[dev-dependencies]
+moose-derive = {version = "7.0.0", path = "../moose-derive"}

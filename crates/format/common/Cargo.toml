@@ -9,4 +9,4 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-ir = { path = "../../model/ir" }
+contra-ir = {path = "../../model/ir"}

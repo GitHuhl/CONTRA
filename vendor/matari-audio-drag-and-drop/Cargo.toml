@@ -1,0 +1,59 @@
+[package]
+name = "matari-audio-drag-and-drop"
+version = "0.1.6"
+edition = "2024"
+rust-version = "1.95"
+description = "Typed cross-platform drag-and-drop for Rust audio plugin GUIs"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/DerpcatMusic/matari-audio-drag-and-drop"
+documentation = "https://docs.rs/matari-audio-drag-and-drop"
+publish = ["crates-io"]
+keywords = ["audio", "plugins", "dnd", "wayland", "gui"]
+categories = ["gui", "os::linux-apis"]
+
+include = [
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "Cargo.toml",
+    "LICENSE",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "README.md",
+    "SECURITY.md",
+    "src/**/*.rs",
+]
+
+[[test]]
+name = "appkit_start"
+path = "tests/appkit_start.rs"
+harness = false
+
+[[example]]
+name = "appkit_image_a"
+path = "tests/fixtures/appkit_image_a.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "appkit_image_b"
+path = "tests/fixtures/appkit_image_b.rs"
+crate-type = ["cdylib"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+
+[dependencies]
+percent-encoding = "2.3"
+raw-window-handle = "0.6"
+
+[target.'cfg(all(target_family = "unix", not(target_os = "macos")))'.dependencies]
+smithay-client-toolkit = {version = "0.21", default-features = false, features = ["calloop"]}
+wayland-client = {version = "0.31", features = ["system"]}
+x11rb = {version = "0.13", features = ["shape", "render"]}
+rustix = {version = "1", features = ["fs"]}
+

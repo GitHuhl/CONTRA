@@ -18,26 +18,26 @@ clap = ["dep:moose-clap", "dep:clap-sys"]
 vst3 = ["dep:moose-vst3"]
 
 [dependencies]
-contra-align = { path = "../crates/app/align" }
-contra-host = { path = "../crates/app/host", features = ["align"] }
-contra-protocol = { path = "../crates/model/protocol" }
-contra-ui = { path = "../crates/app/ui" }
-contra-ui-model = { path = "../crates/model/ui-model" }
+contra-align = {path = "../crates/app/align"}
+contra-host = {path = "../crates/app/host", features = ["align"]}
+contra-protocol = {path = "../crates/model/protocol"}
+contra-ui = {path = "../crates/app/ui"}
+contra-ui-model = {path = "../crates/model/ui-model"}
 dirs = "5"
-contra-library = { path = "../crates/app/library" }
-moose = { workspace = true, features = ["mui"] }
-moose-clap = { workspace = true, features = ["mpe-input"], optional = true }
-moose-vst3 = { workspace = true, optional = true }
-clap-sys = { version = "0.5", optional = true }
+contra-library = {path = "../crates/app/library"}
+moose = {workspace = true, features = ["mui"]}
+moose-clap = {workspace = true, features = ["mpe-input"], optional = true}
+moose-vst3 = {workspace = true, optional = true}
+clap-sys = {version = "0.5", optional = true}
 
 [target.'cfg(target_os = "linux")'.dependencies]
-mui-native-dialog = { workspace = true, features = ["xdg-portal"] }
+mui-native-dialog = {workspace = true, features = ["xdg-portal"]}
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-rfd = { version = "0.17", default-features = false }
+rfd = {version = "0.17", default-features = false}
 
 [dev-dependencies]
-moose-test = { workspace = true }
-contra-engine = { path = "../crates/engine/engine" }
-contra-ksp = { path = "../crates/script/ksp" }
-contra-stream = { path = "../crates/engine/stream" }
+moose-test = {workspace = true}
+contra-engine = {path = "../crates/engine/engine"}
+contra-ksp = {path = "../crates/script/ksp"}
+contra-stream = {path = "../crates/engine/stream"}

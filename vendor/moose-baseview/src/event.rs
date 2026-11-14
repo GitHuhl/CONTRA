@@ -112,7 +112,8 @@ pub enum MouseEvent {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum WindowEvent {
-    /// Native contents were invalidated; present retained software pixels again.
+    /// Native window contents were invalidated. Software renderers must present
+    /// their retained pixels again, even if the application's scene is unchanged.
     RedrawRequested,
     Focused,
     Unfocused,

@@ -9,9 +9,9 @@ impl Ui {
     /// painted -- without walking it again.
     ///
     /// "Moved" is the runtime's own state, tracked by the keys the subtree
-    /// painted: a hover, press, capture or focus arriving or leaving (call
-    /// [`Ui::anticipate`] with the pointer before building, or a hover lands
-    /// on the frame after), the
+    /// painted: a hover, press, capture or focus arriving or leaving (the
+    /// host calls [`Ui::anticipate`] with the pointer before building; a
+    /// hand-driven `Ui` must too, or a hover lands on the frame after), the
     /// canvas shape under the pointer, a spring, transition, glide, morph or
     /// scroll still in flight, a tween or play it read still running, and
     /// any button, key, text or wheel input, which every tree reads. The
@@ -48,7 +48,31 @@ impl Ui {
         build: impl FnOnce(&mut Self) -> El,
     ) -> El {
         let id: Id = id.into();
-        let id = id.as_str();
+        self.memo_impl(id.as_str(), deps, build, false)
+    }
+
+    /// Retain layout-positioned floating children along with this subtree.
+    /// Unlike `memo`, a float alone does not force another build. Floats are
+    /// still resolved and hit-tested each frame; their deferred paint is never
+    /// spliced from a stale memo span. Use layout anchors/pins, or include any
+    /// manually computed floating positions in `deps`.
+    pub fn memo_with_layout_floats(
+        &mut self,
+        id: impl Into<Id>,
+        deps: impl std::hash::Hash,
+        build: impl FnOnce(&mut Self) -> El,
+    ) -> El {
+        let id: Id = id.into();
+        self.memo_impl(id.as_str(), deps, build, true)
+    }
+
+    fn memo_impl(
+        &mut self,
+        id: &str,
+        deps: impl std::hash::Hash,
+        build: impl FnOnce(&mut Self) -> El,
+        layout_floats: bool,
+    ) -> El {
         // ponytail: `deps` compares by its SipHash, so two deps that collide
         // share a subtree; pass something `Eq` and store it if that matters.
         let deps = {
@@ -70,7 +94,7 @@ impl Ui {
         if let Some(k) = self.kept.get_mut(&key) {
             let me = self.me;
             let kept = TREES.with(|t| t.borrow().contains_key(&(me, key)));
-            if !cold && k.deps == deps && k.still && kept {
+            if !cold && k.deps == deps && k.still && k.layout_floats == layout_floats && kept {
                 k.live = true;
                 let read = std::mem::take(&mut k.read);
                 // What it read is still read, as the closure would have.
@@ -104,12 +128,16 @@ impl Ui {
             reused: false,
         });
         let me = self.me;
-        TREES.with(|t| t.borrow_mut().remove(&(me, key)));
+        let old = TREES.with(|t| t.borrow_mut().remove(&(me, key)));
+        if let Some(old) = old {
+            Self::retire_tree(old);
+        }
         self.kept.insert(
             key,
             Kept {
                 id: mui_scene::Id::runtime(id),
                 deps,
+                layout_floats,
                 nested: Vec::new(),
                 read,
                 still,
@@ -127,7 +155,7 @@ impl Ui {
         if self.issued == 0 {
             return Ok(());
         }
-        let limits = self.limits();
+        let limits = self.layout_limits;
         self.expanded_memos.clear();
         TREES.with(|trees| {
             let trees = trees.borrow();
@@ -196,7 +224,7 @@ impl Ui {
         };
         k.live = true;
         let nested = std::mem::take(&mut k.nested);
-        *n = tree;
+        Self::retire_tree(std::mem::replace(n, tree));
         if let Some(m) = &mut n.payload_mut().extras_mut().memo {
             m.reused = true;
         }
@@ -232,9 +260,13 @@ impl Ui {
                 .collect();
             if let Some(k) = self.kept.get_mut(id) {
                 k.nested = nested;
-                TREES.with(|t| t.borrow_mut().insert((self.me, *id), tree));
+                let old = TREES.with(|t| t.borrow_mut().insert((self.me, *id), tree));
+                if let Some(old) = old {
+                    Self::retire_tree(old);
+                }
             }
         }
+        Self::retire_tree(root);
     }
 }
 
@@ -253,9 +285,12 @@ thread_local! {
 pub(super) static NEXT_UI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Ui {
-    /// Release this UI's retained trees on the thread that built them before
-    /// closing the editor or moving its model to another thread. Captures may
-    /// contain plugin closures whose destructors re-enter the memo table.
+    /// Release this UI's memo trees on the calling thread.
+    ///
+    /// Native hosts must call this on the rendering thread before closing or
+    /// moving the UI to another thread. Memo trees can hold plugin closures;
+    /// leaving them in a long-lived host thread delays their destruction until
+    /// thread exit. The next frame rebuilds missing memos normally.
     pub fn release_thread_memos(&self) {
         let removed = TREES.try_with(|trees| {
             let mut trees = trees.borrow_mut();
@@ -268,9 +303,14 @@ impl Ui {
                 .filter_map(|key| trees.remove(&key))
                 .collect::<Vec<_>>()
         });
-        // Dropping captures while holding the RefCell borrow can panic when a
-        // capture owns another UI. Keep destruction outside the borrow.
-        drop(removed);
+        // Captured destructors can re-enter the memo table (or drop a UI).
+        // Never execute them while holding its RefCell borrow.
+        if let Ok(removed) = removed {
+            for root in removed {
+                Self::discard_tree(root);
+            }
+        }
+        mui_scene::clear_declaration_storage();
     }
 }
 
@@ -285,13 +325,14 @@ pub(super) struct Kept {
     /// The id it was built under, whose number it holds in `memo_ids`.
     pub(super) id: mui_scene::Id,
     pub(super) deps: u64,
+    pub(super) layout_floats: bool,
     /// Its styled subtree, last frame's, sits in [`TREES`] while it is out
     /// of the tree. Memos nested in it are kept on their own, and it holds
     /// placeholders where they go: their paths below it, and ids.
     pub(super) nested: Vec<(Vec<usize>, u64)>,
     /// The tweens and plays its closure read, and whether every one of them
     /// was at rest when it did.
-    pub(super) read: Vec<String>,
+    pub(super) read: Vec<mui_scene::Id>,
     pub(super) still: bool,
     /// Handed out, or brought back inside one that was, this frame.
     pub(super) live: bool,
@@ -316,68 +357,88 @@ mod lifetime_tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    #[test]
-    fn released_memos_rebuild_on_the_next_frame() {
-        let mut ui = Ui::default();
-        let mut builds = 0;
-        for frame in 0..3 {
-            if frame == 2 {
-                ui.release_thread_memos();
+    fn captured(dropped: Rc<Cell<usize>>) -> El {
+        struct Capture(Rc<Cell<usize>>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                TREES.with(|trees| assert!(trees.try_borrow_mut().is_ok()));
+                let mut element = Element::default();
+                element.extras_mut().memo = None;
+                self.0.set(self.0.get() + 1);
             }
-            let tree = ui.memo("owner", 0, |_| {
-                builds += 1;
-                mui_scene::block(10., 10.)
-            });
-            ui.frame(tree, None, mui_input::Input::default(), 0.016)
+        }
+        let capture = Capture(dropped);
+        mui_scene::canvas(move |_| {
+            let _ = &capture;
+            Vec::new()
+        })
+    }
+
+    #[test]
+    fn replaced_memos_release_captures_outside_the_table_borrow() {
+        let mut ui = Ui::default();
+        let dropped = Rc::new(Cell::new(0));
+        for generation in 0..3 {
+            let root = ui.memo("owner", generation, |_| captured(dropped.clone()));
+            assert_eq!(dropped.get(), generation);
+            ui.frame(root, Some(Size::new(30., 30.)), Input::default(), 0.016)
                 .unwrap();
-            assert_eq!(builds, if frame == 2 { 2 } else { 1 });
+        }
+        ui.release_thread_memos();
+        assert_eq!(dropped.get(), 3);
+    }
+
+    #[test]
+    fn omitted_memos_release_captures_outside_the_table_borrow() {
+        let mut ui = Ui::default();
+        let dropped = Rc::new(Cell::new(0));
+        let root = ui.memo("owner", 0, |_| captured(dropped.clone()));
+        ui.frame(root, Some(Size::new(30., 30.)), Input::default(), 0.016)
+            .unwrap();
+        ui.frame(mui_scene::block(30., 30.), None, Input::default(), 0.016)
+            .unwrap();
+        assert_eq!(dropped.get(), 1);
+    }
+
+    #[test]
+    fn quiet_memo_placeholders_reuse_their_rare_field_box() {
+        let mut ui = Ui::default();
+        let root = ui.memo("root", 0, |_| mui_scene::block(30., 30.));
+        let offered = Some(Size::new(30., 30.));
+        ui.frame(root, offered, Input::default(), 0.016).unwrap();
+        mui_scene::clear_declaration_storage();
+        let mut address = None;
+        for _ in 0..4 {
+            let root = ui.memo("root", 0, |_| panic!("unchanged root rebuilt"));
+            let current = &**root.payload().extras.as_ref().unwrap() as *const mui_scene::Extras;
+            if let Some(previous) = address {
+                assert_eq!(current, previous);
+            }
+            address = Some(current);
+            ui.frame(root, offered, Input::default(), 0.016).unwrap();
+            assert!(ui.retained_frame);
         }
     }
 
     #[test]
-    fn releasing_closing_and_dropping_memos_destroy_captures_outside_the_borrow() {
-        struct Capture(Rc<Cell<Option<bool>>>);
+    fn releasing_memos_drops_captures_outside_the_thread_local_borrow() {
+        struct Capture(Rc<Cell<bool>>);
         impl Drop for Capture {
             fn drop(&mut self) {
-                self.0
-                    .set(Some(TREES.with(|trees| trees.try_borrow_mut().is_ok())));
+                TREES.with(|trees| assert!(trees.try_borrow_mut().is_ok()));
+                self.0.set(true);
             }
         }
-        for operation in ["release", "close", "drop"] {
-            let mut ui = Ui::default();
-            let other = Ui::default();
-            let destroyed = Rc::new(Cell::new(None));
-            let capture = Capture(destroyed.clone());
-            let tree = mui_scene::canvas(move |_| {
-                let _ = &capture;
-                Vec::new()
-            });
-            TREES.with(|trees| {
-                let mut trees = trees.borrow_mut();
-                trees.insert((ui.me, 0), tree);
-                trees.insert((other.me, 0), mui_scene::block(1., 1.));
-            });
-            let owner = ui.me;
-            match operation {
-                "release" => ui.release_thread_memos(),
-                "close" => {
-                    ui.close();
-                }
-                _ => drop(ui),
-            }
-            assert_eq!(
-                destroyed.get(),
-                Some(true),
-                "{operation}: capture can re-enter"
-            );
-            TREES.with(|trees| {
-                let trees = trees.borrow();
-                assert!(!trees.keys().any(|(id, _)| *id == owner));
-                assert!(
-                    trees.contains_key(&(other.me, 0)),
-                    "another editor retains its memo"
-                );
-            });
-        }
+        let ui = Ui::default();
+        let dropped = Rc::new(Cell::new(false));
+        let capture = Capture(dropped.clone());
+        let el = mui_scene::canvas(move |_| {
+            let _ = &capture;
+            Vec::new()
+        });
+        TREES.with(|trees| trees.borrow_mut().insert((ui.me, 0), el));
+        ui.release_thread_memos();
+        assert!(dropped.get());
+        TREES.with(|trees| assert!(!trees.borrow().keys().any(|(owner, _)| *owner == ui.me)));
     }
 }

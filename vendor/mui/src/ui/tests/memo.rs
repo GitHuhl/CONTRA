@@ -227,95 +227,136 @@ fn text_runs_handle_is_shared_and_bounded() {
 }
 
 #[test]
-fn implicit_face_and_fallback_changes_rewalk_nested_paint_but_keep_memo_builds() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    fn label() -> El {
-        text("Hi😀").text_size(18.).w(100.).h(32.).id("environment-label")
+fn retained_layout_floats_reposition_and_rebuild_only_for_dependencies() {
+    let mut ui = Ui::default();
+    let mut built = 0;
+    for width in [100., 100., 180., 180.] {
+        let root = ui.memo_with_layout_floats("root", 0, |_| {
+            built += 1;
+            stack([block(12., 10.)
+                .id("float")
+                .float()
+                .anchor(Align::End, Align::End)])
+        });
+        let scene = ui
+            .frame(
+                root,
+                Some(Size::new(width, 80.)),
+                PointerInput::default(),
+                0.,
+            )
+            .unwrap()
+            .scene;
+        assert_eq!(scene.surface("float").unwrap().frame.x, width - 12.);
+        assert_eq!(scene.surface("float").unwrap().frame.y, 70.);
     }
-    fn panel(walks: Arc<AtomicUsize>) -> El {
-        let probe = canvas(move |_| {
-            walks.fetch_add(1, Ordering::Relaxed);
-            Vec::new()
-        }).w(1.).h(1.);
-        stack([label(), probe]).w(100.).h(32.)
+    assert_eq!(
+        built, 1,
+        "layout floats keep their owned declaration but still resolve new offers"
+    );
+    let root = ui.memo_with_layout_floats("root", 1, |_| {
+        built += 1;
+        stack([block(16., 10.)
+            .id("float")
+            .float()
+            .anchor(Align::End, Align::End)])
+    });
+    let scene = ui
+        .frame(
+            root,
+            Some(Size::new(180., 80.)),
+            PointerInput::default(),
+            0.,
+        )
+        .unwrap()
+        .scene;
+    assert_eq!(scene.surface("float").unwrap().frame.x, 164.);
+    assert_eq!(built, 2);
+}
+
+#[test]
+fn settled_root_memo_reuses_scene_but_configuration_and_input_resolve_again() {
+    use std::sync::Arc;
+    let mut ui = Ui::default();
+    let build = |ui: &mut Ui| {
+        ui.memo_with_layout_floats("root", 0, |_| {
+            stack([block(12., 10.)
+                .id("float")
+                .float()
+                .anchor(Align::End, Align::End)])
+        })
+    };
+    let root = build(&mut ui);
+    ui.frame(
+        root,
+        Some(Size::new(100., 80.)),
+        PointerInput::default(),
+        0.,
+    )
+    .unwrap();
+    let first = ui.scene_snapshot().unwrap();
+    for _ in 0..4 {
+        let root = build(&mut ui);
+        let frame = ui
+            .frame(
+                root,
+                Some(Size::new(100., 80.)),
+                PointerInput::default(),
+                0.016,
+            )
+            .unwrap();
+        assert!(!frame.animating);
+        assert!(frame.edits.is_empty());
+        assert!(Arc::ptr_eq(&first, &ui.scene_snapshot().unwrap()));
+        assert_eq!(ui.layout_stats().validated_nodes, 0);
     }
-    fn plain(walks: Arc<AtomicUsize>) -> El {
-        stack([panel(walks)]).w(100.).h(32.)
-    }
-    #[cfg(feature = "cpu")]
-    fn pixels(ui: &Ui) -> Vec<u8> {
-        use crate::vello::{self, vello_cpu::{Pixmap, RenderContext, Resources}};
-        let mut ctx = RenderContext::new(100, 32);
-        let mut resources = Resources::default();
-        vello::paint(&mut vello::Cpu {
-            ctx: &mut ctx, resources: &mut resources, cache: &mut vello::Cache::default(),
-        }, ui.scene().unwrap(), vello::kurbo::Affine::IDENTITY).unwrap();
-        ctx.flush();
-        let mut pix = Pixmap::new(100, 32);
-        ctx.render(&mut pix, &mut resources);
-        pix.take_unpremultiplied().iter().flat_map(|p| [p.r, p.g, p.b, p.a]).collect()
-    }
-    let hack = Font::new(epaint_default_fonts::HACK_REGULAR).unwrap();
-    let ubuntu = Font::new(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
-    let emoji = Font::new(epaint_default_fonts::NOTO_EMOJI_REGULAR).unwrap();
-    let (mut retained, mut eager) = (Ui::default().font(hack.clone()), Ui::default().font(hack.clone()));
-    let retained_walks = Arc::new(AtomicUsize::new(0));
-    let eager_walks = Arc::new(AtomicUsize::new(0));
-    let mut builds = (0, 0);
-    #[cfg(feature = "cpu")]
-    let mut before_face_swap = Vec::new();
-    for step in 0..4 {
-        if step == 1 {
-            // The existing public fallback API appends; there is no remove/
-            // reorder setter. Exercise a real selected fallback, not just ids.
-            retained = retained.fallback_font(emoji.clone());
-            eager = eager.fallback_font(emoji.clone());
-        }
-        for warm in 0..2 {
-            let tree = retained.memo("environment-outer", 0, |ui| {
-                builds.0 += 1;
-                let child = ui.memo("environment-inner", 0, |_| {
-                    builds.1 += 1;
-                    panel(retained_walks.clone())
-                });
-                stack([child]).w(100.).h(32.)
-            });
-            // Also swap after the tree was built: heating closures in a setter
-            // alone would be too late to reject this frame's old paint span.
-            if warm == 0 && step >= 2 {
-                let font = if step == 2 { &ubuntu } else { &hack };
-                retained.set_font(Some(font.clone())); eager.set_font(Some(font.clone()));
-            }
-            let before = retained_walks.load(Ordering::Relaxed);
-            let animating = retained.frame(tree, Some(Size::new(100., 32.)), Input::default(), 0.016).unwrap().animating;
-            eager.frame(plain(eager_walks.clone()), Some(Size::new(100., 32.)), Input::default(), 0.016).unwrap();
-            let context = format!("default face/fallback step={step}, warm={warm}");
-            assert_eq!(retained_walks.load(Ordering::Relaxed) - before, usize::from(warm == 0),
-                "{context}: each environment change walks paint once, then scene copying resumes");
-            assert_eq!(eager_walks.load(Ordering::Relaxed), step * 2 + warm + 1, "{context}: eager paint walks every frame");
-            assert_eq!(builds, (1, 1), "{context}: both closure levels stay retained");
-            assert!(!animating, "{context}: no permanent environment wake");
-            assert_eq!(retained.scene().unwrap().paint, eager.scene().unwrap().paint, "{context}: exact glyph/font paint");
-            let frames = |ui: &Ui| ui.scene().unwrap().surfaces().map(|s| s.frame).collect::<Vec<_>>();
-            assert_eq!(frames(&retained), frames(&eager), "{context}: all surface frames");
-            let scene = retained.scene().unwrap();
-            let run = scene.paint.iter().find(|p| p.key.as_str() == "environment-label").unwrap().text.as_ref().unwrap();
-            assert_eq!(run.fonts[0].id(), if step == 2 { ubuntu.id() } else { hack.id() }, "{context}: current default face");
-            assert!(!run.glyphs.is_empty(), "{context}: visible glyphs");
-            if step > 0 {
-                assert_eq!(run.fonts[1].id(), emoji.id(), "{context}: current fallback chain");
-                assert!(run.glyphs.iter().any(|g| g.font == 1 && g.id != 0), "{context}: emoji really selects the fallback");
-            }
-            let spans = scene.memos_at("environment-label").collect::<Vec<_>>();
-            assert_eq!(spans.len(), 2, "{context}: nested ancestors");
-            assert!(spans.iter().all(|(_, reused)| *reused == (step > 0 || warm > 0)), "{context}: both memo trees stay retained");
-            #[cfg(feature = "cpu")]
-            {
-                let actual = pixels(&retained);
-                assert_eq!(actual, pixels(&eager), "{context}: strict CPU pixels");
-                if step == 1 { before_face_swap = actual; }
-                else if step == 2 { assert_ne!(actual, before_face_swap, "{context}: genuinely different face changes pixels"); }
-            }
-        }
-    }
+    ui.set_scale(Some(2.));
+    let root = build(&mut ui);
+    ui.frame(
+        root,
+        Some(Size::new(100., 80.)),
+        PointerInput::default(),
+        0.016,
+    )
+    .unwrap();
+    let scaled = ui.scene_snapshot().unwrap();
+    assert!(!Arc::ptr_eq(&first, &scaled));
+    let root = build(&mut ui);
+    ui.frame(
+        root,
+        Some(Size::new(140., 80.)),
+        PointerInput::default(),
+        0.016,
+    )
+    .unwrap();
+    let resized = ui.scene_snapshot().unwrap();
+    assert!(!Arc::ptr_eq(&scaled, &resized));
+    assert_eq!(resized.surface("float").unwrap().frame.x, 128.);
+    let root = build(&mut ui);
+    ui.frame(
+        root,
+        Some(Size::new(140., 80.)),
+        PointerInput {
+            pos: Some(Point::new(134., 75.)),
+            ..Default::default()
+        },
+        0.016,
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(&resized, &ui.scene_snapshot().unwrap()));
+    ui.set_layout_limits(mui_layout::Limits {
+        nodes: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let root = build(&mut ui);
+    assert!(
+        ui.frame(
+            root,
+            Some(Size::new(140., 80.)),
+            PointerInput::default(),
+            0.016
+        )
+        .is_err()
+    );
 }

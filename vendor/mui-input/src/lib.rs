@@ -742,6 +742,9 @@ pub struct Response {
     /// Pointer travel since the press, zero unless dragging. Distinct from
     /// [`Response::drag_delta`], which is this frame alone.
     pub drag_total: Vec2,
+    /// The part of [`Response::drag_total`] travelled while Shift was held,
+    /// zero unless dragging. [`Response::drag_travel`] scales it.
+    pub drag_shifted: Vec2,
     /// This frame's press was the second of a double click on this target.
     /// [`Interaction`] has no clock, so it never sets this; the runtime that
     /// owns one (`mui::Ui::get`) does.
@@ -779,6 +782,25 @@ impl Response {
     #[must_use]
     pub fn drag_fine(&self, fine: f64) -> Vec2 {
         self.drag_delta * if self.mods.shift { fine } else { 1.0 }
+    }
+
+    /// Travel since the press with `fine` applied only to the stretches
+    /// moved under Shift. An absolute drag (`start + travel`) reads this
+    /// rather than scaling [`Response::drag_total`] by the current Shift,
+    /// which would rescale the whole gesture and jump when Shift toggles.
+    ///
+    /// ```
+    /// # use mui_input::{Response, Vec2};
+    /// let r = Response {
+    ///     drag_total: Vec2::new(30.0, 0.0),
+    ///     drag_shifted: Vec2::new(10.0, 0.0),
+    ///     ..Response::default()
+    /// };
+    /// assert_eq!(r.drag_travel(0.1).x, 21.0);
+    /// ```
+    #[must_use]
+    pub fn drag_travel(&self, fine: f64) -> Vec2 {
+        self.drag_total - self.drag_shifted * (1.0 - fine)
     }
 
     /// The axis this drag has travelled furthest along since its press, for a
@@ -853,9 +875,13 @@ pub struct Interaction {
     press_pos: Option<Point>,
     last_pos: Option<Point>,
     drag_delta: Vec2,
+    /// Movement since the press made while Shift was held.
+    shifted: Vec2,
     dragging: bool,
     /// The buttons that were down last frame, for edge detection.
     was: Buttons,
+    /// Buttons held when a capture was cancelled, until their physical release.
+    cancelled_buttons: Buttons,
     /// Which button opened the capture, and the modifiers it opened under.
     press_button: Option<Button>,
     press_mods: Mods,
@@ -876,8 +902,10 @@ impl Default for Interaction {
             press_pos: None,
             last_pos: None,
             drag_delta: Vec2::ZERO,
+            shifted: Vec2::ZERO,
             dragging: false,
             was: Buttons::default(),
+            cancelled_buttons: Buttons::default(),
             press_button: None,
             press_mods: Mods::default(),
             mods: Mods::default(),
@@ -937,11 +965,27 @@ impl Interaction {
     /// Cancel the current gesture and all one-frame edge state.
     ///
     /// The configured drag threshold is preserved so focus loss can cancel a
-    /// capture without changing the interaction policy.
+    /// capture without changing the interaction policy. A cancelled capture
+    /// waits for a physical release; an uncaptured press resets edge history.
     pub fn cancel(&mut self) {
         let threshold = self.threshold;
+        let cancelled_buttons = if self.active.is_some() {
+            self.was
+        } else {
+            self.cancelled_buttons
+        };
+        let was = if cancelled_buttons.is_empty() {
+            Buttons::default()
+        } else {
+            self.was
+        };
         *self = Self {
             threshold,
+            // Cancelling a capture is not a physical button release. A
+            // disappearing target must not turn a still-held button into
+            // a new press on the replacement beneath it.
+            was,
+            cancelled_buttons,
             ..Self::default()
         };
     }
@@ -964,6 +1008,7 @@ impl Interaction {
         self.clicked = None;
         self.dropped = None;
         self.drag_delta = Vec2::ZERO;
+        self.cancelled_buttons = Buttons(self.cancelled_buttons.0 & input.buttons.0);
 
         let over = input
             .pos
@@ -981,6 +1026,7 @@ impl Interaction {
                 self.press_pos = input.pos;
                 self.press_button = Some(b);
                 self.press_mods = input.mods;
+                self.shifted = Vec2::ZERO;
                 self.dragging = false;
                 self.pressed = Some(id.clone());
                 self.active = Some(id);
@@ -1007,6 +1053,9 @@ impl Interaction {
         if self.active.is_some() {
             if let (Some(now), Some(before)) = (input.pos, self.last_pos) {
                 self.drag_delta = now - before;
+                if input.mods.shift {
+                    self.shifted += self.drag_delta;
+                }
             }
             if let (Some(now), Some(origin)) = (input.pos, self.press_pos) {
                 // Distance from the press, not accumulated travel: a wobble
@@ -1063,6 +1112,11 @@ impl Interaction {
             drag_total: match (held && self.dragging, self.last_pos, self.press_pos) {
                 (true, Some(now), Some(origin)) => now - origin,
                 _ => Vec2::ZERO,
+            },
+            drag_shifted: if held && self.dragging {
+                self.shifted
+            } else {
+                Vec2::ZERO
             },
             double_clicked: false,
             wheel: Vec2::ZERO,

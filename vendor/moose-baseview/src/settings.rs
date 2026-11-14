@@ -8,6 +8,11 @@ use raw_window_handle::HasWindowHandle;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct WindowSettings {
+    /// Native screen-edge placement; never applied to a host-owned child.
+    pub dock: Option<crate::DockOptions>,
+    /// Request an alpha-capable X11 visual for a detached window. Other platforms
+    /// retain their native visual selection. Opaque presentation remains the default.
+    pub transparent: bool,
     /// The window title.
     pub title: String,
 
@@ -18,6 +23,12 @@ pub struct WindowSettings {
     ///
     /// If `None`, the window will be standalone.
     pub parent: Option<ParentWindowHandle>,
+
+    /// Native owner for a detached utility window, preserving top-level semantics.
+    pub owner: Option<ParentWindowHandle>,
+
+    /// Report user close requests through `WillClose` without destroying the native window.
+    pub defer_user_close: bool,
 
     /// If the window expects to have a parent when first displayed.
     ///
@@ -75,6 +86,17 @@ pub struct WindowSettings {
 }
 
 impl WindowSettings {
+    /// Requests a native desktop panel. Unsupported reservation returns an error.
+    pub fn with_dock(mut self, dock: crate::DockOptions) -> Self {
+        self.dock = Some(dock);
+        self
+    }
+    /// Request an alpha-capable visual (X11 detached windows only).
+    pub fn with_transparent(mut self, transparent: bool) -> Self {
+        self.transparent = transparent;
+        self
+    }
+
     /// Creates a new [`WindowSettings`] with all default values.
     #[inline]
     pub fn new() -> Self {
@@ -101,6 +123,20 @@ impl WindowSettings {
         mut self, parent: impl Into<Option<&'a P>>,
     ) -> Self {
         self.parent = parent.into().map(ParentWindowHandle::from_window);
+        self
+    }
+
+    /// Set an owner while keeping a detached top-level window.
+    pub fn with_owner<'a, P: HasWindowHandle + 'a>(
+        mut self, owner: impl Into<Option<&'a P>>,
+    ) -> Self {
+        self.owner = owner.into().map(ParentWindowHandle::from_window);
+        self
+    }
+
+    /// Defer native close buttons until the owner closes the window explicitly.
+    pub fn with_deferred_user_close(mut self, defer: bool) -> Self {
+        self.defer_user_close = defer;
         self
     }
 
@@ -162,9 +198,13 @@ impl WindowSettings {
 impl Default for WindowSettings {
     fn default() -> Self {
         Self {
+            dock: None,
+            transparent: false,
             title: String::from("baseview window"),
             size: LogicalSize { width: 500.0, height: 400.0 }.into(),
             parent: None,
+            owner: None,
+            defer_user_close: false,
             wait_for_parent: false,
             fallback_scale_factor: None,
             scale_factor_override: None,

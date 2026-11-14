@@ -4,20 +4,38 @@ use crate::Ui;
 use mui_scene::A11y;
 use std::time::Duration;
 const HALF_CARET_PERIOD: f64 = 0.625;
+#[derive(Clone, Copy)]
+pub(super) enum CallerWake {
+    Waiting(f64),
+    BuildDue,
+}
 impl Ui {
-    /// Seconds of frame time so far: the sum of every frame's `dt`.
+    pub(super) fn advance_caller_wake(&mut self) {
+        self.wake = match self.wake {
+            Some(CallerWake::Waiting(at)) if at <= self.time => Some(CallerWake::BuildDue),
+            Some(CallerWake::BuildDue) => None,
+            waiting => waiting,
+        };
+    }
+
+    /// Elapsed frame time in seconds.
     pub fn time(&self) -> f64 {
         self.time
     }
 
-    /// Asks for a frame `secs` from now even if nothing else moves: a held
-    /// control that repeats, a meter that falls. The earliest request wins.
+    /// Request a frame after this delay, keeping the earliest outstanding request.
     pub fn repaint_in(&mut self, secs: f64) {
-        let at = self.time + secs.max(0.);
-        self.wake = Some(match self.wake {
-            Some(w) if w > self.time => w.min(at),
-            _ => at,
-        });
+        if !secs.is_finite() {
+            return;
+        }
+        let at = self.time + secs.max(0.0);
+        if at.is_finite() {
+            let at = match self.wake {
+                Some(CallerWake::Waiting(previous)) if previous > self.time => previous.min(at),
+                _ => at,
+            };
+            self.wake = Some(CallerWake::Waiting(at));
+        }
     }
 
     /// Delay until the next timer-dependent visual change. Input/model changes
@@ -46,18 +64,19 @@ impl Ui {
                     )
             })
             .map(|_| (HALF_CARET_PERIOD - self.time.rem_euclid(HALF_CARET_PERIOD)).max(0.001));
-        // A roll of the wheel ends a fixed time after its last notch, and a
-        // control holds its edit open until then: wake to close it.
         let roll = self
             .wheel_turned
             .map(|at| crate::host::WHEEL_ROLL - (self.time - at))
-            .filter(|left| *left > 0.);
-        let wake = self.wake.map(|at| at - self.time).filter(|left| *left > 0.);
+            .filter(|left| *left > 0.0);
+        let wake = self.wake.map(|wake| match wake {
+            CallerWake::Waiting(at) => (at - self.time).max(0.0),
+            CallerWake::BuildDue => 0.0,
+        });
         [tip, caret, roll, wake]
             .into_iter()
             .flatten()
             .reduce(f64::min)
-            .map(|secs| Duration::from_secs_f64(secs.max(0.001)))
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
     }
 }
 #[cfg(test)]
@@ -65,6 +84,28 @@ mod tests {
     use super::*;
     use mui_input::Input;
     use mui_scene::prelude::*;
+    #[test]
+    fn requested_deadline_uses_earliest_and_expires_on_frame() {
+        let mut ui = Ui::default();
+        ui.repaint_in(0.4);
+        ui.repaint_in(0.2);
+        ui.repaint_in(0.3);
+        assert_eq!(ui.repaint_after(), Some(Duration::from_millis(200)));
+        ui.frame(block(20., 20.), None, Input::default(), 0.1)
+            .unwrap();
+        assert!((ui.time() - 0.1).abs() < 1e-9);
+        assert_eq!(ui.repaint_after(), Some(Duration::from_millis(100)));
+        ui.frame(block(20., 20.), None, Input::default(), 0.1)
+            .unwrap();
+        assert_eq!(ui.repaint_after(), Some(Duration::ZERO));
+        ui.frame(block(20., 20.), None, Input::default(), 0.0)
+            .unwrap();
+        assert_eq!(ui.repaint_after(), None);
+        ui.repaint_in(f64::NAN);
+        assert_eq!(ui.repaint_after(), None);
+        ui.repaint_in(0.0);
+        assert_eq!(ui.repaint_after(), Some(Duration::ZERO));
+    }
     #[test]
     fn idle_has_no_deadline() {
         let mut u = Ui::default();

@@ -1,6 +1,6 @@
 [package]
 name = "mui-text"
-version = "0.4.0"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -11,9 +11,10 @@ default = []
 system-fonts = ["dep:fontdb"]
 
 [dependencies]
+smallvec = {version = "1.16", features = ["const_new", "union"]}
 fontdb = {version = "0.23", optional = true, default-features = false, features = ["std", "fs", "fontconfig"]}
 # Bump these two together: skrifa 0.46 and harfrust 0.13 share read-fonts
-# 0.43, so one parse serves both outlines and shaping. glifo 0.3/vello pin skrifa
+# 0.43, so one parse serves both outlines and shaping. glifo 0.4/vello pin skrifa
 # 0.44 (read-fonts 0.41): one copy once glifo ships on skrifa 0.46, or 0.47 once
 # a harfrust past 0.13.3 moves to read-fonts 0.44.
 skrifa = "0.46"

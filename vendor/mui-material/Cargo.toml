@@ -1,7 +1,7 @@
 [package]
 name = "mui-material"
 description = "Material and surface verbs (union, segmented, cut, keep, join_border, inset surfaces, shells, border ramps) for MUI's element tree."
-version = "0.4.0"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"

@@ -53,17 +53,17 @@
 /// ```
 ///
 /// Zero code changes. Same `moose::plugin!` macro.
-/// Both `logic:` and `params:` are required. `params:` names the
-/// `#[derive(Params)]` struct; the param-index sidecar emitter is a
-/// proc-macro and can only find that struct's metadata by its literal
-/// name at expansion time, so it must be spelled out here.
+/// Both `logic:` and `params:` are required. For a derived store, `params:`
+/// also identifies its compile-time parameter index. A manual `Params`
+/// adapter can supply `param_index: DerivedStore` when it shares that
+/// derived store's parameter IDs and field names.
 #[macro_export]
 macro_rules! plugin {
     (
         logic: $logic:ty,
         params: $params:ty $(,)?
     ) => {
-        $crate::__plugin_impl!($logic, $params,);
+        $crate::__plugin_impl!($logic, $params, $params,);
     };
     // Opt-in managed background tasks: each listed type implements
     // `BackgroundTask` and gets its own lane (queue + mode). See the
@@ -73,19 +73,28 @@ macro_rules! plugin {
         params: $params:ty,
         tasks: [$($task:ty),+ $(,)?] $(,)?
     ) => {
-        $crate::__plugin_impl!($logic, $params, tasks: [$($task),+],);
+        $crate::__plugin_impl!($logic, $params, $params, tasks: [$($task),+],);
+    };
+    // A manual Params adapter may expose different wire values while sharing
+    // the IDs and fields of its derived storage type.
+    (
+        logic: $logic:ty,
+        params: $params:ty,
+        param_index: $index:ty $(,)?
+    ) => {
+        $crate::__plugin_impl!($logic, $params, $index,);
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __plugin_impl {
-    ($logic:ty, $params:ty, $(tasks: [$($task:ty),+],)?) => {
+    ($logic:ty, $params:ty, $index:ty, $(tasks: [$($task:ty),+],)?) => {
         // Compile-time param index: walks the params type's sidecar
         // tree (written by `derive(Params)`) under `target/param-index/`
         // and writes the `param_index.toml` cargo-moose's preset
         // pipeline reads.
-        $crate::__reexport::__moose_param_index_root!($params);
+        $crate::__reexport::__moose_param_index_root!($index);
 
         // Always export the PluginLogic for dylib use (shell-mode or
         // testing). Static-mode shells ignore these exports.
@@ -344,6 +353,10 @@ macro_rules! __plugin_hot_reload {
                 <$logic as $crate::__reexport::moose_plugin::PluginLogicCore<Sample>>::supports_in_place()
             }
 
+            fn max_host_state_bytes() -> usize {
+                <$logic as $crate::__reexport::moose_plugin::PluginLogicCore<Sample>>::max_host_state_bytes()
+            }
+
             fn info() -> $crate::core::info::PluginInfo
             where
                 Self: Sized,
@@ -375,6 +388,22 @@ macro_rules! __plugin_hot_reload {
 
             fn init(&mut self) {
                 self.inner.init();
+            }
+
+            fn requires_fallible_preparation(&self)->bool{
+                <$logic as $crate::__reexport::moose_plugin::PluginLogicCore<Sample>>::requires_fallible_preparation()
+                    ||self.inner.requires_fallible_preparation()
+            }
+
+            fn prepare(&mut self,config:&$crate::core::plugin::PreparationConfig)
+                ->Result<(),$crate::core::plugin::PreparationError>{
+                config.validate()?;
+                if <$logic as $crate::__reexport::moose_plugin::PluginLogicCore<Sample>>::requires_fallible_preparation(){
+                    return Err($crate::core::plugin::PreparationError::ExecutableLifetime);
+                }
+                // Actual HotShell checks its current admitted nonempty loader.
+                // A reloaded required class never reaches that loader's state.
+                self.inner.prepare(config)
             }
 
             fn reset(&mut self, config: &$crate::core::config::AudioConfig) {

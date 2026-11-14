@@ -7,6 +7,40 @@ use std::marker::PhantomData;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
+/// A cloneable, thread-safe wake handle. It does not keep the window alive.
+/// Requests coalesce on X11; calling it after close is harmless.
+#[derive(Clone)]
+pub struct FrameRequester {
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
+
+impl FrameRequester {
+    /// Creates a requester from a platform wake operation. The operation must
+    /// not block, retain native/editor resources, or call a window handler.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self { wake: std::sync::Arc::new(wake) }
+    }
+
+    /// Requests one frame from any thread without waiting for the handler.
+    pub fn request_frame(&self) {
+        (self.wake)();
+    }
+}
+
+/// A weak, thread-safe visibility request. Native work stays on the window's
+/// owner thread; requests after teardown cannot target a recycled native handle.
+#[derive(Clone)]
+pub struct WindowVisibility(std::sync::Arc<dyn Fn(bool) + Send + Sync>);
+impl WindowVisibility {
+    pub(crate) fn new(set: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(set))
+    }
+    /// Shows or hides the window without waiting for its event loop.
+    pub fn set_visible(&self, visible: bool) {
+        (self.0)(visible);
+    }
+}
+
 /// A handle to a Window created by baseview.
 ///
 /// Unlike some other windowing libraries like `winit`, baseview [`Window`]s manage their own
@@ -15,8 +49,9 @@ use std::time::Duration;
 /// All of its events and internal operations (such as rendering) are handled in a separate
 /// [`WindowHandler`] type, which is owned by the window itself.
 ///
-/// Dropping this [`Window`] handle will always destroy the window, and drop its associated
-/// [`WindowHandler`] and [`Host`] types.
+/// Dropping this [`Window`] handle requests native teardown. On X11 it joins
+/// teardown; explicit bounded close can detach an independent floating worker
+/// with its image pinned and future callbacks revoked. See [`close_bounded`](Self::close_bounded).
 ///
 /// # Window lifecycle and ownership
 ///
@@ -40,6 +75,7 @@ use std::time::Duration;
 /// become no-ops. You can use the [`Window::is_open`] method to know if the window has been closed.
 ///
 pub struct Window {
+    work: crate::work::WindowWorkOwner,
     inner: platform::WindowHandle,
     // so that WindowHandle is !Send on all platforms
     phantom: PhantomData<*mut ()>,
@@ -75,16 +111,24 @@ impl Window {
         handler: impl FnOnce(WindowContext) -> Result<H, HandlerError> + Send + 'static,
         host: impl Into<Option<Host>>,
     ) -> Result<Window, Error> {
+        if settings.dock.is_some() && (settings.parent.is_some() || settings.wait_for_parent) {
+            return Err(HandlerError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a desktop dock must be an independent top-level window",
+            ))
+            .into());
+        }
+        let builder = WindowHandlerBuilder::new(handler);
+        let work = std::sync::Arc::clone(&builder.work);
         let initializer = WindowInitializer {
             settings,
-            builder: WindowHandlerBuilder::new(handler),
+            builder,
             host: host.into().unwrap_or_else(Host::default),
         };
 
-        Ok(Self {
-            inner: platform::WindowHandle::create_window(initializer)?,
-            phantom: PhantomData,
-        })
+        let inner = platform::WindowHandle::create_window(initializer)?;
+        work.bind_wake(inner.frame_requester());
+        Ok(Self { work: crate::work::WindowWorkOwner(work), inner, phantom: PhantomData })
     }
 
     /// Blocks the thread and runs an event loop until the window is closed.
@@ -94,6 +138,43 @@ impl Window {
     pub fn run_until_closed(self) -> Result<(), Error> {
         self.inner.run_until_closed()?;
         Ok(())
+    }
+
+    /// Returns a thread-safe frame wake handle without extending native lifetime.
+    /// It is inert after close. `Option` is kept for callers written before every
+    /// platform had one; all current platforms return `Some`.
+    pub fn frame_requester(&self) -> Option<FrameRequester> {
+        let waker = self.waker();
+        Some(FrameRequester::new(move || waker.request_redraw()))
+    }
+
+    /// Returns a visibility controller that does not own the native window.
+    pub fn visibility_control(&self) -> WindowVisibility {
+        self.inner.visibility_control()
+    }
+
+    /// Returns a weak wake handle that can request polling or drawing from any thread.
+    #[must_use]
+    pub fn waker(&self) -> WindowWaker {
+        self.work.waker()
+    }
+
+    /// Schedules a poll callback without forcing a draw.
+    pub fn request_poll(&self) -> Result<(), Error> {
+        self.work.request_poll()
+    }
+
+    /// Adjusts a candidate size to the window's current size constraints.
+    pub fn adjust_size<S: From<WindowSize> + Into<Size>>(&self, size: S) -> S {
+        let strategy = if self.is_resizable() {
+            crate::utils::SizingStrategy::Resizable {
+                min_size: self.min_size(),
+                max_size: self.max_size(),
+            }
+        } else {
+            crate::utils::SizingStrategy::Fixed
+        };
+        strategy.adjust_size(size.into(), self.size()).into()
     }
 
     /// The current size of the window.
@@ -157,27 +238,30 @@ impl Window {
 
     /// Closes and destroys the window.
     ///
-    /// This releases all resources the window uses.
-    ///
-    /// It is guaranteed that no other objects (e.g. the parent window) are used by this window after
-    /// this call.
+    /// X11 joins native teardown, as do the Windows and macOS backends.
+    /// The Wayland layer backend retains its bounded teardown policy.
     ///
     /// Calling this method is more explicit, but otherwise identical to just dropping this [`Window`].
     #[inline]
     pub fn close(self) {
+        self.work.close();
         drop(self)
     }
 
-    /// Requests an X11 close with a bounded wait where ownership permits.
+    /// Requests bounded close for an independent floating X11 window.
     ///
-    /// After `timeout`, a floating window's thread may detach if its plug-in image
-    /// can be pinned and no host callbacks were registered. Embedded windows always
-    /// wait for teardown so the host can safely destroy its parent. The handler may
-    /// finish its current callback; X11 enters no more after observing the
-    /// revocation. Call this only after revoking the handler's host
-    /// state; ordinary [`close`](Self::close) remains synchronous.
+    /// After `timeout`, a stalled worker detaches with its image pinned and
+    /// future callbacks revoked. A callback/driver call already in progress can
+    /// finish later, including native/GPU destruction. Pinning preserves code,
+    /// not host state or a host-owned parent drawable. Call this only after
+    /// revoking all handler/HostCallbacks access to host state. A third-party
+    /// callback already waiting on a host API cannot be forcibly cancelled.
+    /// On X11, embedded windows and windows with host callbacks always join teardown.
+    /// Ordinary [`close`](Self::close) also joins X11 teardown.
+    /// The Wayland layer backend retains its bounded teardown policy.
     #[cfg(target_os = "linux")]
     pub fn close_bounded(self, timeout: Duration) {
+        self.work.close();
         self.inner.set_close_timeout(timeout);
     }
 
@@ -244,6 +328,10 @@ impl Window {
     #[inline]
     pub fn show(&self) -> Result<(), Error> {
         self.inner.show()?;
+        // X11 Expose and Win32 WM_PAINT already report native restoration.
+        // The retained AppKit CALayer path needs an explicit full redraw.
+        #[cfg(target_os = "macos")]
+        self.work.invalidate();
         Ok(())
     }
 
@@ -258,55 +346,180 @@ impl Window {
     }
 }
 
-/// An X11 window controller with no main-thread host callbacks.
+/// An X11-only controller that can move between host threads.
 ///
-/// This handle is auto-Send: the native drawable, WindowContext and handler stay
-/// on their existing worker thread. Unlike Window::create_with_host, construction
-/// cannot attach a non-Send HostCallbacks object. Moving or dropping the controller
-/// never moves or drops native state on the caller's thread.
-///
-/// Dropping it from a control thread joins native teardown. Dropping it inside
-/// its own native callback requests close and defers teardown until that callback
-/// returns. close_bounded preserves the existing floating-only detach policy;
-/// it never detaches an embedded window from a different control thread.
+/// Native state, the handler, and [`WindowContext`] remain on the X11 worker.
+/// Construction cannot attach non-Send [`host::HostCallbacks`]. This type is
+/// automatically Send; it does not change the platform-selection behavior of [`Window`].
+/// Dropping it joins teardown, except self-close from the native callback, which
+/// completes when that callback returns. Explicit bounded close can detach only
+/// independent floating windows.
 #[cfg(target_os = "linux")]
 pub struct ThreadedWindow {
+    work: crate::work::WindowWorkOwner,
     inner: platform::WindowThreadControl,
 }
 
 #[cfg(target_os = "linux")]
 impl ThreadedWindow {
-    /// Creates a hidden X11 window with no host callbacks. Call show to show it.
+    /// Creates a hidden X11 window without main-thread host callbacks.
+    ///
+    /// Dock settings still select X11 here, even in a Wayland session.
     pub fn create<H: WindowHandler>(
         settings: WindowSettings,
         handler: impl FnOnce(WindowContext) -> Result<H, HandlerError> + Send + 'static,
     ) -> Result<Self, Error> {
+        if settings.dock.is_some() && (settings.parent.is_some() || settings.wait_for_parent) {
+            return Err(HandlerError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a desktop dock must be an independent top-level window",
+            ))
+            .into());
+        }
         let builder = WindowHandlerBuilder::new(handler);
-        Ok(Self { inner: platform::WindowThreadControl::create_without_host(settings, builder)? })
+        let work = std::sync::Arc::clone(&builder.work);
+        let inner = platform::WindowThreadControl::create_without_host(settings, builder)?;
+        work.bind_wake(inner.frame_requester());
+        Ok(Self { work: crate::work::WindowWorkOwner(work), inner })
     }
 
-    /// Last owner-published geometry, read only from atomic shared metadata.
+    /// Blocks the thread and runs an event loop until the window is closed.
+    #[inline]
+    pub fn run_until_closed(self) -> Result<(), Error> {
+        self.inner.run_until_closed()?;
+        Ok(())
+    }
+
+    /// Returns a thread-safe frame wake handle without extending native lifetime.
+    pub fn frame_requester(&self) -> Option<FrameRequester> {
+        let waker = self.waker();
+        Some(FrameRequester::new(move || waker.request_redraw()))
+    }
+
+    /// Returns a visibility controller that does not own the native window.
+    pub fn visibility_control(&self) -> WindowVisibility {
+        self.inner.visibility_control()
+    }
+
+    /// Returns a weak wake handle that can request polling or drawing from any thread.
+    #[must_use]
+    pub fn waker(&self) -> WindowWaker {
+        self.work.waker()
+    }
+
+    /// Schedules a poll callback without forcing a draw.
+    pub fn request_poll(&self) -> Result<(), Error> {
+        self.work.request_poll()
+    }
+
+    /// Adjusts a candidate size to the window's current size constraints.
+    pub fn adjust_size<S: From<WindowSize> + Into<Size>>(&self, size: S) -> S {
+        let strategy = if self.is_resizable() {
+            crate::utils::SizingStrategy::Resizable {
+                min_size: self.min_size(),
+                max_size: self.max_size(),
+            }
+        } else {
+            crate::utils::SizingStrategy::Fixed
+        };
+        strategy.adjust_size(size.into(), self.size()).into()
+    }
+
+    /// The current size of the window.
+    #[inline]
     pub fn size(&self) -> WindowSize {
         self.inner.size()
     }
 
+    /// Resizes the window to the given [`Size`].
+    #[inline]
+    pub fn resize(&self, size: impl Into<Size>) -> Result<(), Error> {
+        self.inner.resize(size.into())?;
+        Ok(())
+    }
+
+    /// Suggests a fallback scale factor, if Baseview couldn't get one from the platform.
+    #[inline]
+    pub fn suggest_fallback_scale_factor(&self, scale_factor: f64) -> Result<(), Error> {
+        self.inner.suggest_scale_factor(scale_factor)?;
+        Ok(())
+    }
+
+    /// Sets or clears the scale factor override without changing physical size.
+    #[inline]
+    pub fn set_scale_factor_override(&self, scale_factor: Option<f64>) -> Result<(), Error> {
+        self.inner
+            .set_scale_factor_override(crate::settings::sanitize_scale_factor(scale_factor))?;
+        Ok(())
+    }
+
+    /// Sets keyboard capture; X11 currently propagates ignored keys automatically.
+    #[inline]
+    pub fn set_keyboard_capture(&self, capture: bool) {
+        self.inner.set_keyboard_capture(capture)
+    }
+
+    /// Closes the window and joins native teardown before returning.
+    ///
+    /// Called from its own native callback, teardown completes after that callback returns.
+    pub fn close(self) {
+        self.work.close();
+        drop(self)
+    }
+
+    /// Allows bounded teardown only for an independent floating X11 window.
+    ///
+    /// Embedded windows always join their native worker. A detached floating worker
+    /// retains its pinned image and revokes future callbacks; an in-flight callback
+    /// can finish later. Revoke access to external host state before using this method.
+    pub fn close_bounded(self, timeout: Duration) {
+        self.work.close();
+        self.inner.set_close_timeout(timeout);
+    }
+
+    /// Returns whether the native worker is still running.
+    #[inline]
     pub fn is_open(&self) -> bool {
         self.inner.is_open()
     }
 
+    /// Returns `true` if the window can be resized by the user, `false` otherwise.
+    #[inline]
+    pub fn is_resizable(&self) -> bool {
+        self.inner.is_resizable()
+    }
+
+    /// Returns the minimum size of the window, if it has one.
+    #[inline]
+    pub fn min_size(&self) -> Option<Size> {
+        self.inner.min_size()
+    }
+
+    /// Returns the maximum size of the window, if it has one.
+    #[inline]
+    pub fn max_size(&self) -> Option<Size> {
+        self.inner.max_size()
+    }
+
+    /// Reparents this window using the given `parent`.
+    #[inline]
+    pub fn set_parent(&self, parent: impl Into<ParentWindowHandle>) -> Result<(), Error> {
+        self.inner.set_parent(parent.into().inner)?;
+        Ok(())
+    }
+
+    /// Shows the window to the screen.
+    #[inline]
     pub fn show(&self) -> Result<(), Error> {
         self.inner.show()?;
         Ok(())
     }
 
-    pub fn close(self) {
-        drop(self)
-    }
-
-    /// Same close policy as Window::close_bounded, including synchronous
-    /// teardown for embedded/parented windows closed from another thread.
-    pub fn close_bounded(self, timeout: Duration) {
-        self.inner.set_close_timeout(timeout);
+    /// Hides the window from the screen.
+    #[inline]
+    pub fn hide(&self) -> Result<(), Error> {
+        self.inner.hide()?;
+        Ok(())
     }
 }
 

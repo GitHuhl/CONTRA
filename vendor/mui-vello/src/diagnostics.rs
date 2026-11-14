@@ -2,7 +2,7 @@
 //!
 //! Native hosts record startup stages before calling a driver. Files rotate at
 //! 1 MiB, retaining one previous file. [`log_path`] locates the current session.
-//! Local only: nothing is ever sent over the network.
+//! Local only: nothing is ever sent over the network (CONTRA).
 //! This is a UI-thread API; do not call it from an audio callback.
 
 use std::{any::Any, path::PathBuf};
@@ -98,7 +98,7 @@ fn journal() -> &'static Mutex<Journal> {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "gpu-quad"))]
 pub(super) fn bounded(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
@@ -106,7 +106,6 @@ pub(super) fn bounded(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
-
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Journal {
@@ -166,7 +165,7 @@ pub fn breadcrumb(component: &str, stage: &str, message: &str) {
     record(component, stage, message, false, None);
 }
 
-/// Persist a MUI error to the local journal.
+/// Persist a MUI error and, when a `Reporter` is retained, enqueue it for support.
 /// Pass MUI-owned errors, not arbitrary host crashes or user content.
 /// Use component `mui`, `mui-vello`, `mui-baseview` or `mui-winit` and a short
 /// snake_case stage matching the support protocol.
@@ -178,6 +177,24 @@ pub fn error(component: &str, stage: &str, message: &str) {
 /// are using different adapters.
 pub fn gpu_error(stage: &str, message: &str, adapter: &wgpu::AdapterInfo) {
     record("mui-vello", stage, message, true, Some(adapter));
+}
+
+/// One bounded identity record and a separate reason: a verbose limits dump must
+/// not truncate the driver version or the rejection that support needs.
+#[cfg(feature = "gpu-quad")]
+pub(crate) fn gpu_candidate(stage: &str, message: &str, adapter: &wgpu::AdapterInfo) {
+    let identity = format!(
+        "name={:?}; vendor={:#06x}; device={:#06x}; backend={:?}; type={:?}; driver={:?}; driver_info={:?}",
+        bounded(&adapter.name, 384),
+        adapter.vendor,
+        adapter.device,
+        adapter.backend,
+        adapter.device_type,
+        bounded(&adapter.driver, 384),
+        bounded(&adapter.driver_info, 768),
+    );
+    record("mui-vello", stage, &identity, false, Some(adapter));
+    record("mui-vello", stage, message, false, Some(adapter));
 }
 
 /// Retain across a risky native GPU operation. Normal return and Rust unwind

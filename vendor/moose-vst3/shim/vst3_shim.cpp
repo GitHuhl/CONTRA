@@ -14,8 +14,22 @@
 #include <cstdlib>
 #include <cmath>
 #include <atomic>
+#include <thread>
 #include <new>
 #include <vector>
+#include <string>
+#include <unordered_map>
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#include <unistd.h>
+#include <cerrno>
+#endif
+#include <algorithm>
+#include <deque>
+#include <mutex>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 #if __APPLE__
 // libdispatch: an event-driven bridge that marshals a pending
 // restartComponent onto the host's main run loop, so a latency change
@@ -23,13 +37,11 @@
 // (the one case the main-thread callback hooks below can't reach).
 #include <dispatch/dispatch.h>
 #endif
-// Linux uses the host's Steinberg::Linux::IRunLoop (queried off the plug
-// frame) with a periodic ITimerHandler to drain a pending restart on the
-// host UI thread - see the run-loop bridge below. It deliberately makes
-// no eventfd / self-pipe syscall: Bitwig instantiates plugins in a
-// seccomp-sandboxed process where a stray syscall is fatal, and a timer
-// needs none. Linux has no process-global main queue, so the no-editor
-// path falls back to the param-poll / edit-gesture flush.
+// Latency still uses the existing view-bound host timer, without RT syscalls.
+// Opt-in persistent-document completion instead registers one nonblocking fd
+// with the host's IRunLoop (factory context, initialize context, or plug frame).
+// Only non-RT workers write it, and it remains registered after view removal.
+// No new periodic timer or background polling is needed for that delivery.
 #if defined(_WIN32)
 // Windows uses a null-HWND thread timer (SetTimer) created on the
 // instantiating thread: WM_TIMER is dispatched by that thread's message
@@ -133,6 +145,9 @@ static const TUID IPlugViewContentScaleSupport_iid =
 // Steinberg::Linux run-loop interfaces: IRunLoop is the host's UI-thread
 // event loop (queried off the plug frame); ITimerHandler is the periodic
 // callback we register with it. Only needed on Linux.
+static const TUID IEventHandler_iid = MAKE_IID(0x561E65C9, 0x13A0496F, 0x813A2C35, 0x654D7983);
+// Host-thread-owned factory context. Components retain their own reference.
+static void* g_factory_run_loop = nullptr;
 static const TUID IRunLoop_iid      = MAKE_IID(0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389);
 static const TUID ITimerHandler_iid = MAKE_IID(0x10BDD94F, 0x41424774, 0x821FAD8F, 0xECA72CA9);
 #endif
@@ -452,6 +467,7 @@ struct Vst3Callbacks {
     void* (*create)();
     void (*destroy)(void*);
     void (*reset)(void*, double, uint32_t, int32_t);
+    int32_t (*prepare)(void*, double, uint32_t, int32_t);
     uint32_t (*process)(void*, const float**, float**, uint32_t, uint32_t,
                         const uint32_t*, uint32_t, uint32_t,
                         const uint32_t*, uint32_t, uint32_t, uint32_t,
@@ -474,6 +490,8 @@ struct Vst3Callbacks {
      * plugin's migrate_state translated it), 0 when the load failed -
      * setState forwards that to the host as kResultFalse. */
     int32_t (*state_load)(void*, const uint8_t*, uint32_t);
+    int32_t (*state_load_stream)(void*, void*, int64_t (*)(void*, uint8_t*, uint32_t));
+    int32_t (*state_save_stream)(void*, void*, int64_t (*)(void*, const uint8_t*, uint32_t));
     void (*state_free)(uint8_t*, uint32_t);
     // Latency + tail
     uint32_t (*get_latency)(void*);
@@ -529,11 +547,9 @@ struct Vst3Callbacks {
     int32_t (*param_presentation)(void*, uint32_t, char*, uint32_t);
     // Bumped whenever any param_presentation result changes.
     uint64_t (*param_presentation_revision)(void*);
-    // Output audio bus title (the plugin's runtime name, else the layout's):
-    // 1 when written, 0 for none (keep the generic title).
-    int32_t (*output_bus_name)(void*, uint32_t /*layout*/, uint32_t /*index*/, char*, uint32_t);
-    // Bumped whenever any output_bus_name result changes.
-    uint64_t (*output_bus_names_revision)(void*);
+    bool (*wants_persist_notifications)(void*);
+    void (*set_persist_waker)(void*, void (*)(void*), void*);
+    bool (*take_persist_change)(void*, uint32_t*, double*);
 };
 
 // ---------------------------------------------------------------------------
@@ -545,44 +561,46 @@ static const Vst3Callbacks* g_cb = nullptr;
 static const Vst3ParamDescriptor* g_params = nullptr;
 static uint32_t g_num_params = 0;
 
-// Unit info (parameter groups) - built at registration time
-static const int kMaxUnits = 64;
-struct UnitEntry { int32 id; int32 parentId; char name[128]; };
-static UnitEntry g_units[kMaxUnits];
+// Immutable unit hierarchy built from the complete registration catalog.
+// No parameter-count or group-count ceiling; no runtime tree restructuring.
+struct UnitEntry { int32 id; int32 parentId; std::string name; };
+static std::vector<UnitEntry> g_units;
 static int g_num_units = 0;
-// Maps param index → unit ID
-static int32 g_param_unit_id[4096];
+static std::vector<int32> g_param_unit_id;
 
 static void build_unit_map() {
-    // Unit 0 = root (always exists)
-    g_num_units = 1;
-    g_units[0].id = 0;
-    g_units[0].parentId = -1; // kNoParentUnitId
-    strncpy(g_units[0].name, "Root", sizeof(g_units[0].name));
-
-    for (uint32_t i = 0; i < g_num_params && i < 4096; i++) {
+    g_units.clear();
+    g_units.push_back({0, -1, "Root"});
+    g_param_unit_id.assign(g_num_params, 0);
+    std::unordered_map<std::string, int32> paths;
+    for (uint32_t i = 0; i < g_num_params; i++) {
         const char* group = g_params[i].group;
-        if (!group || group[0] == 0) {
-            g_param_unit_id[i] = 0; // root unit
-            continue;
-        }
-        // Find or create unit for this group
-        int32 unitId = -1;
-        for (int u = 1; u < g_num_units; u++) {
-            if (strcmp(g_units[u].name, group) == 0) {
-                unitId = g_units[u].id;
-                break;
+        if (!group || !group[0]) continue;
+        int32 parent = 0;
+        std::string path;
+        const std::string full(group);
+        size_t start = 0;
+        while (start < full.size()) {
+            size_t end = full.find('/', start);
+            if (end == std::string::npos) end = full.size();
+            const std::string name = full.substr(start, end - start);
+            start = end + 1;
+            if (name.empty()) continue;
+            if (!path.empty()) path += '/';
+            path += name;
+            auto found = paths.find(path);
+            if (found == paths.end()) {
+                const int32 id = static_cast<int32>(g_units.size());
+                g_units.push_back({id, parent, name});
+                paths.emplace(path, id);
+                parent = id;
+            } else {
+                parent = found->second;
             }
         }
-        if (unitId < 0 && g_num_units < kMaxUnits) {
-            unitId = g_num_units;
-            g_units[g_num_units].id = unitId;
-            g_units[g_num_units].parentId = 0; // parent = root
-            strncpy(g_units[g_num_units].name, group, sizeof(g_units[0].name));
-            g_num_units++;
-        }
-        g_param_unit_id[i] = (unitId >= 0) ? unitId : 0;
+        g_param_unit_id[i] = parent;
     }
+    g_num_units = static_cast<int>(g_units.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +711,32 @@ struct PClassInfo {
 // Component: IComponent + IAudioProcessor + IEditController
 // ---------------------------------------------------------------------------
 
+// A wake's drain delivers at most kDrainEdits calls, oldest first, however
+// they were queued (a backlog, a worker, a host callback reentering), so
+// neither a burst nor a steady submitter holds the UI thread: what is left
+// keeps its place and waits for the next wake, which is asked for.
+static constexpr size_t kDrainEdits = 64;
+// A detach, handler change or teardown drains what is queued before it
+// goes on, so a finite burst finishes on the handler that saw it begin.
+// Only a submitter that never stops outlasts kTransitionEdits; then a
+// handler change cuts over gesture by gesture (closeOpenGesturesLocked) and
+// a detach leaves the rest for the next delivery, never holding the UI
+// thread.
+static constexpr size_t kTransitionEdits = 4096;
+
+// An editor -> host call made off the host UI thread, queued for it. VST3
+// wants IComponentHandler begin/perform/endEdit and IPlugFrame::resizeView
+// on the UI thread, but an editor may build its UI on a worker thread (MUI
+// does, on every OS). The UI thread makes queued calls in order: woken by
+// an eventfd on the host IRunLoop (Linux), the main-queue dispatch source
+// (macOS), or the component's UI-thread timer (Windows).
+struct EditOp {
+    enum Kind : uint8_t { Begin, Perform, End, Resize } kind;
+    uint32_t id;
+    double value;
+    uint32_t w, h;
+};
+
 struct MooseComponentCOM; // forward declaration
 class MooseComponent;     // forward declaration for ctx mapping
 struct MoosePlugView;     // forward decl - full def lives below in the
@@ -714,62 +758,38 @@ struct IBStreamVtbl {
     tresult (*tell)(void*, int64_t*);
 };
 
-// Largest state blob accepted from, or handed to, a host stream.
-static constexpr int32 kMaxHostStateBytes = 32 * 1024 * 1024;
-
 extern "C" {
 
-// Read one bounded state blob from a host IBStream. Returns a malloc'd
-// buffer (caller frees) and its length, or nullptr when the stream is
-// empty, errors before any data, reports a byte count outside the
-// request, or runs past kMaxHostStateBytes. A short final read is
-// valid. Exported so the Rust tests can drive it with a fake stream.
-uint8_t* moose_vst3_read_state_stream(void* stream, int32* outLen) {
-    *outLen = 0;
-    if (!stream) return nullptr;
+// Return an arbitrary short host read directly to the bounded Rust parser.
+int64_t moose_vst3_read_state_chunk(void* stream, uint8_t* dst, uint32_t requested) {
+    if (!stream || !dst || requested == 0 || requested > 8192) return -1;
     auto* vtbl = *reinterpret_cast<IBStreamVtbl**>(stream);
-    uint8_t buf[4096];
-    uint8_t* data = nullptr;
-    int32 total = 0;
-    int32 capacity = 0;
-    for (;;) {
-        int32 bytesRead = 0;
-        tresult r = vtbl->read(stream, buf, (int32)sizeof(buf), &bytesRead);
-        if (bytesRead < 0 || bytesRead > (int32)sizeof(buf)) { free(data); return nullptr; }
-        if (bytesRead == 0) break;
-        if (total > kMaxHostStateBytes - bytesRead) { free(data); return nullptr; }
-        const int32 nextTotal = total + bytesRead;
-        if (nextTotal > capacity) {
-            // Geometric growth: one realloc per doubling, not per chunk.
-            int32 nextCapacity = capacity == 0 ? (int32)sizeof(buf) : capacity;
-            while (nextCapacity < nextTotal) {
-                nextCapacity = nextCapacity > kMaxHostStateBytes / 2
-                    ? kMaxHostStateBytes : nextCapacity * 2;
-            }
-            auto* grown = (uint8_t*)realloc(data, (size_t)nextCapacity);
-            if (!grown) { free(data); return nullptr; }
-            data = grown;
-            capacity = nextCapacity;
-        }
-        memcpy(data + total, buf, (size_t)bytesRead);
-        total = nextTotal;
-        if (r != kResultOk) break;
-    }
-    if (total == 0) { free(data); return nullptr; }
-    *outLen = total;
-    return data;
+    int32 count = 0;
+    const tresult result = vtbl->read(stream, dst, (int32)requested, &count);
+    if (count < 0 || (uint32_t)count > requested) return -1;
+    if (result != kResultOk && result != kResultFalse) return -1;
+    return count;
+}
+
+int64_t moose_vst3_write_state_chunk(void* stream, const uint8_t* src, uint32_t requested) {
+    if (!stream || !src || requested == 0 || requested > 8192) return -1;
+    auto* vtbl = *reinterpret_cast<IBStreamVtbl**>(stream);
+    int32 count = 0;
+    const tresult result = vtbl->write(stream, (void*)src, (int32)requested, &count);
+    if (count <= 0 || (uint32_t)count > requested || result != kResultOk) return -1;
+    return count;
 }
 
 // Write a whole state blob to a host IBStream, looping over partial
 // writes. Returns 1 when every byte landed, 0 when the blob is empty or
-// oversized, or the stream reports no progress, a count outside the
+// beyond the signed IBStream range, or the stream reports no progress, a count outside the
 // request, or an error before the blob is complete.
 int32_t moose_vst3_write_state_stream(void* stream, const uint8_t* data, uint32_t len) {
-    if (!stream || !data || len == 0 || len > (uint32_t)kMaxHostStateBytes) return 0;
+    if (!stream || !data || len == 0 || len > (uint32_t)INT32_MAX) return 0;
     auto* vtbl = *reinterpret_cast<IBStreamVtbl**>(stream);
     uint32_t offset = 0;
     while (offset < len) {
-        const int32 request = (int32)(len - offset);
+        const int32 request = (int32)((len - offset) > 65536 ? 65536 : (len - offset));
         int32 written = 0;
         tresult r = vtbl->write(stream, (void*)(data + offset), request, &written);
         if (written <= 0 || written > request) return 0;
@@ -783,8 +803,12 @@ int32_t moose_vst3_write_state_stream(void* stream, const uint8_t* data, uint32_
 
 // Global ctx→component mapping for extern "C" host-notification callbacks
 static constexpr int kMaxInstances = 64;
-static void* g_ctx_map_key[kMaxInstances] = {};
-static MooseComponent* g_ctx_map_comp[kMaxInstances] = {};
+// Entries are atomics so the audio thread's lock-free lookup
+// (moose_vst3_mark_restart) never races a registration. Registration,
+// removal and pinning (PinnedComponent) happen under g_ctx_mutex.
+static std::atomic<void*> g_ctx_map_key[kMaxInstances] = {};
+static std::atomic<MooseComponent*> g_ctx_map_comp[kMaxInstances] = {};
+static std::mutex g_ctx_mutex;
 
 #if __APPLE__
 // Resolves the shim's opaque ctx key to its live component, or null once
@@ -805,6 +829,31 @@ static void moose_vst3_restart_source_event(void* key);
 // thread - the run loop calls it there. A timer, not an fd handler, so
 // nothing here or in the audio-thread path makes a syscall the host's
 // sandbox could reject; the flush just polls the pending-restart bit.
+// A separate fd handler outlives the plug view and does no idle polling.
+struct PersistEventHandler;
+static tresult ph_queryInterface(void*, const TUID, void**);
+static uint32 ph_addRef(void*);
+static uint32 ph_release(void*);
+static void ph_onFDIsSet(void*, int);
+struct PersistEventVtbl {
+    tresult (*queryInterface)(void*, const TUID, void**);
+    uint32 (*addRef)(void*);
+    uint32 (*release)(void*);
+    void (*onFDIsSet)(void*, int);
+};
+static PersistEventVtbl g_persist_event_vtbl = {
+    ph_queryInterface, ph_addRef, ph_release, ph_onFDIsSet,
+};
+struct PersistEventHandler {
+    PersistEventVtbl* vtbl;
+    MooseComponent* comp;
+};
+// Linux wake for queued editor calls (see EditOp).
+static void eh_onFDIsSet(void*, int);
+static PersistEventVtbl g_edit_event_vtbl = {
+    ph_queryInterface, ph_addRef, ph_release, eh_onFDIsSet,
+};
+
 struct ITimerHandlerVtbl {
     tresult (*queryInterface)(void*, const TUID, void**);
     uint32  (*addRef)(void*);
@@ -974,6 +1023,122 @@ public:
     // so restartComponent - which VST3 wants off the audio thread and on
     // the UI thread - never fires from the render or a moose-owned thread.
     std::atomic<int32_t> pendingRestart{0};
+    std::atomic<bool> persistPending{false};
+    bool persistBound = false;
+    bool persistWanted = false;
+#if defined(__linux__)
+    PersistEventHandler persistEvent{&g_persist_event_vtbl, this};
+    int persistFd = -1;
+    void* persistRunLoop = nullptr;
+    PersistEventHandler editEvent{&g_edit_event_vtbl, this};
+    int editFd = -1;
+    void* editRunLoop = nullptr;
+    pthread_t uiThread{};
+    void bindEditRunLoop(void* frame) {
+        void* rl = nullptr;
+        auto qi = (tresult (*)(void*, const TUID, void**))(*(void***)frame)[0];
+        if (qi(frame, IRunLoop_iid, &rl) != kResultOk || !rl) return;
+        int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        auto reg = (tresult (*)(void*, void*, int))(*(void***)rl)[3];
+        if (fd >= 0 && reg(rl, &editEvent, fd) == kResultOk) {
+            std::lock_guard<std::mutex> lock(editMutex);
+            uiThread = pthread_self();
+            editFd = fd;
+            editRunLoop = rl;
+            return;
+        }
+        if (fd >= 0) close(fd);
+        auto release = (uint32 (*)(void*))(*(void***)rl)[2];
+        release(rl);
+    }
+    void unbindEditRunLoop() {
+        std::unique_lock<std::mutex> lock(editMutex);
+        void* rl = editRunLoop;
+        int fd = editFd;
+        if (!rl) return;
+        // Keep workers queueing until the UI thread has delivered every
+        // pending edit. Clearing the wake and observing an empty queue must
+        // be atomic, or a worker could steal the detach batch.
+        drainEditsLocked(lock, true);
+        editRunLoop = nullptr;
+        editFd = -1;
+        lock.unlock();
+        auto unreg = (tresult (*)(void*, void*))(*(void***)rl)[4];
+        unreg(rl, &editEvent);
+        auto release = (uint32 (*)(void*))(*(void***)rl)[2];
+        release(rl);
+        close(fd);
+    }
+#endif
+    static void wakePersist(void* context) {
+        auto* comp = static_cast<MooseComponent*>(context);
+        if (comp->persistPending.exchange(true, std::memory_order_acq_rel)) return;
+#if defined(__linux__)
+        const uint64_t one = 1;
+        ssize_t result;
+        do { result = write(comp->persistFd, &one, sizeof(one)); }
+        while (result < 0 && errno == EINTR);
+        // EAGAIN means an earlier wake is already readable. Teardown cannot
+        // close the fd until Rust's signal.close() has joined this request.
+#elif __APPLE__
+        if (comp->restartSource) dispatch_source_merge_data(comp->restartSource, 1);
+#endif
+        // Windows reuses the existing host-thread lifetime timer. No extra
+        // timer, worker or wakeup is introduced there.
+    }
+    void bindPersistSignal() {
+        if (persistBound || !g_cb || !ctx || !g_cb->wants_persist_notifications(ctx)) return;
+#if defined(__linux__)
+        if (persistFd < 0 || !persistRunLoop) return;
+#elif __APPLE__
+        if (!restartSource) return;
+#elif defined(_WIN32)
+        if (!restartTimerId) return;
+#endif
+        persistBound = true;
+        g_cb->set_persist_waker(ctx, wakePersist, this);
+    }
+    void flushPersistChange() {
+        if (!componentHandler || !persistWanted) return;
+        if (persistBound && !persistPending.exchange(false, std::memory_order_acq_rel)) return;
+        // Hosts omitting the required Linux runloop still get the completion
+        // on their next existing main-thread callback; no polling job is added.
+        uint32_t id = 0;
+        double value = 0;
+        if (!g_cb || !ctx || !g_cb->take_persist_change(ctx, &id, &value)) return;
+        auto** vtbl = *(void***)componentHandler;
+        auto begin = (tresult (*)(void*, uint32_t))vtbl[3];
+        auto perform = (tresult (*)(void*, uint32_t, double))vtbl[4];
+        auto end = (tresult (*)(void*, uint32_t))vtbl[5];
+        begin(componentHandler, id);
+        inPerformEdit = true;
+        perform(componentHandler, id, value);
+        inPerformEdit = false;
+        end(componentHandler, id);
+    }
+#if defined(__linux__)
+    void bindPersistRunLoop(void* context) {
+        if (persistRunLoop || !context || !g_cb || !ctx || !g_cb->wants_persist_notifications(ctx)) return;
+        void* rl = nullptr;
+        auto qi = (tresult (*)(void*, const TUID, void**))(*(void***)context)[0];
+        if (qi(context, IRunLoop_iid, &rl) != kResultOk || !rl) return;
+        // Only opted-in plugins with an actual host runloop create an fd.
+        // No fd is created in a context-less scanner or from the audio thread.
+        int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (fd >= 0) {
+            auto reg = (tresult (*)(void*, void*, int))(*(void***)rl)[3];
+            if (reg(rl, &persistEvent, fd) == kResultOk) {
+                persistFd = fd;
+                persistRunLoop = rl;
+                bindPersistSignal();
+                return;
+            }
+            close(fd);
+        }
+        auto release = (uint32 (*)(void*))(*(void***)rl)[2];
+        release(rl);
+    }
+#endif
 #if __APPLE__
     // Main-queue dispatch source. The audio thread signals it (lock-free,
     // alloc-free) on a latency change; its handler drains pendingRestart
@@ -1000,6 +1165,65 @@ public:
     // to the param-poll / edit-gesture flush).
     UINT_PTR restartTimerId = 0;
 #endif
+#if defined(_WIN32)
+    DWORD uiThreadId = 0;     // the thread that owns restartTimerId
+#endif
+    // Editor calls made off the UI thread, oldest first (see EditOp).
+    // `editMutex` also guards each platform's wake handle against teardown.
+    std::mutex editMutex;
+    void unregister();
+    std::deque<EditOp> pendingEdits;
+    // Gestures begun on componentHandler and not yet ended; editMutex.
+    std::vector<uint32> openGestures;
+    bool editsClosed = false; // teardown: no more queueing
+    bool drainingEdits = false; // guarded by editMutex; callbacks may reenter
+    // Queue `op` when a UI-thread wake exists and this is not the UI
+    // thread; false means call through now (the pre-existing direct path).
+    // Once teardown has closed the queue a call is dropped, never made: the
+    // component is going and its handler with it.
+    bool tryQueueEdit(EditOp op) {
+        std::lock_guard<std::mutex> lock(editMutex);
+        if (editsClosed) return true;
+        if (drainingEdits) {
+            pendingEdits.push_back(op);
+            return true;
+        }
+        if (mayDeliverLocked()) return false;
+        pendingEdits.push_back(op);
+        wakeEditsLocked();
+        return true;
+    }
+    // This thread may make host calls now: it is the host UI thread, or no
+    // UI-thread wake is bound. Caller holds editMutex; binding takes it too.
+    bool mayDeliverLocked() const {
+#if defined(__linux__)
+        return !editRunLoop || pthread_equal(pthread_self(), uiThread);
+#elif __APPLE__
+        return !restartSource || pthread_main_np();
+#elif defined(_WIN32)
+        return !restartTimerId || GetCurrentThreadId() == uiThreadId;
+#else
+        return true;
+#endif
+    }
+    // Ask the UI thread for a drain. Windows needs nothing: its UI-thread
+    // timer drains on every tick. Caller holds editMutex.
+    void wakeEditsLocked() {
+#if defined(__linux__)
+        if (editFd < 0) return;
+        const uint64_t one = 1;
+        ssize_t result;
+        do { result = write(editFd, &one, sizeof(one)); }
+        while (result < 0 && errno == EINTR);
+#elif __APPLE__
+        if (restartSource) dispatch_source_merge_data(restartSource, 1);
+#endif
+    }
+    // Defined after MoosePlugView: makes every queued call, on the UI thread.
+    void drainEdits();
+    bool queueBehindRemainingEdits(EditOp op);
+    std::vector<uint32> closeOpenGesturesLocked(std::unique_lock<std::mutex>& lock);
+    void drainEditsLocked(std::unique_lock<std::mutex>& lock, bool transition = false);
     bool inPerformEdit;       // feedback guard: skip setParamNormalized during performEdit
     // Live plug view created by `createView()`. Set there, nulled in
     // `pv_release` when refcount -> 0. `moose_vst3_request_resize`
@@ -1008,7 +1232,7 @@ public:
     // (Cubase theme change, Live dock/undock) would otherwise leave
     // a dangling pointer in the closure.
     MoosePlugView* plugView;
-    // Native GUI ownership changes on attachment, not merely createView.
+    // Attachment owns the native editor independently of view creation.
     MoosePlugView* attachedView;
 
     MooseComponent() : ctx(nullptr), sampleRate(44100), maxFrames(1024),
@@ -1026,10 +1250,12 @@ public:
         if (g_cb) {
             ctx = g_cb->create();
             if (ctx) {
+                persistWanted = g_cb->wants_persist_notifications(ctx);
+                std::lock_guard<std::mutex> lock(g_ctx_mutex);
                 for (int i = 0; i < kMaxInstances; i++) {
-                    if (!g_ctx_map_key[i]) {
-                        g_ctx_map_key[i] = ctx;
-                        g_ctx_map_comp[i] = this;
+                    if (!g_ctx_map_key[i].load(std::memory_order_relaxed)) {
+                        g_ctx_map_comp[i].store(this, std::memory_order_release);
+                        g_ctx_map_key[i].store(ctx, std::memory_order_release);
                         break;
                     }
                 }
@@ -1061,30 +1287,57 @@ public:
                 // fires from the host's pump. A pump-less scan thread
                 // just never dispatches it - harmless, the param-poll
                 // flush still covers that instance.
+                uiThreadId = GetCurrentThreadId();
                 restartTimerId = SetTimer(
                     nullptr, 0, (UINT)kRestartTimerIntervalMs,
                     moose_vst3_restart_timer_proc);
 #endif
+#if defined(__linux__)
+                bindPersistRunLoop(g_factory_run_loop);
+#endif
+                bindPersistSignal();
             }
         }
     }
 
     ~MooseComponent() {
+        // No new editor call can find this instance. One already inside
+        // holds a reference (PinnedComponent), so none is running now.
+        unregister();
+        // Wait for any worker wake before unregistering/closing native handles.
+        if (persistBound && g_cb && ctx) g_cb->set_persist_waker(ctx, nullptr, nullptr);
+        // Queued editor calls go out while componentHandler is still held,
+        // if this thread may make them: the last reference can be a
+        // worker's pin, and the host is never called from a worker. What
+        // cannot go out is dropped; the host has released this component.
+        {
+            std::unique_lock<std::mutex> lock(editMutex);
+            if (mayDeliverLocked()) {
+                drainEditsLocked(lock, true);
+                if (!pendingEdits.empty()) closeOpenGesturesLocked(lock);
+            }
+            editsClosed = true;
+            pendingEdits.clear();
+        }
+#if defined(__linux__)
+        unbindEditRunLoop();
+#endif
+#if defined(__linux__)
+        if (persistRunLoop) {
+            auto unreg = (tresult (*)(void*, void*))(*(void***)persistRunLoop)[4];
+            unreg(persistRunLoop, &persistEvent);
+            auto release = (uint32 (*)(void*))(*(void***)persistRunLoop)[2];
+            release(persistRunLoop);
+            persistRunLoop = nullptr;
+        }
+        if (persistFd >= 0) { close(persistFd); persistFd = -1; }
+#endif
         if (componentHandler) {
             auto release_fn = (uint32 (*)(void*))(*(void***)componentHandler)[2];
             release_fn(componentHandler);
         }
-        if (ctx) {
-            for (int i = 0; i < kMaxInstances; i++) {
-                if (g_ctx_map_key[i] == ctx) {
-                    g_ctx_map_key[i] = nullptr;
-                    g_ctx_map_comp[i] = nullptr;
-                    break;
-                }
-            }
-        }
 #if __APPLE__
-        // Unregister above happens first, so any in-flight handler
+        // Unregistering happened first (unregister), so any in-flight handler
         // resolves null and never touches this freed instance. cancel()
         // stops further invocations; release() is safe mid-handler
         // (libdispatch retains the source across a running handler).
@@ -1127,14 +1380,22 @@ public:
     tresult queryInterface(void* comBase, const TUID iid, void** obj);
 
     uint32 addRef() { return ++refCount; }
+    // A reference unless the count already reached zero (teardown begun).
+    bool tryAddRef() {
+        int32 r = refCount.load(std::memory_order_relaxed);
+        while (r > 0 && !refCount.compare_exchange_weak(r, r + 1)) {}
+        return r > 0;
+    }
     uint32 release() { return --refCount; }
 
     // --- IPluginBase ---
 
-    tresult initialize(void* /*context*/) {
-        if (g_cb && ctx) {
-            // initialize is a no-op for now
-        }
+    tresult initialize(void* context) {
+#if defined(__linux__)
+        bindPersistRunLoop(context);
+#else
+        (void)context;
+#endif
         return kResultOk;
     }
 
@@ -1211,11 +1472,6 @@ public:
             const bool aux = kinds && kinds[index] != 0;
             const char* nm = (dir == kInput) ? (aux ? "Sidechain" : "Input")
                                              : (aux ? "Aux Output" : "Output");
-            char named[128];
-            if (dir == kOutput && g_cb && g_cb->output_bus_name &&
-                    g_cb->output_bus_name(ctx, cur_layout, (uint32_t)index, named, sizeof(named)) == 1) {
-                nm = named;
-            }
             str_to_char16(bus->name, nm, 128);
             bus->busType = aux ? kAux : kMain;
             // kDefaultActive is truthful per role: the main path is live on a
@@ -1258,7 +1514,11 @@ public:
 
     tresult setActive(TBool state) {
         if (g_cb && ctx) {
-            g_cb->reset(ctx, sampleRate, maxFrames, procMode);
+            if (state) {
+                if (!g_cb->prepare(ctx, sampleRate, maxFrames, procMode)) return kResultFalse;
+            } else {
+                g_cb->reset(ctx, sampleRate, maxFrames, procMode);
+            }
         }
         // Tell Rust the activation state for both directions so a state
         // load while suspended isn't stranded in the audio-thread queue.
@@ -1270,26 +1530,15 @@ public:
 
     tresult setState(void* stream) {
         if (!stream || !g_cb || !ctx) return kResultFalse;
-        int32 total = 0;
-        uint8_t* data = moose_vst3_read_state_stream(stream, &total);
-        tresult result = kResultFalse;
-        if (data) {
-            if (g_cb->state_load(ctx, data, (uint32_t)total))
-                result = kResultOk;
-            free(data);
-        }
+        const tresult result = g_cb->state_load_stream(ctx, stream, moose_vst3_read_state_chunk)
+            ? kResultOk : kResultFalse;
         return result;
     }
 
     tresult getState(void* stream) {
         if (!stream || !g_cb || !ctx) return kResultFalse;
-        uint8_t* blob = nullptr;
-        uint32_t len = 0;
-        g_cb->state_save(ctx, &blob, &len);
-        if (!blob) return kResultFalse;
-        const int32_t ok = moose_vst3_write_state_stream(stream, blob, len);
-        g_cb->state_free(blob, len);
-        return ok ? kResultOk : kResultFalse;
+        return g_cb->state_save_stream(ctx, stream, moose_vst3_write_state_chunk)
+            ? kResultOk : kResultFalse;
     }
 
     // --- IAudioProcessor ---
@@ -1905,7 +2154,7 @@ public:
         str_to_char16(info->units, p.units, 128);
         info->stepCount = p.step_count;
         info->defaultNormalizedValue = p.default_normalized;
-        info->unitId = ((uint32_t)index < 4096) ? g_param_unit_id[index] : 0;
+        info->unitId = g_param_unit_id[static_cast<size_t>(index)];
         info->flags = p.flags;
         if (g_cb && ctx) {
             char title[512] = {};
@@ -1968,15 +2217,31 @@ public:
     }
 
     tresult setComponentHandler(void* handler) {
-        if (componentHandler) {
-            auto release_fn = (uint32 (*)(void*))(*(void***)componentHandler)[2];
-            release_fn(componentHandler);
+        // Host handler changes run on the UI thread. Hold the queue lock
+        // across the empty-queue / handler-swap boundary so concurrent
+        // editor calls belong to the handler on the correct side of it.
+        std::unique_lock<std::mutex> lock(editMutex);
+        drainEditsLocked(lock, true);
+        // A submitter that never stopped: its gestures end on the old
+        // handler and the rest go on in fresh ones on the new handler.
+        std::vector<uint32> reopen;
+        if (!pendingEdits.empty()) reopen = closeOpenGesturesLocked(lock);
+        void* previous = componentHandler;
+        if (handler) {
+            auto addRef_fn = (uint32 (*)(void*))(*(void***)handler)[1];
+            addRef_fn(handler);
         }
         componentHandler = handler;
-        if (componentHandler) {
-            auto addRef_fn = (uint32 (*)(void*))(*(void***)componentHandler)[1];
-            addRef_fn(componentHandler);
+        if (!handler) reopen.clear();
+        for (auto id = reopen.rbegin(); id != reopen.rend(); ++id)
+            pendingEdits.push_front({EditOp::Begin, *id, 0, 0, 0});
+        if (!pendingEdits.empty()) wakeEditsLocked();
+        lock.unlock();
+        if (previous) {
+            auto release_fn = (uint32 (*)(void*))(*(void***)previous)[2];
+            release_fn(previous);
         }
+        if (handler) flushPersistChange();
         return kResultOk;
     }
 
@@ -1986,20 +2251,13 @@ public:
     // lands on the UI thread as VST3 wants. IComponentHandler vtable:
     //   [3] beginEdit [4] performEdit [5] endEdit [6] restartComponent
     uint64_t presentationRevision = 0;
-    uint64_t busNamesRevision = 0;
     void flushPendingRestart() {
         if (!componentHandler) return;
+        flushPersistChange();
         uint64_t revision = (g_cb && ctx) ? g_cb->param_presentation_revision(ctx) : 0;
         if (revision != presentationRevision) {
             presentationRevision = revision;
-            // kParamTitlesChanged | kParamValuesChanged: value text follows the presentation.
-            pendingRestart.fetch_or((1 << 4) | (1 << 0), std::memory_order_release);
-        }
-        uint64_t names = (g_cb && ctx && g_cb->output_bus_names_revision)
-            ? g_cb->output_bus_names_revision(ctx) : 0;
-        if (names != busNamesRevision) {
-            busNamesRevision = names;
-            pendingRestart.fetch_or(1 << 7, std::memory_order_release); // kIoTitlesChanged
+            pendingRestart.fetch_or(1 << 4, std::memory_order_release); // kParamTitlesChanged
         }
         int32 flags = pendingRestart.exchange(0, std::memory_order_acq_rel);
         if (!flags || !componentHandler) return;
@@ -2016,6 +2274,11 @@ public:
     // detached) rebinds cleanly. Runs on the host UI thread, same as
     // onTimer, so there's no race with the handler.
     void updateRunLoopRegistration(void* frame) {
+        // Keep an independent addRef'd event registration until component
+        // destruction; closing/detaching this view must not strand completion.
+        bindPersistRunLoop(frame);
+        unbindEditRunLoop();
+        if (frame) bindEditRunLoop(frame);
         if (runLoop) {
             auto unreg = (tresult (*)(void*, void*))
                 (*(void***)runLoop)[kRunLoopUnregisterTimerIndex];
@@ -2048,6 +2311,29 @@ public:
 };
 
 #if defined(__linux__)
+static tresult ph_queryInterface(void* self, const TUID iid, void** obj) {
+    if (iid_equal(iid, FUnknown_iid) || iid_equal(iid, IEventHandler_iid)) {
+        *obj = self; return kResultOk;
+    }
+    *obj = nullptr; return kNoInterface;
+}
+static uint32 ph_addRef(void*) { return 1; }
+static uint32 ph_release(void*) { return 1; }
+static void ph_onFDIsSet(void* self, int fd) {
+    auto* handler = static_cast<PersistEventHandler*>(self);
+    uint64_t value;
+    ssize_t result;
+    do { result = read(fd, &value, sizeof(value)); } while (result < 0 && errno == EINTR);
+    if (handler->comp) handler->comp->flushPersistChange();
+}
+static void eh_onFDIsSet(void* self, int fd) {
+    auto* handler = static_cast<PersistEventHandler*>(self);
+    uint64_t value;
+    ssize_t result;
+    do { result = read(fd, &value, sizeof(value)); } while (result < 0 && errno == EINTR);
+    if (handler->comp) handler->comp->drainEdits();
+}
+
 // ITimerHandler method bodies - defined here, now that MooseComponent is
 // complete. The handler is embedded in the component and not
 // independently owned, so addRef / release are inert and queryInterface
@@ -2067,7 +2353,10 @@ static void th_onTimer(void* self) {
     // editor is open. Cheap when idle: flushPendingRestart exchanges the
     // atomic and returns immediately when no bits are set.
     auto* h = (RestartTimerHandler*)self;
-    if (h->comp) h->comp->flushPendingRestart();
+    if (!h->comp) return;
+    h->comp->flushPendingRestart();
+    // A host that dropped an eventfd wake still gets queued edits here.
+    h->comp->drainEdits();
 }
 #endif
 
@@ -2083,9 +2372,10 @@ static void th_onTimer(void* self) {
 static void CALLBACK moose_vst3_restart_timer_proc(
         HWND, UINT, UINT_PTR id, DWORD) {
     for (int i = 0; i < kMaxInstances; i++) {
-        MooseComponent* comp = g_ctx_map_comp[i];
+        MooseComponent* comp = g_ctx_map_comp[i].load(std::memory_order_acquire);
         if (comp && comp->restartTimerId == id) {
             comp->flushPendingRestart();
+            comp->drainEdits();
             return;
         }
     }
@@ -2138,7 +2428,7 @@ struct MoosePlugView {
     int32_t refCount;
     void* ctx;              // Rust plugin context
     MooseComponent* comp;   // owning component (resize and run-loop lifetime)
-    void* owner;            // retained component interface; released with the view
+    void* owner;            // retained component interface
     // Stored by `pv_setFrame` (host hands the plug-view its
     // `IPlugFrame*`). Used by `moose_vst3_request_resize` to drive
     // the plugin -> host resize request. Nulled when the view is
@@ -2229,9 +2519,7 @@ static tresult pv_attached(void* s, void* parent, FIDString type) {
     // before Rust interprets a parent as NSView/HWND/X11 or we change ownership.
     if (!parent || pv_isPlatformTypeSupported(s, type) != kResultOk
         || !g_cb || !g_cb->gui_open || !pv->ctx) return kResultFalse;
-    // KONTAKTO patch: IPlugView attachment creates the view independently
-    // of processor activation or state restoration. An inactive fresh
-    // instance may receive neither; deferring here leaves only a host frame.
+    // Fresh inactive instances may never receive activation or state restore.
     if (pv->comp) pv->comp->attachedView = pv;
     g_cb->gui_open(pv->ctx, parent);
     return kResultOk;
@@ -2746,7 +3034,7 @@ static tresult ui_getUnitInfo(void*, int32 idx, UnitInfo* out) {
     if (idx < 0 || idx >= g_num_units || !out) return kInvalidArgument;
     out->id = g_units[idx].id;
     out->parentUnitId = g_units[idx].parentId;
-    str_to_char16(out->name, g_units[idx].name, 128);
+    str_to_char16(out->name, g_units[idx].name.c_str(), 128);
     out->programListId = -1; // kNoProgramListId
     return kResultOk;
 }
@@ -2914,6 +3202,13 @@ static uint32 factory_addRef(void* self) {
 
 static uint32 factory_release(void* self) {
     auto r = --(((FactoryCOM*)self)->refCount);
+#if defined(__linux__)
+    if (r == 0 && g_factory_run_loop) {
+        auto release = (uint32 (*)(void*))(*(void***)g_factory_run_loop)[2];
+        release(g_factory_run_loop);
+        g_factory_run_loop = nullptr;
+    }
+#endif
     // Don't free - factory is a global static
     return r;
 }
@@ -2981,7 +3276,23 @@ static tresult factory_getClassInfoW(void*, int32 index, PClassInfoW* info) {
     return kResultOk;
 }
 
-static tresult factory_setHostContext(void*, void*) { return kResultOk; }
+static tresult factory_setHostContext(void*, void* context) {
+#if defined(__linux__)
+    void* next = nullptr;
+    if (context) {
+        auto qi = (tresult (*)(void*, const TUID, void**))(*(void***)context)[0];
+        if (qi(context, IRunLoop_iid, &next) != kResultOk) next = nullptr;
+    }
+    if (g_factory_run_loop) {
+        auto release = (uint32 (*)(void*))(*(void***)g_factory_run_loop)[2];
+        release(g_factory_run_loop);
+    }
+    g_factory_run_loop = next;
+#else
+    (void)context;
+#endif
+    return kResultOk;
+}
 
 static tresult factory_createInstance(void*, FIDString cid, FIDString iid, void** obj) {
     if (!cid || !iid || !obj || !g_desc) return kInvalidArgument;
@@ -3069,21 +3380,55 @@ void* moose_vst3_get_factory() {
 
 static MooseComponent* ctx_lookup(void* ctx) {
     for (int i = 0; i < kMaxInstances; i++) {
-        if (g_ctx_map_key[i] == ctx) return g_ctx_map_comp[i];
+        if (g_ctx_map_key[i].load(std::memory_order_acquire) == ctx)
+            return g_ctx_map_comp[i].load(std::memory_order_acquire);
     }
     return nullptr;
 }
 
-void moose_vst3_begin_edit(void* ctx, uint32_t id) {
-    auto* comp = ctx_lookup(ctx);
-    if (!comp || !comp->componentHandler) return;
-    auto beginEdit = (tresult (*)(void*, uint32))(*(void***)comp->componentHandler)[3];
-    beginEdit(comp->componentHandler, id);
+// An exported editor call's reference to its instance, taken under
+// g_ctx_mutex while the instance is still registered. The host may drop its
+// last reference meanwhile -- from another thread, or from inside a callback
+// this call made -- and the instance then goes when the call returns.
+// Editor threads may outlive the host's release (nothing makes `close`
+// join them).
+struct PinnedComponent {
+    MooseComponent* comp = nullptr;
+    explicit PinnedComponent(void* ctx) {
+        std::lock_guard<std::mutex> lock(g_ctx_mutex);
+        comp = ctx_lookup(ctx);
+        if (comp && !comp->tryAddRef()) comp = nullptr;
+    }
+    ~PinnedComponent() {
+        // `impl` follows the eight interface vtable pointers.
+        if (comp) comp_release(reinterpret_cast<char*>(comp) - 8 * sizeof(void*));
+    }
+    PinnedComponent(const PinnedComponent&) = delete;
+    PinnedComponent& operator=(const PinnedComponent&) = delete;
+};
+
+void MooseComponent::unregister() {
+    if (!ctx) return;
+    std::lock_guard<std::mutex> lock(g_ctx_mutex);
+    for (int i = 0; i < kMaxInstances; i++) {
+        if (g_ctx_map_key[i].load(std::memory_order_relaxed) == ctx) {
+            g_ctx_map_key[i].store(nullptr, std::memory_order_release);
+            g_ctx_map_comp[i].store(nullptr, std::memory_order_release);
+            break;
+        }
+    }
 }
 
-void moose_vst3_perform_edit(void* ctx, uint32_t id, double normalized) {
-    auto* comp = ctx_lookup(ctx);
-    if (!comp || !comp->componentHandler) return;
+static void do_begin_edit(MooseComponent* comp, uint32_t id) {
+    if (!comp->componentHandler) return;
+    auto beginEdit = (tresult (*)(void*, uint32))(*(void***)comp->componentHandler)[3];
+    beginEdit(comp->componentHandler, id);
+    std::lock_guard<std::mutex> lock(comp->editMutex);
+    comp->openGestures.push_back(id);
+}
+
+static void do_perform_edit(MooseComponent* comp, uint32_t id, double normalized) {
+    if (!comp->componentHandler) return;
     comp->inPerformEdit = true;
     auto performEdit = (tresult (*)(void*, uint32, double))(*(void***)comp->componentHandler)[4];
     performEdit(comp->componentHandler, id, normalized);
@@ -3093,12 +3438,113 @@ void moose_vst3_perform_edit(void* ctx, uint32_t id, double normalized) {
     comp->flushPendingRestart();
 }
 
-void moose_vst3_end_edit(void* ctx, uint32_t id) {
-    auto* comp = ctx_lookup(ctx);
-    if (!comp || !comp->componentHandler) return;
+static void do_end_edit(MooseComponent* comp, uint32_t id) {
+    if (!comp->componentHandler) return;
     auto endEdit = (tresult (*)(void*, uint32))(*(void***)comp->componentHandler)[5];
     endEdit(comp->componentHandler, id);
+    {
+        std::lock_guard<std::mutex> lock(comp->editMutex);
+        auto& open = comp->openGestures;
+        auto at = std::find(open.begin(), open.end(), id);
+        if (at != open.end()) open.erase(at);
+    }
     comp->flushPendingRestart();
+}
+
+static int32_t do_request_resize(MooseComponent* comp, uint32_t w, uint32_t h);
+
+void MooseComponent::drainEdits() {
+    std::unique_lock<std::mutex> lock(editMutex);
+    drainEditsLocked(lock);
+}
+
+// A transition drains wherever it runs, until empty. Any other drain stops
+// once this thread may no longer deliver: a frame bound while a fallback
+// drain had the lock released, and the UI thread now owns what is left.
+void MooseComponent::drainEditsLocked(std::unique_lock<std::mutex>& lock, bool transition) {
+    if (drainingEdits) return;
+    drainingEdits = true;
+    size_t left = transition ? kTransitionEdits : kDrainEdits;
+    while (left > 0 && !pendingEdits.empty() && (transition || mayDeliverLocked())) {
+        // Take at most `left` from the front; the rest keeps its place,
+        // ahead of anything newer, with no work per edit left behind.
+        const size_t take = std::min(left, pendingEdits.size());
+        std::vector<EditOp> ops(pendingEdits.begin(), pendingEdits.begin() + take);
+        pendingEdits.erase(pendingEdits.begin(), pendingEdits.begin() + take);
+        left -= take;
+        lock.unlock();
+        for (const EditOp& op : ops) {
+            switch (op.kind) {
+                case EditOp::Begin: do_begin_edit(this, op.id); break;
+                case EditOp::Perform: do_perform_edit(this, op.id, op.value); break;
+                case EditOp::End: do_end_edit(this, op.id); break;
+                case EditOp::Resize: do_request_resize(this, op.w, op.h); break;
+            }
+        }
+        lock.lock();
+    }
+    drainingEdits = false;
+    if (!pendingEdits.empty()) wakeEditsLocked();
+}
+
+// End every gesture still open on componentHandler, on this (delivering)
+// thread, and return their ids. Called with editMutex held and no drain
+// running; the calls are made unlocked, so workers keep queueing.
+std::vector<uint32> MooseComponent::closeOpenGesturesLocked(std::unique_lock<std::mutex>& lock) {
+    std::vector<uint32> open;
+    open.swap(openGestures);
+    void* handler = componentHandler;
+    if (!handler || open.empty()) return open;
+    drainingEdits = true; // late calls queue; no one else delivers meanwhile
+    lock.unlock();
+    auto endEdit = (tresult (*)(void*, uint32))(*(void***)handler)[5];
+    for (uint32 id : open) endEdit(handler, id);
+    lock.lock();
+    drainingEdits = false;
+    return open;
+}
+
+// Preserve FIFO when a bounded synchronous drain leaves work for a later
+// wake. Check and append under the same lock used by worker submissions.
+bool MooseComponent::queueBehindRemainingEdits(EditOp op) {
+    std::unique_lock<std::mutex> lock(editMutex);
+    if (editsClosed) return true;
+    // Re-route under the lock: a frame may have bound since tryQueueEdit.
+    if (mayDeliverLocked()) drainEditsLocked(lock);
+    if (editsClosed) return true;
+    if (pendingEdits.empty() && mayDeliverLocked()) return false;
+    pendingEdits.push_back(op);
+    wakeEditsLocked();
+    return true;
+}
+
+// Each call is made now on the host UI thread (after anything queued
+// before it), or queued for that thread when it comes from another one.
+void moose_vst3_begin_edit(void* ctx, uint32_t id) {
+    PinnedComponent pin(ctx);
+    auto* comp = pin.comp;
+    if (!comp) return;
+    if (comp->tryQueueEdit({EditOp::Begin, id, 0, 0, 0})) return;
+    if (comp->queueBehindRemainingEdits({EditOp::Begin, id, 0, 0, 0})) return;
+    do_begin_edit(comp, id);
+}
+
+void moose_vst3_perform_edit(void* ctx, uint32_t id, double normalized) {
+    PinnedComponent pin(ctx);
+    auto* comp = pin.comp;
+    if (!comp) return;
+    if (comp->tryQueueEdit({EditOp::Perform, id, normalized, 0, 0})) return;
+    if (comp->queueBehindRemainingEdits({EditOp::Perform, id, normalized, 0, 0})) return;
+    do_perform_edit(comp, id, normalized);
+}
+
+void moose_vst3_end_edit(void* ctx, uint32_t id) {
+    PinnedComponent pin(ctx);
+    auto* comp = pin.comp;
+    if (!comp) return;
+    if (comp->tryQueueEdit({EditOp::End, id, 0, 0, 0})) return;
+    if (comp->queueBehindRemainingEdits({EditOp::End, id, 0, 0, 0})) return;
+    do_end_edit(comp, id);
 }
 
 // Plugin -> host restart request. The audio thread calls this to flag a
@@ -3130,7 +3576,10 @@ void moose_vst3_mark_restart(void* ctx, int32_t flags) {
 // Resolves the component from its stable ctx key so a torn-down instance
 // is a safe no-op, then drains any pending restartComponent.
 static void moose_vst3_restart_source_event(void* key) {
-    if (MooseComponent* comp = ctx_lookup(key)) comp->flushPendingRestart();
+    if (MooseComponent* comp = ctx_lookup(key)) {
+        comp->flushPendingRestart();
+        comp->drainEdits();
+    }
 }
 #endif
 
@@ -3148,9 +3597,19 @@ static void moose_vst3_restart_source_event(void* key) {
 // magic `[3]` hidden in vtable arithmetic.
 static constexpr int32_t kPlugFrameResizeViewIndex = 3;
 
+// Off the UI thread the request is queued and reported as made: the
+// host's IPlugView::onSize is what commits a size, either way.
 int32_t moose_vst3_request_resize(void* ctx, uint32_t w, uint32_t h) {
-    auto* comp = ctx_lookup(ctx);
-    if (!comp || !comp->plugView) return 0;
+    PinnedComponent pin(ctx);
+    auto* comp = pin.comp;
+    if (!comp) return 0;
+    if (comp->tryQueueEdit({EditOp::Resize, 0, 0, w, h})) return 1;
+    if (comp->queueBehindRemainingEdits({EditOp::Resize, 0, 0, w, h})) return 1;
+    return do_request_resize(comp, w, h);
+}
+
+static int32_t do_request_resize(MooseComponent* comp, uint32_t w, uint32_t h) {
+    if (!comp->plugView) return 0;
     auto* pv = comp->plugView;
     if (!pv->frame) return 0;
     ViewRect rect;

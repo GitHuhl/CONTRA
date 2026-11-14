@@ -3,6 +3,8 @@ use mui_weld::analytic::{AnalyticWeld, PARAM_BYTES, dirty_ranges};
 use mui_weld::boundary::BOUNDARY_BYTES;
 use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 
+use super::gate;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub max_surfaces: usize,
@@ -28,7 +30,7 @@ pub struct EffectStats {
     pub effect_draws: u64,
     pub effect_pixels: u64,
     pub encoded_scenes: u64,
-    /// Vello render passes recorded: 0 on a frame that left the target as
+    /// Quad render passes recorded: 0 on a frame that left the target as
     /// the previous one did.
     pub renders: u64,
     /// The pixels those renders drew of the frame: all of it, or the box
@@ -148,30 +150,32 @@ impl WeldTextures {
             label: Some("MUI analytic weld"),
             source: wgpu::ShaderSource::Wgsl(super::WELD_SHADER.into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("MUI analytic weld"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_hybrid"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
+        let pipeline = gate(device, || {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("MUI analytic weld"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_hybrid"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
         });
         if let Some(e) = error_scope.pop().await {
             return Err(Error::Device(e.to_string()));
@@ -190,6 +194,29 @@ impl WeldTextures {
             in_frame: false,
         })
     }
+    /// New per-window slots over the same immutable material pipeline.
+    pub(crate) fn for_window(&self, budget: Budget) -> Result<Self, Error> {
+        if budget.max_surfaces == 0
+            || budget.max_texture_bytes == 0
+            || budget.max_surface_pixels == 0
+        {
+            return Err(Error::Budget("zero limit"));
+        }
+        Ok(Self {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            pipeline: self.pipeline.clone(),
+            layout: self.layout.clone(),
+            slots: BTreeMap::new(),
+            budget,
+            epoch: 0,
+            next_id: 1,
+            mapping_revision: 0,
+            peak: 0,
+            in_frame: false,
+        })
+    }
+
     pub fn mapping_revision(&self) -> u64 {
         self.mapping_revision
     }
@@ -316,6 +343,19 @@ impl WeldTextures {
             self.mapping_revision = self.mapping_revision.wrapping_add(1);
         }
     }
+    /// Whether the committed texture already contains this exact material.
+    /// This check performs no uploads, allocations or encoder creation.
+    pub(crate) fn is_current(&self, key: &str, material: &AnalyticWeld) -> bool {
+        self.slots.get(key).is_some_and(|slot| {
+            slot.used == material.pixels()
+                && slot.state.rendered.as_ref() == Some(&material.uniform_bytes())
+                && slot.boundary_rendered.as_ref().is_some_and(|old| {
+                    Arc::ptr_eq(old, material.boundary_bytes())
+                        || old.as_ref() == material.boundary_bytes().as_ref()
+                })
+        })
+    }
+
     pub fn encode(
         &mut self,
         key: &str,

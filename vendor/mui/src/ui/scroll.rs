@@ -3,14 +3,31 @@ use super::*;
 use mui_scene::Id;
 
 impl Ui {
+    /// A validated tree can be walked without an allocated traversal stack.
+    /// Only call outside TREES borrows: payload destructors can re-enter Ui.
+    pub(super) fn retire_tree(mut root: El) {
+        fn recycle(node: &mut El) {
+            node.payload_mut().recycle_declaration_storage();
+            for child in node.children_mut() {
+                recycle(child);
+            }
+        }
+        recycle(&mut root);
+    }
+
     /// Rejected input can itself be too deep for Rust's recursive field drop.
     /// Detach children before dropping each parent, without cloning payloads.
-    pub(super) fn discard_tree(root: El) {
+    pub(super) fn discard_tree(mut root: El) {
+        if root.children().is_empty() {
+            root.payload_mut().recycle_declaration_storage();
+            return;
+        }
         let mut pending = vec![root];
         while let Some(mut node) = pending.pop() {
             for child in node.children_mut() {
                 pending.push(std::mem::replace(child, mui_scene::block(0.0, 0.0)));
             }
+            node.payload_mut().recycle_declaration_storage();
         }
     }
 
@@ -117,6 +134,7 @@ impl Ui {
     /// callers to scroll into content inserted during this build. This is useful
     /// for virtual lists, whose constructed rows must match the drawn offset.
     pub fn set_scroll(&mut self, id: impl Into<Id>, offset: [f64; 2]) -> bool {
+        self.retained_root = None;
         if !offset.iter().all(|v| v.is_finite()) {
             return false;
         }
@@ -153,6 +171,7 @@ impl Ui {
     /// selections of vanished fields drop, and the wheel lands. Returns
     /// whether an offset moved.
     pub(super) fn settle(&mut self, scene: &ResolvedScene, wheel: Vec2) -> bool {
+        self.retire_clicks(scene);
         let live = |id: &str| scene.surface(id).is_some_and(|s| !s.disabled);
         if self.interaction.held().is_some_and(|id| !live(id)) {
             self.cancel();
@@ -295,8 +314,11 @@ impl Ui {
             // or claimed it with `Ui::wheel`; nothing it sits in scrolls
             // under it.
             let claimed = || self.wheel_claims.iter().any(|c| c == s.key.as_str());
+            // It reads the delta in the next tree, so that frame is owed
+            // even when nothing else moves: else the notch shows only on
+            // whatever event comes next.
             if (s.captures_wheel || claimed()) && !s.disabled {
-                return false;
+                return true;
             }
             // `content` is the frame size for everything but a scroll node,
             // so an overflow here *is* the "is this scrollable" test.

@@ -1030,6 +1030,120 @@ fn a_matched_pin_takes_the_anchor_width() {
 }
 
 #[test]
+fn a_pin_uses_an_anchor_inside_another_pin_in_either_declaration_order() {
+    for picker_first in [false, true] {
+        let trigger = block(20., 20.).at(300., 20.).id("trigger");
+        let menu = col([block(30., 20.).id("swatch")])
+            .pad(10.)
+            .anchor(Align::Start, Align::Start)
+            .pin(Pin::to("trigger").area(Area::BottomEnd).gap(4.))
+            .id("menu");
+        let picker = block(60., 50.)
+            .pin(Pin::to("swatch").area(Area::Start).gap(8.))
+            .id("picker");
+        let floats = if picker_first {
+            vec![picker, menu]
+        } else {
+            vec![menu, picker]
+        };
+        let tree = stack(std::iter::once(trigger).chain(floats));
+        let l = resolve(&tree, Some(Size::new(500., 300.)), Limits::default()).unwrap();
+        let swatch = l.frame("swatch").unwrap();
+        let picker = l.frame("picker").unwrap();
+        assert_eq!(picker.right() + 8., swatch.x);
+        assert_eq!(picker.center().1, swatch.center().1);
+        assert_eq!((swatch.x, swatch.y), (280., 54.));
+    }
+}
+
+#[test]
+fn nested_pin_chains_settle_sizes_and_descendant_anchors_in_one_resolve() {
+    let trigger = block(90., 20.).at(100., 10.).id("trigger");
+    let last = block(25., 15.)
+        .pin(Pin::to("inner").area(Area::End))
+        .id("last");
+    let second = col([block(10., 10.).id("inner")])
+        .pad(5.)
+        .anchor(Align::Start, Align::Start)
+        .pin(Pin::to("menu").area(Area::End).match_width())
+        .id("second");
+    let menu = block(20., 30.)
+        .pin(Pin::to("trigger").area(Area::BottomStart).match_width())
+        .id("menu");
+    let l = resolve(
+        &stack([last, second, menu, trigger]),
+        Some(Size::new(500., 300.)),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(l.frame("menu").unwrap().size.width, 90.);
+    assert_eq!(l.frame("second").unwrap().size.width, 90.);
+    assert_eq!(
+        l.frame("last").unwrap().x,
+        l.frame("inner").unwrap().right()
+    );
+    assert_eq!(
+        l.frame("last").unwrap().center().1,
+        l.frame("inner").unwrap().center().1
+    );
+}
+
+#[test]
+fn cyclic_pin_anchors_are_rejected() {
+    let tree = stack([
+        block(20., 20.).pin(Pin::to("b")).id("a"),
+        block(20., 20.).pin(Pin::to("a")).id("b"),
+    ]);
+    assert_eq!(
+        resolve(&tree, Some(Size::new(200., 200.)), Limits::default()),
+        Err(Error::InvalidValue)
+    );
+}
+
+#[test]
+fn a_pin_nested_in_a_pinned_container_follows_its_sized_parent() {
+    let menu = col([
+        block(20., 20.).id("swatch"),
+        block(30., 10.)
+            .pin(Pin::to("swatch").area(Area::End))
+            .id("picker"),
+    ])
+    .pad(8.)
+    .anchor(Align::Start, Align::Start)
+    .pin(Pin::to("trigger").area(Area::BottomStart).match_width())
+    .id("menu");
+    let trigger = block(90., 20.).at(150., 20.).id("trigger");
+    let l = resolve(
+        &stack([menu, trigger]),
+        Some(Size::new(500., 300.)),
+        Limits::default(),
+    )
+    .unwrap();
+    let swatch = l.frame("swatch").unwrap();
+    let picker = l.frame("picker").unwrap();
+    assert_eq!(picker.x, swatch.right());
+    assert_eq!(picker.center().1, swatch.center().1);
+    assert_eq!(l.frame("menu").unwrap().size.width, 90.);
+}
+
+#[test]
+fn pins_in_a_hidden_fits_branch_remain_hidden_and_do_not_form_dependencies() {
+    let hidden = row([
+        block(200., 20.),
+        block(20., 20.).pin(Pin::to("b")).id("a"),
+        block(20., 20.).pin(Pin::to("a")).id("b"),
+    ]);
+    let l = resolve(
+        &fits([hidden, block(10., 10.)]),
+        Some(Size::new(100., 100.)),
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(l.frame("a").unwrap().size, Size::ZERO);
+    assert_eq!(l.frame("b").unwrap().size, Size::ZERO);
+}
+
+#[test]
 fn a_sticky_header_holds_the_viewport_edge_until_its_section_ends() {
     let section = |k: &str| {
         col([
@@ -1490,4 +1604,145 @@ fn equal_intrinsic_vertical_share_still_settles_percentage_grid_height() {
         .unwrap();
         assert_eq!(cached, fresh);
     }
+}
+
+#[test]
+fn empty_wrapping_rows_keep_zero_intrinsic_geometry_under_available_room() {
+    let empty = || row([]).wrap().gap(8.).line_gap(6.).id("empty");
+    for offered in [None, Some(Size::ZERO), Some(Size::new(80., 20.))] {
+        let layout = resolve(&empty(), offered, Limits::default()).unwrap();
+        assert_eq!(layout.size, offered.unwrap_or(Size::ZERO));
+        assert_eq!(layout.min_size(), Size::ZERO);
+    }
+    // The row has room for wrapping, but no definite main offer. Its one
+    // empty line must not invent an inter-item gap or move either sibling.
+    let tree = col([
+        block(80., 16.).id("before"),
+        empty(),
+        block(80., 16.).id("after"),
+    ])
+    .align(Align::Start)
+    .gap(4.)
+    .w(120.);
+    let fresh = resolve(&tree, None, Limits::default()).unwrap();
+    assert_eq!(fresh.size, Size::new(120., 40.));
+    assert_eq!(fresh.frame("empty").unwrap().size, Size::ZERO);
+    assert_eq!(fresh.frame("empty").unwrap().y, 20.);
+    assert_eq!(fresh.frame("after").unwrap().y, 24.);
+    let mut cache = LayoutCache::default();
+    for _ in 0..3 {
+        let cached = resolve_cached_with(
+            &tree,
+            None,
+            Limits::default(),
+            SpacingScale::DEFAULT,
+            &mut cache,
+            |_, _| {},
+            |_, _| Size::ZERO,
+        )
+        .unwrap();
+        assert_eq!(cached, fresh);
+    }
+    let nonempty = col([row([block(20., 10.).id("a"), block(20., 10.).id("b")])
+        .wrap()
+        .gap(8.)
+        .id("line")])
+    .align(Align::Start)
+    .w(80.);
+    let layout = resolve(&nonempty, None, Limits::default()).unwrap();
+    assert_eq!(layout.frame("line").unwrap().size, Size::new(48., 10.));
+    assert_eq!(layout.frame("b").unwrap().x, 28.);
+}
+
+#[test]
+fn empty_wrapping_rows_preserve_nested_grid_and_hidden_candidate_geometry() {
+    let empty = || row([]).wrap().gap(8.).id("empty");
+    let grid = grid(
+        2,
+        [
+            col([empty(), block(20., 16.).id("item")])
+                .align(Align::Start)
+                .pad(4.)
+                .id("panel"),
+            block(30., 20.).id("other"),
+        ],
+    )
+    .gap(6.)
+    .w(100.);
+    let fresh = resolve(&grid, None, Limits::default()).unwrap();
+    assert_eq!(fresh.size, Size::new(100., 24.));
+    assert_eq!(fresh.frame("empty").unwrap().size, Size::ZERO);
+    assert_eq!(fresh.frame("item").unwrap().y, 4.);
+    assert_eq!(fresh.min_size_of("empty"), Some(Size::ZERO));
+
+    let wide = col([block(200., 20.).id("wide-child"), empty()])
+        .align(Align::Start)
+        .id("wide");
+    let wide_oracle = resolve(&wide, None, Limits::default()).unwrap();
+    assert_eq!(wide_oracle.size, Size::new(200., 20.));
+    let choice = fits([wide, block(40., 12.).id("thin")]).size(80., 40.);
+    let hidden = resolve(&choice, None, Limits::default()).unwrap();
+    for id in ["wide", "wide-child", "empty"] {
+        assert_eq!(hidden.frame(id).unwrap().size, Size::ZERO);
+    }
+    assert_eq!(hidden.frame("thin").unwrap().size, Size::new(40., 12.));
+    assert_eq!(hidden.min_size_of("wide"), Some(wide_oracle.min_size()));
+
+    for (tree, oracle) in [(&grid, &fresh), (&choice, &hidden)] {
+        let mut cache = LayoutCache::default();
+        for _ in 0..3 {
+            let cached = resolve_cached_with(
+                tree,
+                None,
+                Limits::default(),
+                SpacingScale::DEFAULT,
+                &mut cache,
+                |_, _| {},
+                |_, _| Size::ZERO,
+            )
+            .unwrap();
+            assert_eq!(&cached, oracle);
+        }
+    }
+}
+
+#[test]
+fn empty_wrapping_rows_still_validate_authored_values_and_tree_budgets() {
+    let tree = col([row([]).wrap().gap(8.)]).align(Align::Start).w(80.);
+    let limits = Limits {
+        nodes: 2,
+        depth: 1,
+        extent: 100.,
+    };
+    assert_eq!(resolve(&tree, None, limits).unwrap().all().len(), 2);
+    for limits in [Limits { nodes: 1, ..limits }, Limits { depth: 0, ..limits }] {
+        assert_eq!(resolve(&tree, None, limits), Err(Error::BudgetExceeded));
+    }
+    assert_eq!(
+        resolve(
+            &tree,
+            None,
+            Limits {
+                extent: 50.,
+                ..limits
+            }
+        ),
+        Err(Error::InvalidValue)
+    );
+    for gap in [f64::NAN, f64::INFINITY, -1.] {
+        let invalid = col([row([]).wrap().gap(gap)]).w(80.);
+        assert_eq!(resolve(&invalid, None, limits), Err(Error::InvalidValue));
+    }
+}
+
+#[test]
+fn a_pinned_float_in_a_short_row_keeps_its_own_height() {
+    // A menu pinned under a 24 px field, declared inside the field's row.
+    let menu = col([block(80., 30.), block(80., 30.), block(80., 30.)])
+        .pin(Pin::to("f").area(Area::BottomStart))
+        .id("menu");
+    let tree = col([row([block(60., 24.).id("f"), menu]).id("row")]);
+    let l = resolve(&tree, Some(Size::new(300., 300.)), Limits::default()).unwrap();
+    assert_eq!(l.frame("row").unwrap().size.height, 24.);
+    assert_eq!(l.frame("menu").unwrap().size.height, 90.);
 }

@@ -13,11 +13,9 @@ libc = "0.2"
 hound = "3"
 contra-engine = { path = "../../crates/engine/engine", features = ["trace"] }
 contra-ksp = { path = "../../crates/script/ksp" }
-contra-lua = { path = "../../crates/script/lua" }
 contra-ui-model = { path = "../../crates/model/ui-model" }
 contra-law = { path = "../../crates/base/law" }
 contra-host = { path = "../../crates/app/host" }
-contra-format-uvi = { path = "../../crates/format/uvi" }
 contra-stream = { path = "../../crates/engine/stream" }
 serde_json = "1"
 rustfft = "6"

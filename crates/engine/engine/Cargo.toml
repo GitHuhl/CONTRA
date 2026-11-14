@@ -12,17 +12,17 @@ workspace = true
 trace = ["contra-voice/trace", "dep:contra-trace"]
 
 [dependencies]
-contra-events = { path = "../../model/events" }
-contra-stream = { path = "../stream" }
-contra-time = { path = "../../base/time" }
-contra-vm = { path = "../vm" }
-contra-behaviour = { path = "../behaviour" }
-contra-ledger = { path = "../ledger" }
-contra-racks = { path = "../racks" }
-contra-plan = { path = "../plan" }
-contra-script-ui = { path = "../script-ui" }
-contra-ir = { path = "../../model/ir" }
-contra-voice = { path = "../voice" }
-contra-dsp = { path = "../../dsp/registry" }
-contra-effects = { path = "../effects" }
-contra-trace = { path = "../trace", optional = true }
+contra-events = {path = "../../model/events"}
+contra-stream = {path = "../stream"}
+contra-time = {path = "../../base/time"}
+contra-vm = {path = "../vm"}
+contra-behaviour = {path = "../behaviour"}
+contra-ledger = {path = "../ledger"}
+contra-racks = {path = "../racks"}
+contra-plan = {path = "../plan"}
+contra-script-ui = {path = "../script-ui"}
+contra-ir = {path = "../../model/ir"}
+contra-voice = {path = "../voice"}
+contra-dsp = {path = "../../dsp/registry"}
+contra-effects = {path = "../effects"}
+contra-trace = {path = "../trace", optional = true}
