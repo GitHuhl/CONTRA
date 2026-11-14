@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use contra_stream::{
-    BlobKey, Encoding, MAX_CHANNELS, MemSource, PAGE_FRAMES, SampleFmt, Source, Store, StoreConfig,
+    BlobKey, Encoding, LoadRequest, MAX_CHANNELS, MemSource, PAGE_FRAMES, SampleFmt, Source, Store,
+    StoreConfig,
 };
 
 const FMT: SampleFmt = SampleFmt {
@@ -370,4 +371,105 @@ fn the_samples_of_one_file_open_it_once() {
         assert!(out[1][0] > 0.0);
     }
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn load_progress_counts_pinned_bytes_for_new_and_reused_pages() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let progress = Arc::new(contra_protocol::LoadProgress::default());
+    store.set_progress(Arc::clone(&progress));
+    let (key, source) = ramp(2 * PAGE_FRAMES);
+    progress.begin();
+    progress.stage(contra_protocol::LoadStage::Samples);
+    let first = store
+        .load(&key, source.clone(), 2 * PAGE_FRAMES, &[0..2 * PAGE_FRAMES])
+        .unwrap();
+    let loaded = progress.snapshot();
+    assert_eq!(loaded.bytes, store.pinned_bytes());
+    assert_eq!(loaded.percent, 85);
+    progress.begin();
+    progress.stage(contra_protocol::LoadStage::Samples);
+    let second = store
+        .load(&key, source, 2 * PAGE_FRAMES, &[0..2 * PAGE_FRAMES])
+        .unwrap();
+    let reused = progress.snapshot();
+    assert_eq!(reused.bytes, loaded.bytes);
+    assert_eq!(reused.percent, 85);
+    drop((first, second));
+}
+
+#[test]
+fn a_deferred_head_is_silent_until_its_heads_load_then_reads_exactly() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let client = store.client();
+    let (key, source) = ramp(4 * PAGE_FRAMES);
+    store.defer_heads(true);
+    let sample = store
+        .load(&key, source, 4 * PAGE_FRAMES, &[0..PAGE_FRAMES])
+        .unwrap();
+    assert!(!sample.is_pinned(0));
+    let heads = store.take_heads().unwrap();
+    heads.load(2);
+    assert!(sample.is_pinned(0));
+    let mut out = vec![[0.0; 2]; 64];
+    assert_eq!(sample.read(&client, 10, &mut out).missing, 0);
+    assert_eq!(out[0][0], value(10));
+}
+
+#[test]
+fn load_many_now_reads_its_heads_even_when_the_store_defers_them() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let (key, source) = ramp(4 * PAGE_FRAMES);
+    store.defer_heads(true);
+    let request = LoadRequest {
+        key,
+        source,
+        frames: 4 * PAGE_FRAMES,
+        pin: vec![0..PAGE_FRAMES],
+    };
+    let sample = store.load_many_now(vec![request]).remove(0).unwrap();
+    assert!(sample.is_pinned(0));
+    assert!(store.take_heads().is_none());
+}
+
+#[test]
+fn heads_read_for_a_deferred_load_are_shared_with_the_next_load_of_the_blob() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let (key, source) = ramp(4 * PAGE_FRAMES);
+    store.defer_heads(true);
+    let first = store
+        .load(&key, source, 4 * PAGE_FRAMES, &[0..PAGE_FRAMES])
+        .unwrap();
+    assert_eq!(store.pinned_bytes(), 0);
+    store.take_heads().unwrap().load(2);
+    assert!(store.pinned_bytes() > 0);
+    // A second instance of the instrument: its head is the first's, nothing to read.
+    let (_, source) = ramp(4 * PAGE_FRAMES);
+    let second = store
+        .load(&key, source, 4 * PAGE_FRAMES, &[0..PAGE_FRAMES])
+        .unwrap();
+    assert!(second.is_pinned(0));
+    assert!(store.take_heads().is_none());
+    drop((first, second));
+}
+
+#[test]
+fn stores_that_share_pages_in_the_process_pin_one_copy_of_an_instrument() {
+    let (mut a, mut b) = (
+        Store::new(StoreConfig::DEFAULT).unwrap(),
+        Store::new(StoreConfig::DEFAULT).unwrap(),
+    );
+    a.share_pages_in_process();
+    b.share_pages_in_process();
+    let (key, source) = ramp(4 * PAGE_FRAMES);
+    let first = a
+        .load(&key, source, 4 * PAGE_FRAMES, &[0..PAGE_FRAMES])
+        .unwrap();
+    let (_, source) = ramp(4 * PAGE_FRAMES);
+    let second = b
+        .load(&key, source, 4 * PAGE_FRAMES, &[0..PAGE_FRAMES])
+        .unwrap();
+    assert!(second.is_pinned(0));
+    assert_eq!(b.client().stats().bytes_read, 0);
+    drop((first, second));
 }

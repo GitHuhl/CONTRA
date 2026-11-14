@@ -35,15 +35,7 @@ fn black(note: u8) -> bool {
     BLACK.get(usize::from(note % 12)).copied().unwrap_or(false)
 }
 
-/// `note`'s name with middle C as C3, as samplers name it.
-#[must_use]
-pub fn note_name(note: u8) -> String {
-    const NAMES: [&str; 12] = [
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-    ];
-    let name = NAMES.get(usize::from(note % 12)).copied().unwrap_or("?");
-    format!("{name}{}", i32::from(note / 12) - 2)
-}
+pub use contra_ui_view::note_name;
 
 /// Where each key of `range` sits in a keybed `w` wide: (note, x, width).
 fn layout(range: (u8, u8), w: f64) -> Vec<(u8, f64, f64)> {
@@ -119,12 +111,7 @@ pub fn keyboard(
     });
     let keys = keys.clone();
     let face = canvas(move |s| {
-        let rect = |x: f64, y: f64, w: f64, h: f64| {
-            Path::polyline(
-                [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].map(|(x, y)| Point::new(x, y)),
-                true,
-            )
-        };
+        let rect = |x: f64, y: f64, w: f64, h: f64| crate::kit::rect_path(x, y, x + w, y + h);
         let all = layout(keys.range, s.width);
         let held = |n: u8| keys.held.contains(&n);
         // A keyswitch takes its articulation's colour; a key a part plays

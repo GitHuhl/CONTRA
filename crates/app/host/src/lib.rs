@@ -5,11 +5,13 @@
 pub mod align;
 pub mod browser;
 pub mod instrument;
-pub mod perf_view;
+pub use contra_face::perf_view;
 pub mod persist;
+pub mod presets;
 pub mod rack;
+pub mod relink;
 pub mod script;
 pub mod sound;
 pub mod state;
-pub mod ui;
+pub use contra_face as ui;
 pub mod view;

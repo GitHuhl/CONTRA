@@ -16,73 +16,84 @@ const RACK: u16 = 0x3a;
 const BUS: u16 = 0x45;
 
 /// Module names by chunk id (Kontakt's `BParFX*` classes).
-const MODULES: &[(u16, &str)] = &[
-    (0x10, "Delay (legacy)"),
-    (0x11, "Chorus (legacy)"),
-    (0x12, "Flanger (legacy)"),
-    (0x13, "Gainer"),
-    (0x14, "Phaser (legacy)"),
-    (0x15, "Reverb (legacy)"),
-    (0x16, "Convolution"),
-    (0x17, "Send Levels"),
-    (0x18, "Filter"),
-    (0x19, "Compressor"),
-    (0x1a, "Inverter"),
-    (0x1b, "DYX"),
-    (0x1c, "Limiter"),
-    (0x1d, "Saturation"),
-    (0x1e, "Distortion"),
-    (0x1f, "Stereo Modeller"),
-    (0x20, "Lo-Fi"),
-    (0x21, "Skreamer"),
-    (0x22, "Rotator"),
-    (0x23, "Twang"),
-    (0x24, "Cabinet"),
-    (0x42, "Tape Saturator"),
-    (0x43, "Transient Master"),
-    (0x44, "Solid G-EQ"),
-    (0x46, "Solid Bus Comp"),
-    (0x4c, "Feedback Compressor"),
-    (0x4d, "Jump"),
-    (0x52, "Van51"),
-    (0x53, "AC Box"),
-    (0x54, "Hot Solo"),
-    (0x55, "Cat"),
-    (0x56, "DStortion"),
-    (0x57, "Plate Reverb"),
-    (0x58, "Cry Wah"),
-    (0x59, "Reverb"),
-    (0x5a, "Replika"),
-    (0x5b, "Phasis"),
-    (0x5c, "Flair"),
-    (0x5d, "Choral"),
-    (0x5e, "Core Cell"),
-    (0x5f, "Hilbert Limiter"),
-    (0x60, "Supercharger"),
-    (0x61, "Bass Pro"),
-    (0x63, "Psyche Delay"),
-    (0x64, "Ring Modulator"),
-    (0x65, "Raum"),
-    (0x66, "Bite"),
-    (0x68, "Freak"),
-    (0x69, "Vibrato Chorus"),
-    (0x6a, "Wow / Flutter"),
-    (0x6b, "Twin Delay"),
-    (0x70, "Stereo Tune"),
-    (0x71, "Beat Masher"),
-    (0x72, "Gater"),
-    (0x73, "Beat Slicer"),
-    (0x74, "Reverse Grain"),
-    (0x75, "Transpose Stretch"),
-    (0x78, "Skreamer Deluxe"),
-    (0x79, "Kolor"),
+/// Each saved module: its id, name and the `$EFFECT_TYPE_*` value a
+/// script reads for it (`get_engine_par($ENGINE_PAR_EFFECT_TYPE)`), −1
+/// where no constant names it. Values by name from the KSP constants;
+/// ANALOG STRINGS' Jump, legacy Delay and an empty slot read 31, 18 and 0
+/// (Kontakt 8.13.1 oracle, scratch/laneB/disp).
+const MODULES: &[(u16, &str, i32)] = &[
+    (0x10, "Delay (legacy)", 18),
+    (0x11, "Chorus (legacy)", 16),
+    (0x12, "Flanger (legacy)", 15),
+    (0x13, "Gainer", 20),
+    (0x14, "Phaser (legacy)", 14),
+    (0x15, "Reverb (legacy)", 17),
+    (0x16, "Convolution", 19),
+    (0x17, "Send Levels", 11),
+    (0x18, "Filter", 7),
+    (0x19, "Compressor", 2),
+    (0x1a, "Inverter", 4),
+    (0x1b, "DYX", -1),
+    (0x1c, "Limiter", 3),
+    (0x1d, "Saturation", 6),
+    (0x1e, "Distortion", 10),
+    (0x1f, "Stereo Modeller", 9),
+    (0x20, "Lo-Fi", 8),
+    (0x21, "Skreamer", 21),
+    (0x22, "Rotator", 22),
+    (0x23, "Twang", 23),
+    (0x24, "Cabinet", 24),
+    (0x42, "Tape Saturator", 26),
+    (0x43, "Transient Master", 27),
+    (0x44, "Solid G-EQ", 28),
+    (0x46, "Solid Bus Comp", 29),
+    (0x4c, "Feedback Compressor", 30),
+    (0x4d, "Jump", 31),
+    (0x52, "Van51", 32),
+    (0x53, "AC Box", 33),
+    (0x54, "Hot Solo", 34),
+    (0x55, "Cat", 35),
+    (0x56, "DStortion", 36),
+    (0x57, "Plate Reverb", 38),
+    (0x58, "Cry Wah", 37),
+    (0x59, "Reverb", 39),
+    (0x5a, "Replika", 40),
+    (0x5b, "Phasis", 41),
+    (0x5c, "Flair", 42),
+    (0x5d, "Choral", 43),
+    (0x5e, "Core Cell", -1),
+    (0x5f, "Hilbert Limiter", -1),
+    (0x60, "Supercharger", 46),
+    (0x61, "Bass Pro", 47),
+    (0x63, "Psyche Delay", 49),
+    (0x64, "Ring Modulator", 50),
+    (0x65, "Raum", 51),
+    (0x66, "Bite", 52),
+    (0x68, "Freak", 54),
+    (0x69, "Vibrato Chorus", 55),
+    (0x6a, "Wow / Flutter", 56),
+    (0x6b, "Twin Delay", 57),
+    (0x70, "Stereo Tune", 61),
+    (0x71, "Beat Masher", 62),
+    (0x72, "Gater", 63),
+    (0x73, "Beat Slicer", 64),
+    (0x74, "Reverse Grain", 65),
+    (0x75, "Transpose Stretch", 66),
+    (0x78, "Skreamer Deluxe", 69),
+    (0x79, "Kolor", 70),
 ];
 
 fn name(id: u16) -> String {
     MODULES
         .iter()
-        .find(|(m, _)| *m == id)
-        .map_or_else(|| format!("unknown {id:#04x}"), |(_, n)| (*n).into())
+        .find(|(m, ..)| *m == id)
+        .map_or_else(|| format!("unknown {id:#04x}"), |(_, n, _)| (*n).into())
+}
+
+/// The effect type a script reads for saved module `id`.
+fn effect_type(id: u16) -> Option<i32> {
+    let (.., ty) = MODULES.iter().find(|(m, ..)| *m == id)?;
+    (*ty >= 0).then_some(*ty)
 }
 
 /// A rack's slots as effects. Gainer, Inverter and Stereo Modeller carry
@@ -103,15 +114,16 @@ fn rack(
         .enumerate()
         .map(|(slot, chunk)| {
             let chunk = chunk.as_ref()?;
-            let mut knobs = Vec::new();
+            let (mut knobs, mut model) = (Vec::new(), None);
             let effect = slot_effect(
                 chunk,
                 impulses,
                 &format!("{at} slot {slot}"),
                 notes,
-                &mut knobs,
+                (&mut knobs, &mut model),
             );
             if let (Some((rack_at, laws)), Ok(slot)) = (laws.as_mut(), u8::try_from(slot)) {
+                laws.models.extend(model.map(|m| (*rack_at, slot, m)));
                 laws.laws
                     .extend(knobs.into_iter().map(|(knob, field, law)| ir::SlotLaw {
                         at: *rack_at,
@@ -120,6 +132,9 @@ fn rack(
                         field,
                         law,
                     }));
+                if let Some(ty) = effect.as_ref().and_then(|(_, m, _)| effect_type(*m)) {
+                    laws.types.push((*rack_at, slot, ty));
+                }
                 if let Some((_, 0x18, kind)) = &effect {
                     laws.subtypes.push((*rack_at, slot, *kind));
                     let switches = crate::laws::switches(*kind);
@@ -222,7 +237,10 @@ fn slot_effect(
     impulses: &mut Impulses,
     at: &str,
     notes: &mut Notes,
-    knobs: &mut Vec<crate::script_knobs::SlotKnob>,
+    (knobs, model): (
+        &mut Vec<crate::script_knobs::SlotKnob>,
+        &mut Option<ir::KnobModel>,
+    ),
 ) -> Option<(ir::Effect, u16, i32)> {
     let fx = BParFX::try_from(chunk).ok()?;
     let params = fx.params().ok()?;
@@ -309,7 +327,7 @@ fn slot_effect(
                 .and_then(|v| v.try_into().ok())
                 .zip(byte(24))
                 .map(|(saved, link)| {
-                    *knobs = crate::script_knobs::bus_knobs(saved, link);
+                    *model = Some(crate::solid_knobs::bus_model(saved, link));
                     let (c, auto) = crate::laws::bus_compressor(saved, link);
                     contra_law::record(|| contra_law::Application {
                         id: contra_law::LawId("kontakt.bus_compressor.v1"),
@@ -324,6 +342,9 @@ fn slot_effect(
                 })
         }
         0x43 | 0x4c => {
+            if effect.id == 0x4c && object.version == 0x10 {
+                *model = crate::dynamics::feedback_model(&public);
+            }
             crate::dynamics::effect(effect.id, object.version, &public).map(|(kind, lost)| {
                 if let Some(feature) = lost {
                     let impact = if params.bypass {
@@ -337,7 +358,7 @@ fn slot_effect(
             })
         }
         0x17 => sends(&public),
-        0x44 => solid_eq(object.version, &public, at, notes, knobs),
+        0x44 => solid_eq(object.version, &public, at, notes, model),
         0x16 => impulses
             .convolution(object.version, &public, at, notes)
             .map(|impulse| ir::EffectKind::Convolution { impulse }),
@@ -374,7 +395,14 @@ fn slot_effect(
             *knobs = crate::replika::knobs(r);
             crate::replika::delay(r).map(ir::EffectKind::Delay)
         }),
-        id => crate::drive::effect(id, object.version, &public, at, notes),
+        id => {
+            match id {
+                0x21 => *model = crate::skreamer::model(&public),
+                0x42 => *model = crate::tape::model(&public),
+                _ => {}
+            }
+            crate::drive::effect(id, object.version, &public, at, notes)
+        }
     };
     // The legacy delay, chorus and flanger, Replika, the Gainer and Convolution mix
     // their slot's dry level back in; other modules' stored dry is unused
@@ -449,7 +477,7 @@ fn solid_eq(
     public: &[u8],
     at: &str,
     notes: &mut Notes,
-    knobs: &mut Vec<crate::script_knobs::SlotKnob>,
+    model: &mut Option<ir::KnobModel>,
 ) -> Option<ir::EffectKind> {
     let f = |n: usize| {
         let bytes = public.get(n..n + 4)?.try_into().ok()?;
@@ -468,11 +496,12 @@ fn solid_eq(
     let saved = [0, 4, 9, 13, 17, 21, 25, 29, 33, 37].map(f);
     let [lg, lh, mg, mh, mq, hg, hh, hq, fg, fh] = saved;
     let saved = [lg?, lh?, mg?, mh?, mq?, hg?, hh?, hq?, fg?, fh?];
+    let bells = [flag(8)?, flag(41)?];
     let shapes = [
-        bell(flag(8)?, ir::Shape::LowShelf),
-        bell(flag(41)?, ir::Shape::HighShelf),
+        bell(bells[0], ir::Shape::LowShelf),
+        bell(bells[1], ir::Shape::HighShelf),
     ];
-    *knobs = crate::solid_knobs::solid_knobs(saved, shapes);
+    *model = Some(crate::solid_knobs::solid_model(saved, bells));
     let [lg, lh, mg, mh, mq, hg, hh, hq, fg, fh] = saved;
     let [lf, hf] = shapes;
     let bands = crate::laws::solid_eq([lg, lh], lf, [mg, mh, mq], [hg, hh, hq], [fg, fh], hf);
@@ -567,8 +596,10 @@ fn sends(public: &[u8]) -> Option<ir::EffectKind> {
     Some(ir::EffectKind::Sends(levels))
 }
 
+/// Group `index`'s insert rack: `saved` (a snapshot's) or the group's own.
 pub(crate) fn group(
     group: &Group,
+    saved: Option<BParamArrayBParFX8>,
     index: usize,
     impulses: &mut Impulses,
     notes: &mut Notes,
@@ -577,7 +608,7 @@ pub(crate) fn group(
     let rack_at = u32::try_from(index)
         .ok()
         .map(|g| (ir::RackAt::Group(g), laws));
-    match group.insert_fx() {
+    match saved.map_or_else(|| group.insert_fx(), Ok) {
         Ok(array) => rack(
             &array,
             &format!("group {index} insert"),
@@ -593,6 +624,62 @@ pub(crate) fn group(
             );
             Vec::new()
         }
+    }
+}
+
+/// Puts `saved` racks (a snapshot's) in place of the program's own, kind
+/// by kind. Kontakt names a rack by its place among its id's chunks
+/// ([`program`]: the first `RACK` the insert rack, then send and main; the
+/// n-th `BUS` bus n), so the n-th saved one replaces the n-th own one; own
+/// ones the snapshot lacks stay, saved ones the program lacks are added
+/// after the last, where that place is theirs.
+pub(crate) fn replace_racks(children: &mut Vec<Chunk>, saved: Vec<Chunk>) {
+    let (racks, buses): (Vec<Chunk>, Vec<Chunk>) = saved.into_iter().partition(|c| c.id == RACK);
+    for (id, saved) in [(RACK, racks), (BUS, buses)] {
+        let mut saved = saved.into_iter();
+        for own in children.iter_mut().filter(|c| c.id == id) {
+            match saved.next() {
+                Some(chunk) => *own = chunk,
+                None => break,
+            }
+        }
+        children.extend(saved);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshots_racks_replace_the_programs_by_kind_and_add_what_it_lacks() {
+        let chunk = |id, tag: u8| Chunk {
+            id,
+            data: vec![tag],
+        };
+        let tags = |c: &[Chunk], id| -> Vec<u8> {
+            c.iter()
+                .filter(|c| c.id == id)
+                .filter_map(|c| c.data.first().copied())
+                .collect()
+        };
+        // The program has an insert rack and one bus; the snapshot an
+        // insert, a send and two buses.
+        let mut children = vec![chunk(1, 0), chunk(RACK, 10), chunk(BUS, 20)];
+        let saved = vec![
+            chunk(RACK, 11),
+            chunk(RACK, 12),
+            chunk(BUS, 21),
+            chunk(BUS, 22),
+        ];
+        replace_racks(&mut children, saved);
+        assert_eq!(tags(&children, RACK), [11, 12]);
+        assert_eq!(tags(&children, BUS), [21, 22]);
+        // A snapshot with fewer racks keeps the program's others.
+        let mut children = vec![chunk(RACK, 10), chunk(RACK, 13), chunk(BUS, 20)];
+        replace_racks(&mut children, vec![chunk(RACK, 11)]);
+        assert_eq!(tags(&children, RACK), [11, 13]);
+        assert_eq!(tags(&children, BUS), [20]);
     }
 }
 
@@ -615,6 +702,10 @@ pub(crate) struct Slots {
     pub shape_slots: Vec<(ir::RackAt, u8)>,
     /// Filter slots and the subtype each was saved with.
     pub subtypes: Vec<(ir::RackAt, u8, i32)>,
+    /// Each saved slot's effect type, as a script reads it.
+    pub types: Vec<(ir::RackAt, u8, i32)>,
+    /// Slots whose knobs interact, rebuilt together.
+    pub models: Vec<(ir::RackAt, u8, ir::KnobModel)>,
 }
 
 pub(crate) fn program(program: &Program, impulses: &mut Impulses, notes: &mut Notes) -> Racks {

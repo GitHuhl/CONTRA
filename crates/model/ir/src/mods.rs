@@ -1,6 +1,6 @@
 //! What a group modulation moves and by how much.
 
-use crate::{EffectParam, Source};
+use crate::EffectParam;
 
 /// What a [`crate::Mod`] does.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,7 +61,9 @@ pub enum ModKind {
     /// `source × depth` of the zone's [`Zone::start_mod`](crate::Zone::start_mod) frames added to
     /// where its voices start, read at note-on.
     SampleStart { source: Source, depth: f32 },
-    /// Scales the [`Group::envelope`](crate::Group::envelope) attack `t` at note-on by
+    /// Scales the attack `t` of the [`Group::envelope`](crate::Group::envelope)
+    /// (`envelope` none) or of the group's breakpoint envelope `envelope`
+    /// (its first segment) at note-on by
     /// `m = 1 − (1 − x)·|intensity|` (`x` read at note-on, `1 − x` for a
     /// negative intensity): `t·m` when `floor_ms` is 0, else as a knob linear
     /// in `ln(t + floor_ms)`, `floor_ms·((t + floor_ms)/floor_ms)^(m³) − floor_ms`.
@@ -69,8 +71,9 @@ pub enum ModKind {
         source: Source,
         intensity: f32,
         floor_ms: f32,
+        envelope: Option<u8>,
     },
-    /// As [`ModKind::Attack`], on the release time.
+    /// As [`ModKind::Attack`], on the amplitude envelope's release time.
     Release {
         source: Source,
         intensity: f32,
@@ -98,6 +101,11 @@ pub enum ModKind {
         depth: f32,
         range_hz: [f32; 2],
     },
+    /// Moves the rate of the group's tempo-synced LFO `lfo` along the
+    /// note-value ladder ([`NOTE_LADDER`]) by `source × depth × 29` places
+    /// (rounded, held on the ladder), `source` live: the phase integrates the
+    /// moving rate.
+    LfoDivision { source: Source, lfo: u8, depth: f32 },
     /// Scales every route of the group's timed source `of` (an LFO or an
     /// envelope) by `1 − (1 − x)·depth`, `x` the live `source`, a bipolar one
     /// as `(x + 1)/2`.
@@ -111,6 +119,13 @@ pub enum ModKind {
     LoopShift {
         source: Source,
         length: bool,
+        depth: f32,
+    },
+    /// Adds `source × depth` to the voice's wavetable `value` (0..=1), live;
+    /// the sum is held within 0..=1, not wrapped.
+    Wavetable {
+        source: Source,
+        value: crate::TableValue,
         depth: f32,
     },
     /// Scales cell `row` (a sample channel), `side` (0 left, 1 right) of
@@ -178,13 +193,45 @@ impl Factor {
 /// A source through a transfer table: `table` holds the outputs for evenly
 /// spaced inputs 0..=1, read with linear interpolation; an LFO enters as
 /// `(x + 1)/2`. Its source is never itself shaped.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// The output is used as is, in the domain the route that reads it consumes
+/// (a pitch or sample-start route reads -1..=1, a gain 0..=1): the engine
+/// converts no polarity, so a translator emits each table in its route's domain.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Transfer {
     pub source: Source,
     pub table: Vec<f32>,
+    /// Seconds of a one-pole after the table (0: none): the output reaches
+    /// `1 − e^−1` of a step in this long. Read for an LFO source, from the
+    /// LFO's own past, so it needs no state and follows the tempo.
+    pub smooth_s: f32,
 }
 
+/// Taps of [`Transfer::smoothed`] over five time constants.
+const SMOOTH_TAPS: usize = 20;
+
 impl Transfer {
+    /// The output smoothed by [`Self::smooth_s`]: `at(back)` is the table's
+    /// output `back` seconds ago, averaged under `e^(−back/τ)` (a one-pole's
+    /// impulse response) over five time constants.
+    pub fn smoothed(&self, mut at: impl FnMut(f32) -> Option<f32>) -> Option<f32> {
+        if self.smooth_s <= 0.0 {
+            return at(0.0);
+        }
+        let (mut sum, mut norm) = (0.0, 0.0);
+        for j in 0..SMOOTH_TAPS {
+            let back = 5.0 * self.smooth_s * j as f32 / (SMOOTH_TAPS - 1) as f32;
+            let end = if j == 0 || j == SMOOTH_TAPS - 1 {
+                0.5
+            } else {
+                1.0
+            };
+            let w = end * (-back / self.smooth_s).exp();
+            sum += w * at(back)?;
+            norm += w;
+        }
+        Some(sum / norm)
+    }
     /// The table's output for `x`, clamped to 0..=1; an empty table passes
     /// `x` through.
     #[must_use]
@@ -327,4 +374,59 @@ pub enum Attractor {
     Lorenz { sigma: f32, rho: f32, beta: f32 },
     /// `x' = −y − z`, `y' = x + a·y`, `z' = b + z(x − c)`.
     Rossler { a: f32, b: f32, c: f32 },
+}
+
+/// A per-note modulation source, 0..=1 unless noted.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Velocity,
+    Controller(u8),
+    /// Controller `cc`, reading `start` (0..=127) until its first message
+    /// on the channel arrives.
+    ControllerFrom {
+        cc: u8,
+        start: u8,
+    },
+    /// The channel's pitch bend, −1..=1.
+    PitchBend,
+    /// The note's pressure: its own (a per-note expression, or polyphonic
+    /// aftertouch on its key) once it has one, else its channel's (an MPE
+    /// member channel's is its one note's).
+    Pressure,
+    /// The note's key over 127.
+    Key,
+    /// The group's [`Group::envelopes`](crate::Group::envelopes) entry.
+    Envelope(u8),
+    /// The group's [`Group::shapers`](crate::Group::shapers) entry: its source through its table.
+    Shaped(u8),
+    /// The group's [`Group::lfos`](crate::Group::lfos) entry, −1..=1.
+    Lfo(u8),
+    /// The group's [`Group::blends`](crate::Group::blends) entry.
+    Blend(u8),
+    /// Always 1.
+    #[default]
+    Constant,
+    /// The value a script sent this note for "from script" modulator `id`,
+    /// −1..=1; 0 until sent.
+    Script(u16),
+    /// 1 at note-on, falling linearly to 0 after `span_ms` held; frozen at
+    /// key-up, so a release sample is quieter the longer its key was held.
+    HeldTime {
+        span_ms: u32,
+    },
+    /// A value drawn once per note and held: 0..=1, or −1..=1 when `bipolar`.
+    Random {
+        bipolar: bool,
+    },
+}
+
+impl Source {
+    /// The controller it reads, if any.
+    #[must_use]
+    pub fn controller(self) -> Option<u8> {
+        match self {
+            Self::Controller(cc) | Self::ControllerFrom { cc, .. } => Some(cc),
+            _ => None,
+        }
+    }
 }

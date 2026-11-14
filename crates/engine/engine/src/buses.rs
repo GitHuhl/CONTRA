@@ -20,9 +20,20 @@ pub(crate) struct BusState {
     pub(crate) sends: Box<[ir::BusSend]>,
     pub(crate) to_main: bool,
     pub(crate) mix: Box<[[f32; 2]]>,
+    /// A send's scale at each frame of the span, where an oscillator moves it.
+    pub(crate) scales: Box<[f32]>,
     /// Its output's left and right peaks since they were last taken.
     pub(crate) peak: [f32; 2],
+    /// The gain and pan its faders last aimed at, and the frames they have
+    /// held since; past `settle` frames both faders rest.
+    aim: [f32; 2],
+    still: u32,
+    settle: u32,
 }
+
+/// Longer than either fader takes to land (the 3.7 ms volume one-pole
+/// reaches its fixed point, the balance moves at most 1 per 50 ms).
+const SETTLE_S: f32 = 0.25;
 
 impl BusState {
     pub(crate) fn new(b: &plan::Bus, rate: u32) -> Self {
@@ -35,15 +46,38 @@ impl BusState {
                 racks::Responses(&[], &[]),
                 &b.mods,
                 &b.blends,
-            ),
+            )
+            .with_lfos(&b.lfos),
             pan: b.pan,
             balance: contra_dsp::core::Fader::new(rate, 0.0, 50.0),
             fader: contra_dsp::core::Fader::new(rate, 3.7, 0.0),
             sends: b.sends.clone().into(),
             to_main: b.to_main,
             mix: vec![[0.0; 2]; MAX_SPAN as usize].into(),
+            scales: vec![1.0; MAX_SPAN as usize].into(),
             peak: [0.0; 2],
+            aim: [b.gain, b.pan],
+            still: 0,
+            settle: (SETTLE_S * rate as f32) as u32,
         }
+    }
+
+    /// Whether this span of `len` frames leaves the bus as it is: its mix
+    /// (after the rack) is silent and its faders rest, so the fader, sends,
+    /// balance and meter would change neither a sample nor their state.
+    /// The meter here is only the peak since the last take (a silent span
+    /// leaves it as it is); its fall is the editor's, fed by those takes,
+    /// so an idle bus's meter keeps falling.
+    pub(crate) fn idle(&mut self, len: usize) -> bool {
+        let mix = self.mix.get(..len).unwrap_or_default();
+        let aim = [self.gain, self.pan];
+        if aim != self.aim {
+            (self.aim, self.still) = (aim, 0);
+        }
+        let resting = self.still >= self.settle;
+        let frames = u32::try_from(len).unwrap_or(u32::MAX);
+        self.still = self.still.saturating_add(frames);
+        resting && mix.iter().all(|m| *m == [0.0; 2])
     }
 }
 
@@ -79,5 +113,29 @@ impl Engine {
             });
             self.groups = groups;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bus_idles_only_on_silence_once_its_faders_rest() {
+        let plan = plan::Plan::new(Vec::new(), 1);
+        let rate = 48_000;
+        let mut bus = BusState::new(plan.buses.first().expect("one bus"), rate);
+        let len = 256;
+        let rest = (SETTLE_S * rate as f32) as usize / len + 1;
+        assert!(
+            (0..rest).all(|_| !bus.idle(len)),
+            "idles before the faders land"
+        );
+        assert!(bus.idle(len));
+        bus.mix.fill([0.5; 2]);
+        assert!(!bus.idle(len), "sound passes");
+        bus.mix.fill([0.0; 2]);
+        bus.gain = 0.5;
+        assert!(!bus.idle(len), "a moved fader glides first");
     }
 }

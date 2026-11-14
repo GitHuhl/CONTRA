@@ -7,7 +7,7 @@ use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -135,15 +135,24 @@ impl StreamClient {
 /// Pinned pages by (blob, page), shared while any sample holds them.
 /// Pinned pages by sample and page; `true` for a page of stored blocks.
 type PinnedPages = HashMap<(BlobKey, usize), (Weak<[u8]>, bool)>;
+/// The map as stores and head loaders share it.
+type SharedPages = Arc<Mutex<PinnedPages>>;
 
 pub struct Store {
     shared: Arc<Shared>,
-    pinned: PinnedPages,
+    /// Shared with [`Heads`], which fills it in as deferred pages arrive.
+    /// Locked only by the control thread and the head-loading threads, never
+    /// by the audio thread (voices read their pages through `Sample`).
+    pinned: SharedPages,
+    /// Whether loads leave their heads to [`Heads`].
+    defer: bool,
+    deferred: Vec<HeadJob>,
     /// New samples, for the I/O thread's lookup table.
     registered: Sender<(SampleId, Weak<Sample>)>,
     next_id: AtomicU32,
     max_frame_bytes: usize,
     io: Option<JoinHandle<()>>,
+    progress: Option<Arc<contra_protocol::LoadProgress>>,
 }
 
 impl Store {
@@ -170,12 +179,36 @@ impl Store {
         };
         Ok(Self {
             shared,
-            pinned: HashMap::new(),
+            pinned: Arc::default(),
+            defer: false,
+            deferred: Vec::new(),
             registered,
             next_id: AtomicU32::new(0),
             max_frame_bytes: config.max_frame_bytes,
             io: Some(io),
+            progress: None,
         })
+    }
+
+    /// Pins through the process's one page map, so every store that calls
+    /// this (a plugin's instances in one host) shares the pinned pages of an
+    /// instrument another already holds; they free with the last holder.
+    /// Call before the first load. Stores that do not call it stay private,
+    /// which tests that reuse a key for different content rely on.
+    pub fn share_pages_in_process(&mut self) {
+        static PAGES: std::sync::OnceLock<SharedPages> = std::sync::OnceLock::new();
+        self.pinned = Arc::clone(PAGES.get_or_init(Arc::default));
+    }
+
+    /// Publishes load progress to the editor.
+    pub fn set_progress(&mut self, progress: Arc<contra_protocol::LoadProgress>) {
+        self.progress = Some(progress);
+    }
+
+    /// The current load's progress, if an editor is observing it.
+    #[must_use]
+    pub fn progress(&self) -> Option<&contra_protocol::LoadProgress> {
+        self.progress.as_deref()
     }
 
     /// log2 of the frames per page for samples in `fmt`.
@@ -186,7 +219,7 @@ impl Store {
     /// Bytes of the pages the loaded samples hold in memory, each page once.
     #[must_use]
     pub fn pinned_bytes(&self) -> u64 {
-        self.pinned
+        lock(&self.pinned)
             .values()
             .filter_map(|(page, _)| page.upgrade())
             .map(|page| page.len() as u64)
@@ -260,7 +293,8 @@ impl Store {
     }
 
     fn load_unique(&mut self, requests: Vec<LoadRequest>) -> Vec<io::Result<Arc<Sample>>> {
-        self.pinned.retain(|_, (page, _)| page.strong_count() > 0);
+        let shared = Arc::clone(&self.pinned);
+        lock(&shared).retain(|_, (page, _)| page.strong_count() > 0);
         // Pages already held, and the runs each request must read.
         let mut plans = Vec::with_capacity(requests.len());
         for r in &requests {
@@ -287,8 +321,7 @@ impl Store {
             }
             for (page, cell) in pages.iter_mut().enumerate() {
                 if wanted.get(page).copied().unwrap_or(false) {
-                    *cell = self
-                        .pinned
+                    *cell = lock(&shared)
                         .get(&(r.key.clone(), page))
                         .and_then(|(b, blocks)| {
                             let b = b.upgrade()?;
@@ -319,6 +352,27 @@ impl Store {
             }
             plans.push(Ok((pages, runs)));
         }
+        if self.defer {
+            return plans
+                .into_iter()
+                .zip(requests)
+                .map(|(plan, r)| {
+                    let (pages, runs) = plan?;
+                    let sample = self.new_sample(&r, pages);
+                    sample.heads_due.store(runs.len() as u32, Ordering::Release);
+                    for run in runs {
+                        let job = (
+                            Arc::clone(&sample),
+                            Arc::clone(&r.source),
+                            run,
+                            r.key.clone(),
+                        );
+                        self.deferred.push(job);
+                    }
+                    Ok(sample)
+                })
+                .collect();
+        }
         let max_frame_bytes = self.max_frame_bytes;
         // Read every run, spread over the machine's cores.
         let jobs: Vec<(usize, Range<usize>)> = plans
@@ -327,9 +381,41 @@ impl Store {
             .filter_map(|(i, p)| p.as_ref().ok().map(|(_, runs)| (i, runs)))
             .flat_map(|(i, runs)| runs.iter().map(move |run| (i, run.clone())))
             .collect();
+        if let Some(progress) = self.progress.as_deref() {
+            let reused = plans
+                .iter()
+                .filter_map(|p| p.as_ref().ok())
+                .flat_map(|(pages, _)| pages.iter().flatten())
+                .map(|page| page.bytes().len() as u64)
+                .sum::<u64>();
+            let planned = jobs
+                .iter()
+                .filter_map(|(i, run)| {
+                    let r = requests.get(*i)?;
+                    let size = 1u64 << page_shift(r.key.fmt.bytes_per_frame(), max_frame_bytes);
+                    let first = run.start as u64 * size;
+                    let end = (run.end as u64 * size).min(r.frames);
+                    if let Some(per) = blocks_per_page(&*r.source, size) {
+                        let total = r.frames.div_ceil(ncw::SAMPLES_PER_BLOCK as u64) as usize;
+                        let start = run.start * per;
+                        let end = (run.end * per).min(total);
+                        let blocks = end.saturating_sub(start);
+                        let table = 4 * (blocks + 2 * blocks.div_ceil(per));
+                        r.source
+                            .block_bytes(start..end)
+                            .map(|bytes| bytes + table as u64)
+                    } else {
+                        Some((end - first) * r.key.fmt.bytes_per_frame() as u64)
+                    }
+                })
+                .sum::<u64>();
+            progress.sample_total(reused + planned);
+            progress.samples(reused);
+        }
+        let progress = self.progress.as_deref();
         let next = AtomicU32::new(0);
         let workers = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
+            .map_or(4, |n| n.get() * 3) // reads wait on the disk: more lanes than cores
             .min(jobs.len().max(1));
         let read: Vec<Vec<RunRead>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..workers)
@@ -344,24 +430,13 @@ impl Store {
                             let Some(r) = requests.get(*i) else {
                                 continue;
                             };
-                            let size =
-                                1u64 << page_shift(r.key.fmt.bytes_per_frame(), max_frame_bytes);
-                            let first = run.start as u64 * size;
-                            let end = (run.end as u64 * size).min(r.frames);
-                            let frame_bytes = r.key.fmt.bytes_per_frame();
-                            let result = if let Some(per) = blocks_per_page(&*r.source, size) {
-                                read_blocks(&*r.source, r.frames, run, per)
-                            } else {
-                                let mut buf = vec![0; (end - first) as usize * frame_bytes];
-                                // Split into pages here, so this thread's heap reuses
-                                // the freed run for the pages it keeps.
-                                let page_bytes = (size as usize * frame_bytes).max(1);
-                                r.source.read(first, &mut buf).map(|()| {
-                                    buf.chunks(page_bytes)
-                                        .map(|c| Page::Pcm(c.into()))
-                                        .collect()
-                                })
-                            };
+                            let result =
+                                read_run(&*r.source, r.key.fmt, r.frames, run, max_frame_bytes);
+                            if let (Some(progress), Ok(pages)) = (progress, &result) {
+                                progress.samples(
+                                    pages.iter().map(|p: &Page| p.bytes().len() as u64).sum(),
+                                );
+                            }
                             done.push((*i, run.clone(), result));
                         }
                     })
@@ -384,7 +459,7 @@ impl Store {
             };
             for (page, shared) in run.zip(read) {
                 let blocks = matches!(shared, Page::Blocks(_));
-                self.pinned.insert(
+                lock(&self.pinned).insert(
                     (r.key.clone(), page),
                     (Arc::downgrade(shared.bytes()), blocks),
                 );
@@ -399,26 +474,138 @@ impl Store {
             .map(|(plan, r)| {
                 let (pages, _) = plan?;
                 r.source.loaded();
-                let id = SampleId(self.next_id.fetch_add(1, Ordering::Relaxed));
-                let sample = Arc::new(Sample {
-                    id,
-                    fmt: r.key.fmt,
-                    frames: r.frames,
-                    shift: self.shift(&r.key.fmt),
-                    source: r.source,
-                    streamed: (0..pages.len()).map(|_| AtomicU32::new(ABSENT)).collect(),
-                    pinned: pages.into(),
-                });
-                // The I/O thread only stops when the store drops, so this cannot fail.
-                let _ = self.registered.send((id, Arc::downgrade(&sample)));
-                Ok(sample)
+                Ok(self.new_sample(&r, pages))
             })
             .collect()
     }
+
+    /// A sample holding `pages` (the ones already read) and registered with the I/O thread.
+    fn new_sample(&self, r: &LoadRequest, pages: Vec<Option<Page>>) -> Arc<Sample> {
+        let id = SampleId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let sample = Arc::new(Sample {
+            id,
+            fmt: r.key.fmt,
+            frames: r.frames,
+            shift: self.shift(&r.key.fmt),
+            source: Arc::clone(&r.source),
+            streamed: (0..pages.len()).map(|_| AtomicU32::new(ABSENT)).collect(),
+            heads_due: AtomicU32::new(0),
+            pinned: (pages.into_iter())
+                .map(|p| p.map_or_else(OnceLock::new, OnceLock::from))
+                .collect(),
+        });
+        // The I/O thread only stops when the store drops, so this cannot fail.
+        let _ = self.registered.send((id, Arc::downgrade(&sample)));
+        sample
+    }
+
+    /// From now on [`Store::load_many`] returns samples without their heads
+    /// (pages already held are kept) and queues the reads: take them with
+    /// [`Store::take_heads`] and run them in the background.
+    pub fn defer_heads(&mut self, on: bool) {
+        self.defer = on;
+    }
+
+    /// [`Store::load_many`] with every head read now, whatever [`Store::defer_heads`] says:
+    /// for samples read while the plan is built.
+    pub fn load_many_now(&mut self, requests: Vec<LoadRequest>) -> Vec<io::Result<Arc<Sample>>> {
+        let deferred = std::mem::replace(&mut self.defer, false);
+        let loaded = self.load_many(requests);
+        self.defer = deferred;
+        loaded
+    }
+
+    /// The reads queued since the last call, if any.
+    pub fn take_heads(&mut self) -> Option<Heads> {
+        let jobs = std::mem::take(&mut self.deferred);
+        (!jobs.is_empty()).then_some(Heads {
+            jobs,
+            max_frame_bytes: self.max_frame_bytes,
+            shared: Arc::clone(&self.pinned),
+        })
+    }
 }
+
+/// A run of pages of a sample still to read, and where from.
+type HeadJob = (Arc<Sample>, Arc<dyn Source>, Range<usize>, BlobKey);
 
 /// A run of pages read for request `.0`.
 type RunRead = (usize, Range<usize>, io::Result<Vec<Page>>);
+
+/// Pages `run` of a `frames`-long sample of `source`, as pinned pages.
+fn read_run(
+    source: &dyn Source,
+    fmt: SampleFmt,
+    frames: u64,
+    run: &Range<usize>,
+    max_frame_bytes: usize,
+) -> io::Result<Vec<Page>> {
+    let size = 1u64 << page_shift(fmt.bytes_per_frame(), max_frame_bytes);
+    let first = run.start as u64 * size;
+    let end = (run.end as u64 * size).min(frames);
+    let frame_bytes = fmt.bytes_per_frame();
+    if let Some(per) = blocks_per_page(source, size) {
+        return read_blocks(source, frames, run, per);
+    }
+    let mut buf = vec![0; end.saturating_sub(first) as usize * frame_bytes];
+    // Split into pages here, so this thread's heap reuses the freed run for
+    // the pages it keeps.
+    let page_bytes = (size as usize * frame_bytes).max(1);
+    source.read(first, &mut buf).map(|()| {
+        buf.chunks(page_bytes)
+            .map(|c| Page::Pcm(c.into()))
+            .collect()
+    })
+}
+
+/// The heads of samples built with [`Store::defer_heads`]: read them with
+/// [`Heads::load`] (off the audio thread, any thread) and the pages appear
+/// in the samples as each is read. Until then a voice streams its pages on
+/// demand, playing silence for any that are not yet in.
+pub struct Heads {
+    jobs: Vec<HeadJob>,
+    max_frame_bytes: usize,
+    /// The store's page-sharing map: pages read here join it, so a reload or
+    /// a second instance of the instrument reuses them.
+    shared: SharedPages,
+}
+
+impl Heads {
+    /// Reads every pending run on `lanes` threads (the reads wait on the disk).
+    pub fn load(self, lanes: usize) {
+        let next = AtomicU32::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..lanes.clamp(1, self.jobs.len().max(1)) {
+                scope.spawn(|| {
+                    while let Some((sample, source, run, key)) =
+                        self.jobs.get(next.fetch_add(1, Ordering::Relaxed) as usize)
+                    {
+                        let read = read_run(
+                            &**source,
+                            sample.fmt,
+                            sample.frames,
+                            run,
+                            self.max_frame_bytes,
+                        );
+                        for (page, data) in run.clone().zip(read.into_iter().flatten()) {
+                            let blocks = matches!(data, Page::Blocks(_));
+                            let weak = Arc::downgrade(data.bytes());
+                            if let Some(cell) = sample.pinned.get(page)
+                                && cell.set(data).is_ok()
+                            {
+                                lock(&self.shared).insert((key.clone(), page), (weak, blocks));
+                            }
+                        }
+                        sample.heads_due.fetch_sub(1, Ordering::Release);
+                    }
+                });
+            }
+        });
+        for (_, source, ..) in &self.jobs {
+            source.loaded();
+        }
+    }
+}
 
 /// Codec blocks in a page of `size` frames, when `source` keeps its pages
 /// as stored blocks: a page must hold whole blocks.
@@ -716,4 +903,9 @@ fn clock(cache: &Cache, hand: &mut usize) -> u32 {
     let slot = (*hand % len) as u32;
     *hand = hand.wrapping_add(1);
     slot
+}
+
+/// The page map, whether or not a panicking thread held it.
+fn lock(map: &Mutex<PinnedPages>) -> std::sync::MutexGuard<'_, PinnedPages> {
+    map.lock().unwrap_or_else(PoisonError::into_inner)
 }

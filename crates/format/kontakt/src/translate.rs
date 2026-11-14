@@ -17,7 +17,7 @@ use crate::external::external;
 use crate::laws;
 use crate::resources::Resources;
 use crate::samples::Resolver;
-use crate::timed::timed;
+use crate::timed::{knob_route, knob_routes, timed};
 
 const GROUP_LIST: u16 = 0x33;
 const ZONE_LIST: u16 = 0x34;
@@ -25,23 +25,142 @@ const LOOPS: u16 = 0x39;
 const INTERNAL_MODS: u16 = 0x3b;
 const SCRIPT: u16 = 6;
 const VOICE_GROUPS: u16 = 0x32;
+const START_CRITERIA: u16 = 0x38;
+/// The browser's preview data.
+const QUICK_BROWSE: u16 = 0x4e;
+/// Stored fields the translator maps, and those that are editor state only.
+// `unknown_tail` is the opaque public suffix every program stores.
+const COSMETIC_PROGRAM: &[&str] = &[
+    "unknown_tail",
+    "loading_flags",
+    "num_bytes_samples_total",
+    "library_id",
+    "fingerprint",
+    "cat_icon_idx",
+    "instrument_credits",
+    "instrument_author",
+    "instrument_url",
+    "instrument_cat1",
+    "instrument_cat2",
+    "instrument_cat3",
+    "resource_container_filename",
+    "wallpaper_filename",
+];
+const USED_GROUP: &[&str] = &[
+    "name",
+    "volume",
+    "pan",
+    "tune",
+    "key_tracking",
+    "release_trigger",
+    "rls_trig_counter",
+    "start_criteria",
+    "voice_group_index",
+    "muted",
+    "fx_idx_amp_split_point",
+    "release_trigger_note_monophonic",
+];
+const COSMETIC_GROUP: &[&str] = &["soloed"];
+const USED_ZONE: &[&str] = &[
+    "sample_start",
+    "sample_end",
+    "sample_start_mod_range",
+    "low_velocity",
+    "high_velocity",
+    "low_key",
+    "high_key",
+    "fade_low_velocity",
+    "fade_high_velocity",
+    "fade_low_key",
+    "fade_high_key",
+    "root_key",
+    "zone_volume",
+    "zone_pan",
+    "zone_tune",
+    "sample_present",
+    "filename_id",
+    "sample_rate",
+    "num_channels",
+    "num_frames",
+];
+// The sample header's own copies (`root_note`, `tuning`, format); the zone's
+// `root_key` and `zone_tune` carry what plays.
+// `filename_prefix` is the sample's name prefix; the file table resolves the sample.
+const COSMETIC_ZONE: &[&str] = &[
+    "filename_prefix",
+    "reserved1",
+    "reserved2",
+    "reserved3",
+    "reserved4",
+    "root_note",
+    "tuning",
+    "sample_data_type",
+];
 
-/// `saved`: a snapshot's persistent values per script slot, in place of the
-/// instrument's own where a slot has some.
+/// `saved`: a snapshot's persistent values per script slot, over the
+/// instrument's own.
 pub(crate) fn instrument(
     path: &Path,
     chunks: &KontaktChunks,
     monolith: Option<ni_file::file_container::NIFileContainer>,
     saved: &[Vec<String>],
     encrypted: Option<bool>,
+    native: Option<crate::snapshot::Native>,
 ) -> Result<ir::Instrument, Error> {
     let decode = |what| move |e: ni_file::Error| Error::new(path, what, e);
-    let program = chunks
+    let mut program = chunks
         .program()
         .ok_or_else(|| Error::new(path, "program", "missing"))?
         .map_err(decode("program"))?;
     let params = program.params().map_err(decode("program parameters"))?;
     let mut notes = Notes::default();
+    notes.ignored_fields(
+        "program",
+        &params,
+        &[
+            "name",
+            "transpose",
+            "volume",
+            "pan",
+            "tune",
+            "dfd_channel_preload_size",
+            "low_key",
+            "high_key",
+            "low_velocity",
+            "high_velocity",
+        ],
+        COSMETIC_PROGRAM,
+    );
+    // The programs' own playable range (a stored 0..127 / 1..127 is the whole keyboard).
+    if params.low_key != 0
+        || params.high_key != 127
+        || params.low_velocity > 1
+        || params.high_velocity != 127
+    {
+        notes.ignored(
+            "program key/velocity range",
+            format!(
+                "keys {}..{}, velocity {}..{}",
+                params.low_key, params.high_key, params.low_velocity, params.high_velocity
+            ),
+        );
+    }
+    crate::ignored::chunks(
+        &mut notes,
+        "program",
+        &program.0,
+        &[
+            SCRIPT,
+            GROUP_LIST,
+            ZONE_LIST,
+            VOICE_GROUPS,
+            0x3a,
+            0x3d,
+            0x45,
+            0x4b,
+        ],
+        &[QUICK_BROWSE],
+    );
     let mut out = ir::Instrument {
         name: params.name.clone(),
         source_path: std::path::absolute(path).ok(),
@@ -65,7 +184,7 @@ pub(crate) fn instrument(
     out.route_pitch = ir::Exp2::Quadratic { c: 0.33971 };
     // The instrument's tune applies to every group.
     let base = Base {
-        tune: semitones(params.tune) + f64::from(params.transpose),
+        tune: laws::semitones(params.tune) + f64::from(params.transpose),
         preload: params.dfd_channel_preload_size,
     };
     let mut resources = None;
@@ -89,8 +208,10 @@ pub(crate) fn instrument(
                 slot,
                 data: data_files(&text, path, &mut resources),
                 source: text,
-                saved: (saved.get(slot).filter(|s| !s.is_empty()).cloned())
-                    .unwrap_or(script.persistent),
+                saved: crate::snapshot::over(
+                    script.persistent,
+                    saved.get(slot).map_or(&[], Vec::as_slice),
+                ),
                 links: (links.iter())
                     .filter(|(s, _)| usize::from(*s) == slot)
                     .map(|&(_, l)| l)
@@ -102,6 +223,9 @@ pub(crate) fn instrument(
                 }
             }
         }
+    }
+    for why in resources.iter().flat_map(|r| &r.unreadable) {
+        notes.add(ir::Impact::Broken, "resource archive", why);
     }
     let groups = program
         .0
@@ -116,11 +240,19 @@ pub(crate) fn instrument(
     let mut impulses = crate::impulse::Impulses::new(others, &mut resolver, path, resources);
     let mut criteria = Vec::new();
     let mut slots = crate::effects::Slots::default();
+    // A snapshot's racks and group effects stand in for the base's.
+    let mut group_fx = Vec::new();
+    if let Some(native) = native {
+        crate::effects::replace_racks(&mut program.0.children, native.racks);
+        crate::snapshot::unmatched(native.groups.len(), groups.groups.len(), &mut notes);
+        group_fx = native.groups;
+    }
     for (index, group) in groups.groups.iter().enumerate() {
         let t = translate_group(group, index, &base, &mut notes)
             .map_err(|e| Error::new(path, "group", format!("{index}: {e}")))?;
         let mut g = t.group;
-        g.inserts = crate::effects::group(group, index, &mut impulses, &mut notes, &mut slots);
+        let fx = group_fx.get_mut(index).and_then(Option::take);
+        g.inserts = crate::effects::group(group, fx, index, &mut impulses, &mut notes, &mut slots);
         crate::drive::unmoved(&g.inserts, &g.mods, &mut notes);
         // ponytail: a filter a modulator moves passes unfiltered until filters
         // run per voice; its routes are reported.
@@ -142,7 +274,10 @@ pub(crate) fn instrument(
     slots.laws.extend(racks.laws.laws);
     slots.shape_slots.extend(racks.laws.shape_slots);
     slots.subtypes.extend(racks.laws.subtypes);
+    slots.types.extend(racks.laws.types);
+    slots.models.extend(racks.laws.models);
     out.slot_laws = slots.laws;
+    out.slot_models = slots.models;
     if !slots.shape_slots.is_empty() {
         out.slot_shapes.shapes = crate::laws::filter_shapes();
         contra_law::record(|| contra_law::Application {
@@ -153,7 +288,9 @@ pub(crate) fn instrument(
         });
         out.slot_shapes.slots = slots.shape_slots;
     }
-    let loads = |s: &ir::Script| s.source.contains("$ENGINE_PAR_EFFECT_");
+    let loads = |s: &ir::Script| {
+        s.source.contains("$ENGINE_PAR_EFFECT_") || s.source.contains("$ENGINE_PAR_SEND_EFFECT_")
+    };
     if out.scripts.iter().any(loads) {
         // Every Kontakt rack has 8 slots, and a script may load into an
         // empty one the file does not save.
@@ -194,6 +331,7 @@ pub(crate) fn instrument(
         out.slot_shapes.slots.extend(open);
         out.slot_shapes.types = crate::script_knobs::slot_types();
         out.slot_shapes.subtypes = std::mem::take(&mut slots.subtypes);
+        out.slot_shapes.saved_types = std::mem::take(&mut slots.types);
     }
     // A script may load any response of the library's `ir_samples` by name.
     if out
@@ -238,8 +376,12 @@ pub(crate) fn instrument(
         .ok_or_else(|| Error::new(path, "zone list", "missing"))
         .and_then(|c| ZoneList::try_from(c).map_err(decode("zone list")))?;
     let mut sample_of: HashMap<u32, Option<usize>> = HashMap::new();
-    for (zone, &group) in zones.zones().iter().zip(&zones.group_ids) {
+    resolver.warm_zones(&zones, &muted, &table);
+    // A zone's id is its place in the zone list, saved or not.
+    for (zone_id, (zone, &group)) in (0u32..).zip(zones.zones().iter().zip(&zones.group_ids)) {
         let z = zone.params().map_err(decode("zone"))?;
+        notes.ignored_fields("zone", &z, USED_ZONE, COSMETIC_ZONE);
+        crate::ignored::chunks(&mut notes, "zone", &zone.0, &[LOOPS], &[QUICK_BROWSE]);
         if !z.sample_present || muted.get(group as usize).copied().unwrap_or(true) {
             continue;
         }
@@ -263,6 +405,17 @@ pub(crate) fn instrument(
                     });
                     Some(out.samples.len() - 1)
                 }
+                Err(e) if e == "not found" => {
+                    // Where the first folder looked would have it, which is
+                    // how the player finds a moved one.
+                    let at = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+                    let at = at
+                        .parent()
+                        .unwrap_or(Path::new(""))
+                        .join(name.replace(['\\', '|'], "/"));
+                    notes.add_missing(&at);
+                    None
+                }
                 Err(e) => {
                     notes.add(ir::Impact::Broken, "missing sample", format!("{name}: {e}"));
                     None
@@ -281,9 +434,10 @@ pub(crate) fn instrument(
         let loops = loops.map_err(decode("zone loops"))?;
         let reverse =
             g.zones.first().is_some_and(|z| z.reverse) || criteria_reverse(group, &groups);
-        if let Some(translated) =
+        if let Some(mut translated) =
             translate_zone(&z, loops.as_ref(), sample, frames, reverse, &mut notes)
         {
+            translated.id = zone_id;
             contra_law::record(|| contra_law::Application {
                 id: contra_law::LawId("kontakt.zone_gain_pan_tune.v1"),
                 location: format!("groups/{group}/zones/{}", g.zones.len()),
@@ -300,9 +454,7 @@ pub(crate) fn instrument(
         }
     }
     let first = out.samples.len();
-    for i in &mut out.impulses {
-        i.sample += first;
-    }
+    out.impulses.iter_mut().for_each(|i| i.sample += first);
     for (_, sample) in &mut out.responses {
         *sample += first;
     }
@@ -312,21 +464,31 @@ pub(crate) fn instrument(
 }
 
 /// "Accept standard controllers for Volume and Pan" (MIDI CC 7 and 10; the
-/// program's private byte 4) and the top of the CC 7 range in dB (an i32 at
-/// byte 6): Kontakt 8.13's instrument options saved and read back, program
-/// versions 0xa8..=0xb5 (400 corpus instruments: all on, top 0 dB). Earlier
-/// versions keep those defaults. Measured: CC 7 sets the fader to
-/// `top·(v/127)³` in place of the saved volume, CC 10 the balance
-/// `(v − 63.5)/63.5`; a script's `ignore_controller` stops both.
+/// program's private byte 4) and the CC 7 range in dB (an i32 at byte 6),
+/// program versions 0xa8..=0xb5; earlier versions keep on, 0 dB. Kontakt
+/// 8.13.1 runs them as generated KSP (0140870000.c, "use std. CC7 / CC10"):
+/// `$ENGINE_PAR_VOLUME = %CC[7]·k`, k by range −12/−6/0/+6/+12 dB =
+/// 3113/3937/4956/6243/7874 and any other range 4956; the volume par's gain
+/// is `(par/629960.52)³`. So the fader is `top·(v/127)³`, `top` that cube at
+/// 127 (−0.023 dB for "0 dB"); CC 10 is `(v − 63.5)/63.5`. A script's
+/// `ignore_controller` stops both.
 fn output_controllers(version: u16, private: &[u8]) -> Option<ir::OutputControllers> {
     let saved = (version >= 0xa8).then(|| {
         let top = private.get(6..10).and_then(|b| b.try_into().ok());
         (private.get(4).copied(), top.map(i32::from_le_bytes))
     });
-    let (on, top_db) = match saved {
-        Some((Some(on), Some(top))) => (on != 0, top as f32),
-        _ => (true, 0.0),
+    let (on, range) = match saved {
+        Some((Some(on), Some(range))) => (on != 0, range),
+        _ => (true, 0),
     };
+    let k = match range {
+        -12 => 3113.0,
+        -6 => 3937.0,
+        6 => 6243.0,
+        12 => 7874.0,
+        _ => 4956.0,
+    };
+    let top_db = 60.0 * (127.0 * k / 629_960.5_f32).log10();
     on.then_some(ir::OutputControllers {
         volume: 7,
         pan: 10,
@@ -350,12 +512,6 @@ pub(crate) fn db(linear: f32) -> f32 {
 
 /// Slots in each Kontakt effect rack.
 const SLOTS: usize = 8;
-fn semitones(ratio: f32) -> f64 {
-    contra_law::common::SEMITONE_RATIO
-        .inverse_f64(f64::from(ratio.max(1e-6)))
-        .unwrap_or(0.0)
-}
-
 fn criteria_reverse(group: u32, groups: &GroupList) -> bool {
     groups
         .groups
@@ -458,6 +614,27 @@ fn data_files(
             files.push((file, bytes));
         }
     }
+    // A Kontakt 8 `native_ui` page the script loads by a literal name: every
+    // module under `Resources/native_ui/`, kept as `native_ui/<path>`, and
+    // the entry's name as `native_ui.entry`.
+    if let Some(entry) = source
+        .split("load_native_ui(")
+        .nth(1)
+        .and_then(|call| call.split_once(')'))
+        .map(|(a, _)| a.trim().trim_matches('"').to_owned())
+        .filter(|e| !e.is_empty() && !e.contains(['"', '\\']))
+    {
+        let resources = resources.get_or_insert_with(|| Resources::open(path));
+        for module in resources.under("native_ui") {
+            if !module.ends_with(".nui") {
+                continue;
+            }
+            if let Some(bytes) = resources.read(&format!("native_ui/{module}")) {
+                files.push((format!("native_ui/{module}"), bytes));
+            }
+        }
+        files.push(("native_ui.entry".into(), entry.into_bytes()));
+    }
     files
 }
 
@@ -475,12 +652,27 @@ fn translate_group(
     notes: &mut Notes,
 ) -> Result<Translated, ni_file::Error> {
     let v = group.params()?;
+    notes.ignored_fields("group", &v, USED_GROUP, COSMETIC_GROUP);
+    // Defaults: the amp after all 8 insert slots, release notes monophonic.
+    if v.fx_idx_amp_split_point != 8 {
+        notes.ignored("group.fx_idx_amp_split_point", v.fx_idx_amp_split_point);
+    }
+    if v.release_trigger && v.release_trigger_note_monophonic {
+        notes.ignored("group.release_trigger_note_monophonic", "release group");
+    }
+    crate::ignored::chunks(
+        notes,
+        "group",
+        &group.0,
+        &[INTERNAL_MODS, 0x3c, 0x3a, 0x45, 0x3d, 0x4b, START_CRITERIA],
+        &[],
+    );
     let stream_mode = group.source_identity().map_or(0, |s| s.mode);
     let mut out = ir::Group {
         name: v.name.clone(),
         volume_db: db(v.volume),
         pan: v.pan.clamp(-1.0, 1.0),
-        tune: semitones(v.tune) + base.tune,
+        tune: laws::semitones(v.tune) + base.tune,
         keytrack: if v.key_tracking { 1.0 } else { 0.0 },
         trigger: if v.release_trigger {
             ir::Trigger::Release
@@ -489,6 +681,7 @@ fn translate_group(
         },
         purged: group.source_identity().is_ok_and(|s| s.flag == 1),
         stream: laws::stream(stream_mode, base.preload),
+        speed: matches!(stream_mode, 2 | 5 | 8).then_some(1.0), // Time Machine 1, 2, Pro
         ..ir::Group::DEFAULT
     };
     contra_law::record(|| contra_law::Application {
@@ -528,6 +721,8 @@ fn translate_group(
     });
     // Each timed modulator's slot and the source it became.
     let mut timed_slots = Vec::new();
+    // Slots routed to another modulator's knob, resolved once every slot is translated.
+    let mut knobs = Vec::new();
     if let Some(chunk) = group.0.find_first(INTERNAL_MODS) {
         for (n, m) in InternalModArray16::try_from(chunk)?.slots()? {
             let p = m.params()?;
@@ -535,11 +730,33 @@ fn translate_group(
                 slot: slot(n),
                 name: p.name.clone(),
                 names: p.targets.iter().map(|t| t.name.clone()).collect(),
+                depths: p.targets.iter().map(|t| t.signed_intensity()).collect(),
             });
             let volume = p
                 .targets
                 .iter()
                 .any(|t| t.param == "volume" && t.slot.is_none());
+            // [router open (editor state), bypass, retrigger, ?]; the timed
+            // modulators read them (`timed`), the amplitude envelope and the
+            // kinds not carried do not.
+            let amp_env = volume
+                && matches!(p.modulator, Modulator::Ahdsr(_))
+                && !out
+                    .mods
+                    .iter()
+                    .any(|m| matches!(m.kind, ir::ModKind::Envelope));
+            let reads_flags = matches!(p.modulator, Modulator::Flex(_) | Modulator::Lfo(_))
+                || (matches!(p.modulator, Modulator::Ahdsr(_)) && !amp_env);
+            if !reads_flags {
+                for (flag, what) in [(1, "bypass"), (2, "retrigger"), (3, "flag 3")] {
+                    if p.unknown_flags.get(flag).is_some_and(|&b| b != 0) {
+                        notes.ignored(&format!("internal modulator {what}"), &p.name);
+                    }
+                }
+            }
+            if p.unknown_id != 0 {
+                notes.ignored("internal modulator id", p.unknown_id);
+            }
             match &p.modulator {
                 // The first volume AHDSR is the amplitude envelope; others route
                 // as breakpoint envelopes (`timed`).
@@ -596,8 +813,12 @@ fn translate_group(
                     }
                 }
             }
+            if p.targets.iter().any(knob_route) {
+                knobs.push((n, p));
+            }
         }
     }
+    knob_routes(&mut out, &knobs, &timed_slots, notes);
     external(
         group,
         group_index,
@@ -721,6 +942,7 @@ fn translate_zone(
     // The slots are in no particular order; the model wants play order.
     found.sort_by_key(|l| l.end);
     Some(ir::Zone {
+        id: 0,
         mix: Vec::new(),
         sample,
         keys: midi(lk)..=midi(hk),
@@ -728,7 +950,7 @@ fn translate_zone(
         velocity_fade: (midi(z.fade_low_velocity), midi(z.fade_high_velocity)),
         key_fade: (midi(z.fade_low_key), midi(z.fade_high_key)),
         root: midi(z.root_key),
-        tune: semitones(z.zone_tune),
+        tune: laws::semitones(z.zone_tune),
         volume_db: db(z.zone_volume),
         pan: z.zone_pan.clamp(-1.0, 1.0),
         start,

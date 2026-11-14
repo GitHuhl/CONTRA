@@ -26,11 +26,8 @@ pub(super) fn view(
     };
     let el = match (tab, &mut p.face) {
         (PartTab::Interface, Some(face)) => {
-            let size = face
-                .tree
-                .pages
-                .first()
-                .map_or((0., 0.), |p| (p.size.width, p.size.height));
+            let size =
+                (face.tree.pages.first()).map_or((0., 0.), |p| (p.size.width, p.shown_height()));
             let scale = fit(
                 FACE_SCALES.get(v.face_scale).copied().unwrap_or(0.),
                 room,
@@ -57,10 +54,16 @@ pub(super) fn view(
                     Some(menu) => stack![page, menu],
                     None => page,
                 };
-                // Wider than the rack at a fixed scale, it scrolls sideways.
+                // Wider than the rack at a fixed scale, it scrolls sideways;
+                // taller, it scrolls down inside its own box, not the rack.
                 let el = row![spacer(), page.shrink(0), spacer()]
                     .w(Len::Pct(100.))
                     .scroll();
+                let el = if size.1 * scale > room.1 + 0.5 && room.1 > 0. {
+                    col![el].w(Len::Pct(100.)).h(room.1).scroll()
+                } else {
+                    el
+                };
                 (edits, el)
             };
             input::apply(&mut face.tree, &edits);
@@ -197,7 +200,9 @@ fn articulations(ui: &mut Ui, p: &mut Part, n: usize, v: &mut View, out: &mut Ve
         } else if v.grip.as_ref().is_some_and(|(g, _)| *g == grip) {
             v.grip = None;
         }
-        let more = icon_button(ui, format!("{id}-more"), Icon::More, "More", false);
+        let open = v.menu.as_deref() == Some(format!("{id}-more").as_str());
+        let tip = if open { "" } else { "More" };
+        let more = icon_button(ui, format!("{id}-more"), Icon::More, tip, false);
         let mut cells = vec![
             interactive(stack![glyph(Icon::Grip, TEXT, secondary()).centered()])
                 .square(CONTROL)

@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use contra_engine::{Engine, Play, SampleTime, Timed};
-use contra_protocol::{Meters, Stats};
+use contra_engine::{Engine, Play, RenderMode, SampleTime, Timed};
+use contra_protocol::{Meters, Slowest, Stats};
 
 use super::hold::{Held, Hold};
-use super::{Channels, Command, Event, HostPattern, Mix, OUTPUTS};
+use super::{Channels, Command, Control, Event, HostPattern, MACROS, MacroTarget, Mix, OUTPUTS};
+use crate::persist::Capture;
 use contra_protocol::MAX_PARTS;
 
 struct Playing {
@@ -68,6 +69,18 @@ pub struct RackAudio {
     /// Time in [`RackAudio::process`] and the real time it rendered, in ns.
     busy_ns: u64,
     span_ns: u64,
+    /// By part, the capture being read, a budget of cells a block.
+    capturing: Box<[Option<Box<Capture>>]>,
+    /// The part whose capture is served first this block: it turns, so a
+    /// busy part never keeps the budget from the others.
+    capture_turn: usize,
+    /// Offline, voices wait for their pages.
+    mode: RenderMode,
+    /// What each host macro moves ([`Command::Macro`]).
+    macros: [Option<MacroTarget>; MACROS],
+    /// This block's time in the script callbacks a control or widget move
+    /// ran: script work, as a note's callbacks, not the commands' own.
+    ui_scripts_ns: u64,
 }
 
 impl RackAudio {
@@ -99,7 +112,58 @@ impl RackAudio {
             dropped: 0,
             busy_ns: 0,
             span_ns: 0,
+            capturing: (0..MAX_PARTS).map(|_| None).collect(),
+            capture_turn: 0,
+            mode: RenderMode::Live,
+            macros: [None; MACROS],
+            ui_scripts_ns: 0,
         }
+    }
+
+    /// Whether the host renders offline (a bounce, faster or slower than
+    /// real time): then a voice waits for the sample pages it reads, deferred
+    /// heads among them, instead of playing silence. Never live: it blocks.
+    /// Fading engines too: one installed during a bounce must not keep
+    /// blocking once the host plays live.
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        for p in self.parts.iter_mut().flatten() {
+            p.engine.set_render_mode(mode);
+            for f in p.outgoing.iter_mut().flatten() {
+                f.engine.set_render_mode(mode);
+            }
+        }
+    }
+
+    /// The host moved macro `n` to `normalized` (0..1): its control moves
+    /// now, between the frames before and after, and its script hears it.
+    /// False when the macro has no target here (the tick moves it).
+    pub fn move_macro(&mut self, n: usize, normalized: f64) -> bool {
+        self.apply_commands();
+        let Some(Some(t)) = self.macros.get(n).copied() else {
+            return false;
+        };
+        let Some(Some(p)) = self.parts.get_mut(t.part) else {
+            return false;
+        };
+        let start = std::time::Instant::now();
+        let plain = t.plain(normalized);
+        match t.control {
+            Control::Integer(id) | Control::Real(id) => {
+                let value = match t.control {
+                    Control::Real(_) => plain.to_bits() as i64,
+                    _ => plain.round() as i64,
+                };
+                p.engine.set_click(t.slot, id, [false; 3], 0);
+                p.engine.set_control(t.slot, id, value);
+            }
+            Control::Widget(n) => p.engine.set_widget(t.slot, n, plain, None),
+        }
+        self.ui_scripts_ns += ns_since(start);
+        true
     }
 
     /// Waits until the sample pages the parts asked for are read, so an
@@ -160,7 +224,10 @@ impl RackAudio {
     pub fn process(&mut self, frames: usize, input: &[(u32, Event)]) {
         let start = std::time::Instant::now();
         let frames = frames.min(self.scratch.len());
+        self.ui_scripts_ns = 0;
         self.apply_commands();
+        self.read_captures(frames);
+        let commands = ns_since(start).saturating_sub(self.ui_scripts_ns);
         for out in &mut self.outputs {
             if let Some(o) = out.get_mut(..frames) {
                 o.fill([0.0; 2]);
@@ -241,6 +308,12 @@ impl RackAudio {
                     lost += 1;
                 }
             });
+            let edits = &self.channels.zones.edits;
+            p.engine
+                .drain_zone_edits(|e| edits.send((n, generation, e)).is_ok());
+            let asks = &self.channels.unpurges;
+            p.engine
+                .drain_unpurges(|u| asks.send((n, generation, u)).is_ok());
             let files = &self.channels.files;
             p.engine
                 .drain_files(|r| files.send((n, generation, r)).is_ok());
@@ -248,7 +321,9 @@ impl RackAudio {
             let s = p.engine.stats();
             stats.voices += u32::try_from(p.engine.active_voices()).unwrap_or(u32::MAX);
             stats.voices_stolen += s.voices_stolen;
+            stats.voices_cut += s.voices_cut;
             stats.notes_refused += s.notes_refused;
+            stats.events_refused += s.events_refused;
             stats.missing_frames += s.missing_frames;
             // Taken every block, so a muted part's buses show silence.
             if let Some(buses) = self.meters.buses.get_mut(n) {
@@ -278,6 +353,11 @@ impl RackAudio {
         }
         self.panic = false;
         self.played.clear();
+        // The song moved on: the next call (a later part of the host's
+        // block) starts where this one ended, not back at the block's start.
+        if let (Some((Play::Running, quarters, _)), Some(bpm)) = (&mut self.transport, self.tempo) {
+            *quarters += frames as f64 / self.rate * f64::from(bpm) / 60.0;
+        }
         for o in self.outputs.iter().filter_map(|o| o.get(..frames)) {
             for s in o {
                 self.meters.master[0] = self.meters.master[0].max(s[0].abs());
@@ -289,6 +369,11 @@ impl RackAudio {
         self.busy_ns = self.busy_ns.saturating_add(busy);
         self.span_ns += (frames as f64 * 1e9 / self.rate) as u64;
         (stats.busy_ns, stats.span_ns) = (self.busy_ns, self.span_ns);
+        stats.slowest = Slowest {
+            ns: busy,
+            frames: u32::try_from(frames).unwrap_or(u32::MAX),
+        };
+        stats.slowest_commands_ns = commands;
         self.channels.meters.publish(&self.meters);
         self.channels.stats.publish(&stats);
         self.meters = Meters::default();
@@ -300,9 +385,11 @@ impl RackAudio {
         while self.channels.retired.room() >= RETIRES
             && !self.channels.captured.is_full()
             && !self.channels.units.is_full()
+            && !self.channels.sounds.is_full()
             && !self.channels.typed.is_full()
             && !self.channels.looks.is_full()
             && !self.channels.recalled.is_full()
+            && !self.channels.zones.done.is_full()
             && !self.channels.filed.is_full()
         {
             let Some(command) = self.channels.commands.recv() else {
@@ -340,6 +427,8 @@ impl RackAudio {
                             let [a, b, c] = all;
                             (outgoing, gone) = ([a, b], c);
                         }
+                        let mut engine = engine;
+                        engine.set_render_mode(self.mode);
                         *slot = Some(Playing {
                             engine,
                             mix,
@@ -362,6 +451,34 @@ impl RackAudio {
                         }));
                     }
                 }
+                Command::Zones {
+                    part,
+                    generation,
+                    mut swap,
+                } => {
+                    if let Some(Some(p)) = self.parts.get_mut(part)
+                        && p.generation == generation
+                    {
+                        p.engine.swap_plan(&mut swap.plan, &swap.edits);
+                    }
+                    if let Err(swap) = self.channels.zones.done.send(swap) {
+                        // Checked for room first; if it ever fails, it frees here.
+                        self.dropped += 1;
+                        drop(swap);
+                    }
+                }
+                Command::Unpurged {
+                    part,
+                    generation,
+                    unpurge,
+                    took,
+                } => {
+                    if let Some(Some(p)) = self.parts.get_mut(part)
+                        && p.generation == generation
+                    {
+                        p.engine.unpurged(unpurge, took);
+                    }
+                }
                 Command::Effect {
                     part,
                     generation,
@@ -379,20 +496,21 @@ impl RackAudio {
                         drop(unit);
                     }
                 }
-                Command::Recall {
-                    part,
-                    generation,
-                    mut saved,
-                } => {
-                    if let Some(Some(p)) = self.parts.get_mut(part)
-                        && p.generation == generation
+                Command::Recall(mut recalling) => {
+                    let slot = self.parts.get_mut(recalling.part);
+                    let ours = |p: &Playing| p.generation == recalling.generation;
+                    if let Some(slot) = slot.filter(|s| s.as_ref().is_some_and(ours))
+                        && let Some(p) = slot.take()
                     {
-                        saved = p.engine.recall(saved);
+                        recalling.engine = Some(p.engine);
+                        for f in p.outgoing.into_iter().flatten() {
+                            self.retire_engine(f.engine);
+                        }
                     }
-                    if let Err(saved) = self.channels.recalled.send(saved) {
+                    if let Err(recalling) = self.channels.recalled.send(recalling) {
                         // Checked for room first; if it ever fails, it frees here.
                         self.dropped += 1;
-                        drop(saved);
+                        drop(recalling);
                     }
                 }
                 Command::File {
@@ -436,6 +554,11 @@ impl RackAudio {
                         p.held.hold = hold;
                     }
                 }
+                Command::Macro { n, target } => {
+                    if let Some(slot) = self.macros.get_mut(n) {
+                        *slot = target;
+                    }
+                }
                 Command::Master(gain) => self.master = gain,
                 Command::Tempo(bpm) => self.set_tempo(bpm),
                 // What was played before the panic ends with it.
@@ -450,15 +573,17 @@ impl RackAudio {
                         self.dropped += 1;
                     }
                 }
-                Command::Capture(mut c) => {
-                    if let Some(Some(p)) = self.parts.get_mut(c.part) {
-                        c.read(&mut p.engine);
+                // Read from the next block on, a budget at a time.
+                Command::Capture(c) => match self.capturing.get_mut(c.part) {
+                    Some(slot @ None) => *slot = Some(c),
+                    // One is being read already: this one goes back unread.
+                    _ => {
+                        if let Err(c) = self.channels.captured.send(c) {
+                            self.dropped += 1;
+                            drop(c);
+                        }
                     }
-                    if let Err(c) = self.channels.captured.send(c) {
-                        self.dropped += 1;
-                        drop(c);
-                    }
-                }
+                },
                 Command::Look(mut frame) => {
                     match self.parts.get(frame.part) {
                         Some(Some(p)) if p.generation == frame.generation => frame.fill(&p.engine),
@@ -473,10 +598,16 @@ impl RackAudio {
                     part,
                     group,
                     envelope,
-                    insert,
+                    mut insert,
                 } => {
+                    let edit = insert.take();
                     if let Some(Some(p)) = self.parts.get_mut(part) {
-                        p.engine.set_group_sound(group, envelope, insert);
+                        p.engine.set_group_sound(group, envelope, edit);
+                    }
+                    if let Err(insert) = self.channels.sounds.send(insert) {
+                        // Checked for room first; if it ever fails, it frees here.
+                        self.dropped += 1;
+                        drop(insert);
                     }
                 }
                 Command::Control {
@@ -487,11 +618,13 @@ impl RackAudio {
                     value,
                     keys,
                 } => {
+                    let t = std::time::Instant::now();
                     if let Some(Some(p)) = self.parts.get_mut(part) {
                         let held = [keys.shift, keys.alt, keys.ctrl || keys.cmd];
                         p.engine.set_click(slot, id, held, cell);
                         p.engine.set_control(slot, id, value);
                     }
+                    self.ui_scripts_ns += ns_since(t);
                 }
                 Command::ControlText {
                     part,
@@ -500,6 +633,7 @@ impl RackAudio {
                     cell,
                     text,
                 } => {
+                    let t = std::time::Instant::now();
                     if let Some(Some(p)) = self.parts.get_mut(part) {
                         if let Some(vm) = p.engine.vm_mut(slot) {
                             vm.set_text(cell as usize, *text);
@@ -507,11 +641,54 @@ impl RackAudio {
                         p.engine.set_click(slot, id, [false; 3], 0);
                         p.engine.set_control(slot, id, 0);
                     }
+                    self.ui_scripts_ns += ns_since(t);
                     // Freed on the control side: the loop takes no command while the ring is full.
                     if self.channels.typed.send(text).is_err() {
                         self.dropped += 1;
                     }
                 }
+                Command::Widget {
+                    part,
+                    slot,
+                    n,
+                    value,
+                    cell,
+                } => {
+                    let t = std::time::Instant::now();
+                    if let Some(Some(p)) = self.parts.get_mut(part) {
+                        p.engine.set_widget(slot, n, value, cell);
+                    }
+                    self.ui_scripts_ns += ns_since(t);
+                }
+            }
+        }
+    }
+
+    /// Reads on the captures being read, at most [`CAPTURE_CELLS`] a frame
+    /// of this block in all; a finished one goes back to the control side,
+    /// as does one whose part was replaced or removed, unfinished.
+    fn read_captures(&mut self, frames: usize) {
+        let mut budget = frames.saturating_mul(CAPTURE_CELLS);
+        let (first, parts) = (self.capture_turn, self.capturing.len());
+        self.capture_turn = (first + 1) % parts.max(1);
+        for n in (first..parts).chain(0..first) {
+            let Some(slot) = self.capturing.get_mut(n) else {
+                continue;
+            };
+            let Some(c) = slot else { continue };
+            let done = match self.parts.get_mut(n) {
+                Some(Some(p)) if p.generation == c.generation => c.read(&mut p.engine, &mut budget),
+                _ => true,
+            };
+            if done
+                && let Some(c) = slot.take()
+                && let Err(c) = self.channels.captured.send(c)
+            {
+                // No room: it goes back in a later block.
+                *slot = Some(c);
+            }
+            if budget == 0 {
+                break;
             }
         }
     }
@@ -553,6 +730,17 @@ fn release() -> [Event; 18] {
         Ok(ch @ 0..=15) => Event::midi1(0xB0 | ch, 64, 0),
         _ => off(n == 16),
     })
+}
+
+/// Persistent cells a capture reads per frame of a block: 64k cells (512
+/// KiB) in a 512-frame block, about 1% of its real time on a desktop core
+/// (measured 20-40 us), so a million-cell part is read in about 20 blocks
+/// (0.2 s at 48 kHz) and a few hundred cells at once.
+const CAPTURE_CELLS: usize = 128;
+
+/// Nanoseconds since `t`.
+fn ns_since(t: std::time::Instant) -> u64 {
+    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Events [`Command::Play`] holds for one block.

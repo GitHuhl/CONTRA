@@ -1,8 +1,8 @@
 //! One loaded sample: pinned pages (the preload law) plus a table of streamed pages.
 
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::cache::tag;
 use crate::fmt::{Mix, SampleFmt, emit};
@@ -62,6 +62,29 @@ impl Page {
     }
 }
 
+/// The last codec block a reader decoded, so the next read inside the same
+/// block (a voice moves a few dozen frames a block, a block holds 512) does
+/// not decode it again. One per reader; keep it with the voice.
+pub struct Decoded {
+    sample: u32,
+    index: usize,
+    frames: usize,
+    values: [[i32; ncw::SAMPLES_PER_BLOCK]; 2],
+}
+
+impl Decoded {
+    /// Empty. Allocate at prepare, not on the audio thread.
+    #[must_use]
+    pub fn new() -> Box<Self> {
+        Box::new(Self {
+            sample: u32::MAX,
+            index: usize::MAX,
+            frames: 0,
+            values: [[0; ncw::SAMPLES_PER_BLOCK]; 2],
+        })
+    }
+}
+
 /// Block `n` of a [`Page::Blocks`] page.
 fn block(page: &[u8], n: usize) -> Option<&[u8]> {
     let word = |i: usize| {
@@ -84,8 +107,11 @@ pub struct Sample {
     pub(crate) shift: u32,
     pub(crate) source: Arc<dyn Source>,
     /// Preloaded pages, shared with every other sample of the same blob.
-    pub(crate) pinned: Box<[Option<Page>]>,
+    /// Each page is set once: at load, or later by [`crate::Heads`].
+    pub(crate) pinned: Box<[OnceLock<Page>]>,
     pub(crate) streamed: Box<[AtomicU32]>,
+    /// Runs of heads a deferred load has yet to read ([`crate::Heads`]).
+    pub(crate) heads_due: AtomicU32,
 }
 
 /// What one [`Sample::read`] could not deliver.
@@ -109,9 +135,27 @@ impl Sample {
     /// Whether frame `frame` is preloaded, so a voice starting there plays at once.
     #[must_use]
     pub fn is_pinned(&self, frame: u64) -> bool {
-        self.pinned
-            .get(page_of(frame, self.shift))
-            .is_some_and(Option::is_some)
+        (self.pinned.get(page_of(frame, self.shift))).is_some_and(|p| p.get().is_some())
+    }
+
+    /// Whether a deferred load still has heads of this sample to read.
+    #[must_use]
+    pub fn heads_pending(&self) -> bool {
+        self.heads_due.load(Ordering::Acquire) > 0
+    }
+
+    /// Whether every page under `first..first + frames` is in memory, pinned
+    /// or streamed in, so a read there is whole.
+    #[must_use]
+    pub fn is_resident(&self, first: u64, frames: u64) -> bool {
+        let end = first.saturating_add(frames).min(self.frames);
+        if first >= end {
+            return true;
+        }
+        (page_of(first, self.shift)..=page_of(end - 1, self.shift)).all(|page| {
+            self.pinned.get(page).is_some_and(|p| p.get().is_some())
+                || (self.streamed.get(page)).is_some_and(|e| e.load(Ordering::Acquire) >= RESIDENT)
+        })
     }
 
     /// Frames in each of this sample's pages.
@@ -136,6 +180,19 @@ impl Sample {
         out: &mut [[f32; 2]],
         mix: Option<&Mix>,
     ) -> Read {
+        self.read_cached(client, first, out, mix, None)
+    }
+
+    /// [`Self::read_mixed`] reusing `decoded`, the last codec block this
+    /// reader decoded: the same samples, less decoding.
+    pub fn read_cached(
+        &self,
+        client: &StreamClient,
+        first: u64,
+        out: &mut [[f32; 2]],
+        mix: Option<&Mix>,
+        mut decoded: Option<&mut Decoded>,
+    ) -> Read {
         let size = self.page_frames();
         let mut read = Read::default();
         let mut pos = first;
@@ -151,7 +208,7 @@ impl Sample {
                 .min(self.frames - pos)
                 .min(rest.len() as u64) as usize;
             let (chunk, tail) = rest.split_at_mut(len);
-            if !self.read_page(client, page, offset, chunk, mix) {
+            if !self.read_page(client, page, offset, chunk, mix, decoded.as_deref_mut()) {
                 read.missing += len as u32;
             }
             rest = tail;
@@ -167,15 +224,15 @@ impl Sample {
         offset: usize,
         out: &mut [[f32; 2]],
         mix: Option<&Mix>,
+        decoded: Option<&mut Decoded>,
     ) -> bool {
-        match self.pinned.get(page) {
-            Some(Some(Page::Pcm(bytes))) => {
-                self.fmt
-                    .decode(|i| bytes.get(i).copied().unwrap_or(0), offset, out, mix);
+        match self.pinned.get(page).and_then(OnceLock::get) {
+            Some(Page::Pcm(bytes)) => {
+                self.fmt.decode(bytes, offset, out, mix);
                 return true;
             }
-            Some(Some(Page::Blocks(bytes))) => {
-                return self.read_blocks(bytes, page, offset, out, mix);
+            Some(Page::Blocks(bytes)) => {
+                return self.read_blocks(bytes, page, offset, out, mix, decoded);
             }
             _ => {}
         }
@@ -206,6 +263,7 @@ impl Sample {
         offset: usize,
         out: &mut [[f32; 2]],
         mix: Option<&Mix>,
+        mut decoded: Option<&mut Decoded>,
     ) -> bool {
         const BLOCK: usize = ncw::SAMPLES_PER_BLOCK;
         let Some(packing) = self.source.packing() else {
@@ -213,15 +271,44 @@ impl Sample {
             return false;
         };
         let page_first = (page as u64) << self.shift;
-        let mut values = [[0i32; BLOCK]; 2];
+        let mut local = [[0i32; BLOCK]; 2];
         let mut done = 0;
         while done < out.len() {
             let at = offset + done;
             let index = ((page_first + at as u64) / BLOCK as u64) as usize;
-            let frames = block(bytes, at / BLOCK).and_then(|group| {
-                ncw::decode_group_fixed(group, &packing.header, packing.format, index, &mut values)
+            let frames = match decoded.as_deref_mut() {
+                Some(d) => {
+                    if d.sample != self.id.0 || d.index != index {
+                        d.sample = u32::MAX;
+                        let group = block(bytes, at / BLOCK);
+                        let ok = group.and_then(|group| {
+                            ncw::decode_group_fixed(
+                                group,
+                                &packing.header,
+                                packing.format,
+                                index,
+                                &mut d.values,
+                            )
+                            .ok()
+                        });
+                        if let Some(frames) = ok {
+                            (d.sample, d.index, d.frames) = (self.id.0, index, frames);
+                        }
+                    }
+                    (d.sample == self.id.0).then_some(d.frames)
+                }
+                None => block(bytes, at / BLOCK).and_then(|group| {
+                    ncw::decode_group_fixed(
+                        group,
+                        &packing.header,
+                        packing.format,
+                        index,
+                        &mut local,
+                    )
                     .ok()
-            });
+                }),
+            };
+            let values = decoded.as_deref().map_or(&local, |d| &d.values);
             let skip = at % BLOCK;
             let n = (BLOCK - skip).min(out.len() - done);
             let Some(chunk) = out.get_mut(done..done + n) else {
@@ -267,7 +354,7 @@ impl Sample {
         }
         for page in page_of(first, self.shift)..=page_of(end - 1, self.shift) {
             let due = page_due(page, self.shift, first..end, due, step, descending);
-            if self.pinned.get(page).is_some_and(Option::is_some) {
+            if (self.pinned.get(page)).is_some_and(|p| p.get().is_some()) {
                 continue;
             }
             let Some(entry) = self.streamed.get(page) else {

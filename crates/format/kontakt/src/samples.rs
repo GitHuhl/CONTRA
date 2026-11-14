@@ -117,10 +117,15 @@ impl Resolver {
             let Some(candidate) = self.bases.get(at).map(|b| lexical(&b.join(&name))) else {
                 break;
             };
+            // Where the player said the folder moved to, root or not.
+            let moved = contra_format::moved(&candidate);
+            if moved != candidate && moved.is_file() {
+                return Ok(Some(whole(moved)));
+            }
             if !candidate.starts_with(&self.root) {
                 continue;
             }
-            if let Some((archive, member)) = archive_member(&candidate) {
+            if let Some((archive, member)) = archive_member(&candidate, &self.archives) {
                 // An archive already opened was checked when it was.
                 if (self.archives.contains_key(&archive) || self.inside(&archive))
                     && let Some(found) = self.archive_entry(&archive, &member)?
@@ -182,17 +187,105 @@ impl Resolver {
             .or_insert_with(|| Some((file, index.clone())));
     }
 
-    fn archive_entry(&mut self, archive: &Path, member: &str) -> Result<Option<Location>, String> {
-        let index = match self.archives.get(archive) {
-            Some(index) => index,
-            None => {
-                let index = File::open(archive).ok().and_then(|f| {
-                    let index = Archive::read_index(&f).ok()?;
-                    Some((f, index))
+    /// The archive's handle and index, opened on first use.
+    fn open(&mut self, archive: &Path) -> &Option<(File, Archive)> {
+        if !self.archives.contains_key(archive) {
+            let index = File::open(archive).ok().and_then(|f| {
+                let index = Archive::read_index(&f).ok()?;
+                Some((f, index))
+            });
+            self.archives.insert(archive.to_path_buf(), index);
+        }
+        self.archives.get(archive).unwrap_or(&None)
+    }
+
+    /// [`Resolver::warm`] for the samples the live zones of `zones` name.
+    pub(crate) fn warm_zones(
+        &mut self,
+        zones: &ni_file::kontakt::objects::ZoneList,
+        muted: &[bool],
+        table: &HashMap<u32, String>,
+    ) {
+        let used: std::collections::BTreeSet<u32> = (zones.zones().iter().zip(&zones.group_ids))
+            .filter_map(|(zone, &group)| {
+                let z = zone.params().ok()?;
+                let live = z.sample_present && !muted.get(group as usize).copied().unwrap_or(true);
+                live.then(|| u32::try_from(z.filename_id).unwrap_or(u32::MAX))
+            })
+            .collect();
+        self.warm(
+            used.iter()
+                .filter_map(|id| table.get(id).map(String::as_str)),
+        );
+    }
+
+    /// Reads the member headers of `names` in parallel, so the lookups that
+    /// follow find them in the page cache: on a cold disk each is a random
+    /// read, and one at a time they dominate the load.
+    fn warm<'a>(&mut self, names: impl Iterator<Item = &'a str>) {
+        let mut named: Vec<(PathBuf, String)> = Vec::new();
+        for name in names {
+            let name = name.replace(['\\', '|'], "/");
+            let found = self.bases.iter().find_map(|base| {
+                let candidate = lexical(&base.join(&name));
+                if !candidate.starts_with(&self.root) {
+                    return None;
+                }
+                archive_member(&candidate, &self.archives)
+            });
+            named.extend(found);
+        }
+        // Open the archives (each reads its directory) side by side.
+        let mut missing: Vec<&PathBuf> = named
+            .iter()
+            .map(|(archive, _)| archive)
+            .filter(|a| !self.archives.contains_key(*a))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        let opened: Vec<(PathBuf, Option<(File, Archive)>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = missing
+                .iter()
+                .map(|archive| {
+                    scope.spawn(move || {
+                        let index = File::open(archive).ok().and_then(|f| {
+                            let index = Archive::read_index(&f).ok()?;
+                            Some((f, index))
+                        });
+                        ((*archive).clone(), index)
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        self.archives.extend(opened);
+        let mut wanted: Vec<(PathBuf, u64)> = (named.iter())
+            .filter_map(|(archive, member)| {
+                let (_, index) = self.archives.get(archive)?.as_ref()?;
+                Some((archive.clone(), index.find(member)?.header_offset))
+            })
+            .collect();
+        wanted.sort();
+        let archives = &self.archives;
+        let lanes = 16;
+        std::thread::scope(|scope| {
+            for lane in 0..lanes {
+                let wanted = &wanted;
+                scope.spawn(move || {
+                    let mut header = [0u8; 31];
+                    for (archive, offset) in wanted.iter().skip(lane).step_by(lanes) {
+                        if let Some(Some((file, _))) = archives.get(archive) {
+                            // Only the page cache matters; a short or failed read is fine.
+                            let _ = read_at(file, &mut header, *offset);
+                        }
+                    }
                 });
-                self.archives.entry(archive.to_path_buf()).or_insert(index)
             }
-        };
+        });
+    }
+
+    fn archive_entry(&mut self, archive: &Path, member: &str) -> Result<Option<Location>, String> {
+        let index = self.open(archive);
         let Some((file, index)) = index else {
             return Ok(None);
         };
@@ -274,12 +367,16 @@ fn whole(file: PathBuf) -> Location {
 }
 
 /// `…/x.nkx/member` split into the archive and its member, when x.nkx is a file.
-fn archive_member(path: &Path) -> Option<(PathBuf, String)> {
+/// An archive already opened is a file: no stat to say so again.
+fn archive_member(
+    path: &Path,
+    opened: &HashMap<PathBuf, Option<(File, Archive)>>,
+) -> Option<(PathBuf, String)> {
     path.ancestors().skip(1).find_map(|parent| {
         let is_archive = parent
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("nkx") || e.eq_ignore_ascii_case("nkr"));
-        (is_archive && parent.is_file()).then(|| {
+        (is_archive && (opened.contains_key(parent) || parent.is_file())).then(|| {
             let member = path
                 .strip_prefix(parent)
                 .ok()?
@@ -311,4 +408,16 @@ fn walk(dir: &Path, found: &mut impl FnMut(PathBuf)) {
             _ => {}
         }
     }
+}
+
+/// Reads at `at` without moving the file's cursor, so lanes can share a file.
+#[cfg(unix)]
+fn read_at(file: &std::fs::File, out: &mut [u8], at: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, out, at)
+}
+
+/// Reads at `at` (Windows moves the cursor; header warming never uses it).
+#[cfg(windows)]
+fn read_at(file: &std::fs::File, out: &mut [u8], at: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, out, at)
 }

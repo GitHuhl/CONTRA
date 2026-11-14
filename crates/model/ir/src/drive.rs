@@ -21,6 +21,13 @@ pub enum Curve {
     Tanh(f32),
     /// The drive `d`: `atan(d·x)`.
     Atan(f32),
+    /// The drive `d`: `x / √(1 + (d·x)²)` (unity on small signals, ceiling `1/d`).
+    Saturate(f32),
+    /// A measured odd curve: `points` spread evenly over inputs 0..=1, read
+    /// at `d·|x|` (held at the last point beyond 1) with linear
+    /// interpolation, scaled back by `1 / (d·slope at 0)` so small signals
+    /// pass at unity.
+    Table { drive: f32, points: &'static [f32] },
 }
 
 impl Curve {
@@ -33,13 +40,17 @@ impl Curve {
             | Self::Sine(x)
             | Self::Fold(x)
             | Self::Tanh(x)
-            | Self::Atan(x) => x,
+            | Self::Atan(x)
+            | Self::Saturate(x)
+            | Self::Table { drive: x, .. } => x,
         }
     }
 }
 
 /// An optional one-pole low-pass, a curve, then an optional one-pole
-/// low-pass and a second-order Butterworth high-pass.
+/// low-pass and a second-order Butterworth high-pass; `sections` add linear
+/// sections at the base rate around all of it and oversampled around the
+/// curve.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shaper {
     /// The corner of a one-pole low-pass before the curve, pole
@@ -48,6 +59,7 @@ pub struct Shaper {
     pub curve: Curve,
     pub lowpass_hz: Option<f32>,
     pub highpass_hz: Option<f32>,
+    pub sections: crate::Sections,
 }
 
 /// A sample hold, a quantizer truncating toward zero, then noise.
@@ -125,6 +137,8 @@ pub enum EffectParam {
     /// A [`crate::Compressor`]'s make-up dB and wet share.
     CompressorMakeup,
     CompressorMix,
+    /// A [`crate::Compressor`]'s soft-knee width in dB.
+    CompressorKnee,
     /// A free-running [`crate::Delay`] or [`crate::Phaser`] LFO's Hz.
     ModRate,
     /// Cycles a [`crate::Delay`]'s or [`crate::Phaser`]'s right LFO runs ahead.
@@ -179,6 +193,9 @@ pub enum EffectParam {
     DelayLowCutHz,
     DelayShelfHz,
     DelayShelfDb,
+    /// A tempo-synced [`crate::Delay`] or [`crate::Phaser`] LFO's beats a
+    /// cycle (not numbered for scripts: [`Self::code`] is `None`).
+    ModBeats,
     /// The slot's own [`Effect::output`] and [`Effect::dry`] levels, linear
     /// (moved on a bus's rack: [`Self::add_to`]).
     Output,
@@ -202,10 +219,16 @@ impl EffectParam {
             (Self::CompressorRelease, EffectKind::Compressor(c)) => &mut c.release_ms,
             (Self::CompressorMakeup, EffectKind::Compressor(c)) => &mut c.makeup_db,
             (Self::CompressorMix, EffectKind::Compressor(c)) => &mut c.mix,
+            (Self::CompressorKnee, EffectKind::Compressor(c)) => &mut c.knee_db,
             (Self::ModRate, EffectKind::Delay(crate::Delay { rate, .. }))
             | (Self::ModRate, EffectKind::Phaser(crate::Phaser { rate, .. })) => match rate {
                 crate::Rate::Hz(hz) => hz,
                 crate::Rate::Beats(_) | crate::Rate::Steps { .. } => return None,
+            },
+            (Self::ModBeats, EffectKind::Delay(crate::Delay { rate, .. }))
+            | (Self::ModBeats, EffectKind::Phaser(crate::Phaser { rate, .. })) => match rate {
+                crate::Rate::Beats(b) => b,
+                crate::Rate::Hz(_) | crate::Rate::Steps { .. } => return None,
             },
             (Self::ModPhase, EffectKind::Delay(d)) => &mut d.phase,
             (Self::ModPhase, EffectKind::Phaser(p)) => &mut p.phase,
@@ -297,6 +320,91 @@ impl EffectParam {
     }
 }
 
+/// Numbers every [`EffectParam`] for a script host: the plain controls in
+/// order, then each indexed one by its index below [`INDEXED`].
+macro_rules! param_codes {
+    (plain: $($p:ident),* ; indexed: $($i:ident),*) => {
+        impl EffectParam {
+            /// This control's number; `None` past [`INDEXED`].
+            #[must_use]
+            pub fn code(self) -> Option<u16> {
+                let plain = [$(Self::$p),*];
+                if let Some(n) = plain.iter().position(|&p| p == self) {
+                    return u16::try_from(n).ok();
+                }
+                let mut base = u16::try_from(plain.len()).ok()?;
+                $(
+                    if let Self::$i(k) = self {
+                        return (k < INDEXED).then(|| base + u16::from(k));
+                    }
+                    base += u16::from(INDEXED);
+                )*
+                let _ = base;
+                None
+            }
+
+            /// The control numbered `code` ([`Self::code`]).
+            #[must_use]
+            pub fn from_code(code: u16) -> Option<Self> {
+                let plain = [$(Self::$p),*];
+                if let Some(&p) = plain.get(usize::from(code)) {
+                    return Some(p);
+                }
+                let mut c = code.checked_sub(u16::try_from(plain.len()).ok()?)?;
+                $(
+                    if c < u16::from(INDEXED) {
+                        return u8::try_from(c).ok().map(Self::$i);
+                    }
+                    c -= u16::from(INDEXED);
+                )*
+                let _ = c;
+                None
+            }
+        }
+    };
+}
+
+/// Indexed controls (bands, stages, matrix cells) numbered per index.
+pub const INDEXED: u8 = 8;
+
+param_codes!(
+    plain: FormantTalk, FormantSharp, FormantSize, ShaperAmount, ShaperLowpassHz, CrushRate,
+    CrushBits, CompressorThreshold, CompressorRatio, CompressorAttack, CompressorRelease,
+    CompressorMakeup, CompressorMix, CompressorKnee, ModRate, ModPhase, PhaserExponent,
+    PhaserFeedback, TransientAttack, TransientSustain, TransientGain, ReverbSeconds,
+    ReverbDamping, ReverbStereo, ReverbHighCut, ReverbPredelay, LimiterInput, LimiterRelease,
+    FilterHz, FilterGain, FilterLastDamping, CascadeHz, CascadeGain, ClockedCutoff,
+    ClockedResonance, DelayMs, DelayDampingHz, DelayLowCutHz, DelayShelfHz, DelayShelfDb,
+    Output, Dry;
+    indexed: BellOctaves, BellHz, BellQ, BellGain, FilterDamping, CascadeShift, CascadeQ,
+    CascadeLimit, CascadePeak, CascadeMorph, CascadeWet, DelayInput, DelayLoop
+);
+
+impl EffectParam {
+    /// This control's value on `effect`, the slot's levels included.
+    pub fn value(self, effect: &mut Effect) -> Option<f32> {
+        match self {
+            Self::Output => Some(effect.output),
+            Self::Dry => Some(effect.dry),
+            _ => self.field_mut(&mut effect.kind).map(|v| *v),
+        }
+    }
+
+    /// Sets this control of `effect` to `value`; false when it has none.
+    pub fn set(self, effect: &mut Effect, value: f32) -> bool {
+        let at = match self {
+            Self::Output => &mut effect.output,
+            Self::Dry => &mut effect.dry,
+            _ => match self.field_mut(&mut effect.kind) {
+                Some(at) => at,
+                None => return false,
+            },
+        };
+        *at = value;
+        true
+    }
+}
+
 /// What a script's 0..=1 knob sets, through its format's law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KnobTarget {
@@ -309,6 +417,8 @@ pub enum KnobTarget {
     LfoSteps,
     /// A pulse or Multi LFO's pulse width.
     LfoWidth,
+    /// An LFO's start phase, in cycles.
+    LfoPhase,
     /// One of a [`crate::Wave::Multi`]'s weights, by its index there.
     LfoWeight(u8),
     /// A control whose law depends on the slot's effect: the slot's own
@@ -316,6 +426,8 @@ pub enum KnobTarget {
     Slot(SlotKnob),
     /// How the addressed convolution's response is prepared.
     Impulse(crate::ImpulseKnob),
+    /// The addressed group's [`crate::Group::speed`].
+    Speed,
 }
 
 /// A knob whose law the effect in the slot sets.
@@ -325,9 +437,13 @@ pub enum SlotKnob {
     Resonance,
     Attack,
     Release,
-    /// A compressor's threshold and ratio knobs.
+    /// A compressor's threshold, ratio, input drive and make-up knobs.
     Threshold,
     Ratio,
+    Input,
+    Makeup,
+    /// The wet share of an effect whose knobs a [`KnobModel`] reads.
+    Mix,
     /// A reverb's knobs.
     ReverbPredelay,
     ReverbSize,
@@ -338,6 +454,8 @@ pub enum SlotKnob {
     BandHz(u8),
     BandWidth(u8),
     BandGain(u8),
+    /// An EQ band's switch between its shelf and a bell, by band.
+    BandBell(u8),
     /// A delay's time, feedback, pan, damping, low-cut and high-cut knobs.
     DelayTime,
     DelayFeedback,
@@ -353,6 +471,9 @@ pub enum SlotKnob {
     StageMorph(u8),
     StageWet(u8),
     OutputGain,
+    /// A [`KnobModel`]'s knob with no name shared across effects, by its
+    /// place in that model.
+    Knob(u8),
 }
 
 /// The rack a [`SlotLaw`]'s slot is in.
@@ -381,6 +502,33 @@ pub struct SlotLaw {
     pub law: crate::Law,
 }
 
+/// A slot whose knobs interact: the effect is rebuilt from all of them
+/// whenever a script moves one, so the result does not depend on the order
+/// they were set in, and each reads back exactly as set.
+#[derive(Clone, Debug)]
+pub struct KnobModel {
+    /// The knobs, in the order [`Self::build`] reads their positions.
+    pub knobs: Box<[SlotKnob]>,
+    /// The saved positions, then any fixed settings `build` reads after them.
+    pub saved: Box<[f32]>,
+    /// The effect at these positions: the same mapping the saved slot was
+    /// read through.
+    pub build: fn(&[f32]) -> Option<crate::EffectKind>,
+}
+
+impl KnobModel {
+    /// The most positions a model holds: its live positions fit a fixed
+    /// array, so moving a knob allocates nothing.
+    pub const MAX: usize = 16;
+}
+
+impl PartialEq for KnobModel {
+    fn eq(&self, other: &Self) -> bool {
+        (self.knobs == other.knobs && self.saved == other.saved)
+            && std::ptr::fn_addr_eq(self.build, other.build)
+    }
+}
+
 /// Shape `id` a script may switch a filter slot
 /// ([`SlotShapes::slots`]) to: its pass, stages, ladder taps and
 /// ranges come from `filter`. The resonance moves to the new last stage, the
@@ -403,6 +551,8 @@ pub struct SlotShapes {
     pub types: Vec<SlotType>,
     /// Each filter slot's saved subtype, as a script reads it back.
     pub subtypes: Vec<(RackAt, u8, i32)>,
+    /// Each saved slot's effect type, as a script reads it back.
+    pub saved_types: Vec<(RackAt, u8, i32)>,
 }
 
 impl SlotShapes {
@@ -411,6 +561,7 @@ impl SlotShapes {
         slots: Vec::new(),
         types: Vec::new(),
         subtypes: Vec::new(),
+        saved_types: Vec::new(),
     };
 }
 
@@ -423,8 +574,13 @@ pub struct SlotType {
     pub subtype: bool,
     /// The subtype a script reads back from the loaded slot.
     pub reads: i32,
+    /// The effect type a script reads back from it: `id`, or for a
+    /// subtype the type of effect it is a subtype of.
+    pub kind: i32,
     pub effect: Option<crate::Effect>,
     pub laws: std::sync::Arc<[(SlotKnob, EffectParam, crate::Law)]>,
+    /// How its knobs rebuild it together, when they interact.
+    pub model: Option<KnobModel>,
 }
 
 impl SlotShape {

@@ -11,10 +11,14 @@ mod route;
 pub mod route_depth;
 mod script;
 mod slots;
+mod zones;
 
 pub use engine_pars::{EnginePar, EnginePars};
 pub use route::{held_time, route_source};
-pub use script::{Callbacks, CcLink, Controls, Holder, LookPars, Recall, Saved, ScriptPlan};
+pub use script::{
+    Callbacks, CcLink, Controls, Holder, KnobModPlan, LookPars, Recall, Saved, ScriptPlan,
+};
+pub use zones::{ZoneFacts, ZoneRules, zone_name};
 
 use std::ops::RangeInclusive;
 
@@ -184,6 +188,14 @@ pub struct Group {
     /// The bus its voices play into, an index into [`Plan::buses`]; a
     /// script may move it while they play.
     pub bus: usize,
+    /// Its zones play as wavetables, read so. A zone `set_zone_par` moves
+    /// in gets its table built off the audio thread.
+    pub wavetable: Option<contra_voice::Read>,
+    /// The speed its voices start at when its source stretches time
+    /// ([`contra_ir::Group::speed`]).
+    pub speed: Option<f32>,
+    /// What it gives each of its zones.
+    pub zones: ZoneRules,
 }
 
 /// The bus `zone`'s group plays into now.
@@ -239,6 +251,9 @@ impl Group {
                 | ir::ModKind::LfoRate {
                     source: input, lfo, ..
                 }
+                | ir::ModKind::LfoDivision {
+                    source: input, lfo, ..
+                }
                 | ir::ModKind::LfoHz {
                     source: input, lfo, ..
                 } if source == ir::Source::Lfo(lfo) => self.reads(input, cc),
@@ -274,6 +289,9 @@ impl Group {
             routes: Vec::new(),
             release_trigger: false,
             bus: 0,
+            wavetable: None,
+            speed: None,
+            zones: ZoneRules::PLAIN,
         }
     }
 
@@ -335,10 +353,17 @@ pub struct Zone {
     pub velocities: RangeInclusive<u8>,
     /// See [`ir::Zone::slot`].
     pub slot: u16,
+    /// See [`ir::Zone::id`].
+    pub id: u32,
     /// Start conditions folded left to right by their joins; empty always starts.
     pub start: Vec<(ir::Join, Atom)>,
     pub trigger: Trigger,
+    /// Velocity and key crossfades, then any on controllers. Those on
+    /// velocity and key follow [`Self::fades`] and the current ranges
+    /// ([`Self::range_crossfades`]).
     pub crossfades: Vec<Crossfade>,
+    /// Velocity and key fade lengths, each (in, out), as the zone saves them.
+    pub fades: [(u8, u8); 2],
     // Voice group.
     /// Voice group, for polyphony limits, choke and group round robins.
     pub group: u32,
@@ -371,6 +396,33 @@ pub struct Zone {
 }
 
 impl Zone {
+    /// Sets the velocity and key crossfades from [`Self::fades`] at the
+    /// current ranges, as Kontakt measures them: from `low` a fade `F`
+    /// rises over (low − 1, low + F), to `high` it falls over
+    /// (high − F, high + 1). The loader and a range edit both call it.
+    pub fn range_crossfades(&mut self) {
+        let ranged = [
+            (Control::Velocity, &self.velocities, self.fades[0]),
+            (Control::Key, &self.keys, self.fades[1]),
+        ];
+        let ranged: Vec<_> = (ranged.into_iter())
+            .filter(|&(_, _, (fade_in, fade_out))| fade_in > 0 || fade_out > 0)
+            .map(|(control, range, (fade_in, fade_out))| {
+                let (low, high) = (*range.start(), *range.end());
+                Crossfade {
+                    control,
+                    fade_in: (fade_in > 0)
+                        .then(|| (low.saturating_sub(1), low.saturating_add(fade_in))),
+                    fade_out: (fade_out > 0)
+                        .then(|| (high.saturating_sub(fade_out), high.saturating_add(1))),
+                }
+            })
+            .collect();
+        self.crossfades
+            .retain(|x| matches!(x.control, Control::Cc(_)));
+        self.crossfades.splice(0..0, ranged);
+    }
+
     /// A plain attack zone over the full key and velocity range on bus 0.
     #[must_use]
     pub fn new(region: Region, root: u8, sample_rate: u32) -> Self {
@@ -378,9 +430,11 @@ impl Zone {
             keys: 0..=127,
             velocities: 1..=127,
             slot: 0,
+            id: 0,
             start: Vec::new(),
             trigger: Trigger::Attack,
             crossfades: Vec::new(),
+            fades: [(0, 0); 2],
             group: 0,
             member: 0,
             off_by: None,
@@ -417,6 +471,8 @@ pub struct Bus {
     /// Routes moving its inserts ([`ir::Bus::mods`]) and the blends they read.
     pub mods: Vec<ir::ModKind>,
     pub blends: Vec<ir::Blend>,
+    /// Read by `Source::Lfo(n)` in those routes ([`ir::Bus::lfos`]).
+    pub lfos: Vec<ir::Lfo>,
 }
 
 pub use contra_effects::Response;
@@ -469,10 +525,30 @@ pub struct Plan {
     pub responses: Vec<(String, ir::Sample)>,
     /// How [`ir::KnobTarget::Slot`] knobs move the effects they address.
     pub slot_laws: Vec<ir::SlotLaw>,
+    /// Slots whose knobs [`ir::KnobModel`]s rebuild together.
+    pub slot_models: Vec<(ir::RackAt, u8, ir::KnobModel)>,
     /// The filter shapes [`EnginePar::EffectSubtype`] switches slots to.
     pub slot_shapes: ir::SlotShapes,
+    /// Controllers that move foreign scripts' controls.
+    pub knob_mods: Vec<KnobModPlan>,
     /// Slots loaded with a [`ir::SlotShapes::types`] entry ([`Plan::load_type`]).
     pub loaded: Vec<(ir::RackAt, u8, u16)>,
+    /// Every zone as scripts find and read it (`find_zone`, `get_zone_par`).
+    pub zone_facts: Vec<ZoneFacts>,
+    /// Saved-purged groups, nothing of them loaded: what a script's
+    /// `purge_group(g, 1)` builds ([`Dormant`]).
+    pub dormant: std::sync::Arc<Vec<Dormant>>,
+}
+
+/// A purged group as saved: its zones and the samples they play, kept as the
+/// instrument described them (sample indices local to `samples`) until the
+/// host loads them, off the audio thread, and appends the zones to the plan.
+#[derive(Clone, Debug)]
+pub struct Dormant {
+    /// Its index in [`Plan::groups`].
+    pub group: u32,
+    pub source: ir::Group,
+    pub samples: Vec<ir::Sample>,
 }
 
 impl Plan {
@@ -504,6 +580,7 @@ impl Plan {
                 enabled: true,
                 mods: Vec::new(),
                 blends: Vec::new(),
+                lfos: Vec::new(),
             }],
             polyphony: Vec::new(),
             voice_groups: Vec::new(),
@@ -525,8 +602,12 @@ impl Plan {
             impulse_laws: Vec::new(),
             responses: Vec::new(),
             slot_laws: Vec::new(),
+            slot_models: Vec::new(),
             slot_shapes: ir::SlotShapes::NONE,
+            knob_mods: Vec::new(),
             loaded: Vec::new(),
+            zone_facts: Vec::new(),
+            dormant: std::sync::Arc::default(),
         }
     }
 }
@@ -550,7 +631,9 @@ pub fn source(kind: &ir::ModKind) -> Option<ir::Source> {
         | K::LfoPhase { source, .. }
         | K::LfoRate { source, .. }
         | K::LfoHz { source, .. }
+        | K::LfoDivision { source, .. }
         | K::Intensity { source, .. }
+        | K::Wavetable { source, .. }
         | K::LoopShift { source, .. } => Some(source),
         K::Envelope => None,
     }

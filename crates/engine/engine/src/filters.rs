@@ -50,18 +50,14 @@ impl Engine {
         let mut chains: Vec<Chain> = Vec::new();
         let rate = self.rate;
         let plan = Arc::clone(&self.plan);
-        self.zone_chain = self
-            .plan
-            .zones
-            .iter()
-            .map(|z| {
-                let g = z.group as usize;
+        self.group_chain = (0..self.groups.len())
+            .map(|g| {
                 let sections = shared.get(g)?.clone();
                 let split = self.group_split.get(g).copied().flatten();
                 if sections.is_empty() && split.is_none() {
                     return None;
                 }
-                let bus = crate::plan::bus(&self.groups, z);
+                let bus = self.groups.get(g).map_or(0, |g| g.bus);
                 let own = split.map(|_| g);
                 let at = chains
                     .iter()
@@ -120,7 +116,8 @@ impl Engine {
         {
             let zone = self.plan.zones.get(slot.zone);
             let bus = zone.map_or(0, |z| crate::plan::bus(&self.groups, z));
-            let chain = self.zone_chain.get(slot.zone).copied().flatten();
+            let chain =
+                zone.and_then(|z| self.group_chain.get(z.group as usize).copied().flatten());
             let chain = chain.and_then(|c| on_bus(&self.chains, usize::from(c), bus));
             let mix = match chain.and_then(|c| self.chains.get_mut(c)) {
                 Some(chain) => {
@@ -134,7 +131,8 @@ impl Engine {
             };
             let before = slot.voice.missing_frames();
             if slot.rack.is_empty() {
-                slot.voice.render(&self.stream, self.now.0, mix);
+                slot.voice
+                    .render(&mut self.voice_scratch, &self.stream, self.now.0, mix);
             } else {
                 let group = self.plan.zones.get(slot.zone).map(|z| z.group as usize);
                 let inserts = group
@@ -142,10 +140,16 @@ impl Engine {
                     .map(|g| &g.inserts[..])
                     .unwrap_or_default();
                 let (rack, spare, rate) = (&mut slot.rack, &mut *self.scratch, self.rate);
-                slot.voice
-                    .render_through(&self.stream, self.now.0, mix, |io| {
-                        crate::voice_rack::process(rack, inserts, io, spare, rate);
-                    });
+                let lines = &mut slot.comb_lines;
+                slot.voice.render_through(
+                    &mut self.voice_scratch,
+                    &self.stream,
+                    self.now.0,
+                    mix,
+                    |io| {
+                        crate::voice_rack::process(rack, inserts, io, spare, lines, rate);
+                    },
+                );
             }
             self.stats.missing_frames += slot.voice.missing_frames() - before;
             #[cfg(feature = "trace")]
@@ -169,7 +173,7 @@ impl Engine {
         let tempo = self.tempo;
         for chain in &mut self.chains {
             // A group rack may ring on (a reverb's tail): it always runs.
-            if !chain.live && chain.group.is_none() && chain.filters.iter().all(Stage::is_silent) {
+            if !chain.live && chain.group.is_none() && !chain.ringing {
                 continue;
             }
             chain.live = false;
@@ -177,6 +181,7 @@ impl Engine {
                 continue;
             };
             run(&mut chain.filters, mix);
+            chain.ringing = !chain.filters.iter().all(Stage::is_silent);
             if let Some((g, rack)) = &mut chain.group {
                 // A script may have changed the group's slots since.
                 if let Some(group) = self.groups.get(*g) {

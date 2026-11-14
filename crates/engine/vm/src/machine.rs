@@ -1,71 +1,250 @@
-//! A script slot's machine: the KSP bytecode interpreter.
+//! A script slot's machine: the bytecode interpreter, or a front end that
+//! runs its own language against the same host calls.
 
-use crate::{CoId, Faults, HostApi, Instance, Program, Step, Text};
+use std::sync::Arc;
+
+use crate::{CoId, Faults, Foreign, HostApi, Instance, Machine, Program, Step, Text, WidgetLook};
 
 /// One script slot's machine.
-pub struct Vm(Instance);
+pub enum Vm {
+    Code(Instance),
+    Foreign(Box<dyn Machine>),
+}
 
 impl Vm {
-    /// The interpreter with `coroutines` slots. Not real-time.
+    /// `foreign`'s machine, else the interpreter with `coroutines` slots. Not real-time.
     #[must_use]
-    pub fn new(program: &Program, coroutines: usize) -> Self {
-        Self(Instance::new(program, coroutines.max(1)))
+    pub fn new(program: &Program, coroutines: usize, foreign: Option<&Arc<dyn Foreign>>) -> Self {
+        match foreign {
+            Some(code) => Self::Foreign(code.machine()),
+            None => Self::Code(Instance::new(program, coroutines.max(1))),
+        }
     }
 
     pub fn start(&mut self, entry: u32, context: u64) -> Option<CoId> {
-        self.0.start(entry, context)
+        match self {
+            Self::Code(vm) => vm.start(entry, context),
+            Self::Foreign(m) => m.start(entry, context),
+        }
     }
 
     pub fn run(&mut self, program: &Program, co: CoId, host: &mut dyn HostApi) -> Step {
-        self.0.run(program, co, host)
+        match self {
+            Self::Code(vm) => vm.run(program, co, host),
+            Self::Foreign(m) => m.run(co, host),
+        }
+    }
+
+    /// The next run yields after `turns` loop turns (the interpreter only).
+    pub fn set_fuel(&mut self, turns: u32) {
+        if let Self::Code(vm) = self {
+            vm.set_fuel(turns);
+        }
+    }
+
+    /// Loop turns the last [`Vm::run`] made (the interpreter's; 0 for a foreign machine).
+    #[must_use]
+    pub fn last_turns(&self) -> u32 {
+        match self {
+            Self::Code(vm) => vm.last_turns(),
+            Self::Foreign(_) => 0,
+        }
     }
 
     pub fn cancel(&mut self, co: CoId) {
-        self.0.cancel(co);
+        match self {
+            Self::Code(vm) => vm.cancel(co),
+            Self::Foreign(m) => m.cancel(co),
+        }
     }
 
     #[must_use]
     pub fn context(&self, co: CoId) -> Option<u64> {
-        self.0.context(co)
+        match self {
+            Self::Code(vm) => vm.context(co),
+            Self::Foreign(m) => m.context(co),
+        }
     }
 
+    /// A foreign machine's control `id` moves to `value` ([`Machine::control`]);
+    /// the interpreter has none.
+    pub fn control(&mut self, id: i32, value: f64, context: u64) -> Option<CoId> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.control(id, value, context),
+        }
+    }
+
+    /// A foreign machine's control `id` moves by a route ([`Machine::control_mod`]).
+    pub fn control_mod(&mut self, id: i32, saved: f64, ratio: f64, m: f64, context: u64) -> Option<CoId> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(f) => f.control_mod(id, saved, ratio, m, context),
+        }
+    }
+
+    /// A foreign machine's waits are never stopped: always epoch 0.
     #[must_use]
     pub fn wait_epoch(&self, co: CoId) -> Option<u32> {
-        self.0.wait_epoch(co)
+        match self {
+            Self::Code(vm) => vm.wait_epoch(co),
+            Self::Foreign(_) => Some(0),
+        }
     }
 
     /// Whether a running (waiting) callback has a context `matches` takes.
+    /// ponytail: a foreign machine's callbacks are not listed: never.
     #[must_use]
     pub fn is_running(&self, matches: impl Fn(u64) -> bool) -> bool {
-        self.0.find(matches).is_some()
+        match self {
+            Self::Code(vm) => vm.find(matches).is_some(),
+            Self::Foreign(_) => false,
+        }
     }
 
     /// `stop_wait` on the callback with this context; the epoch to resume it with.
     pub fn stop_wait(&mut self, matches: impl Fn(u64) -> bool, rest: bool) -> Option<(CoId, u32)> {
-        let co = self.0.find(matches)?;
-        Some((co, self.0.stop_wait(co, rest)?))
+        match self {
+            Self::Code(vm) => {
+                let co = vm.find(matches)?;
+                Some((co, vm.stop_wait(co, rest)?))
+            }
+            Self::Foreign(_) => None,
+        }
+    }
+
+    pub fn spawned(&mut self) -> Option<(CoId, u64)> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.spawned(),
+        }
     }
 
     #[must_use]
     pub fn faults(&self) -> Faults {
-        self.0.faults()
+        match self {
+            Self::Code(vm) => vm.faults(),
+            Self::Foreign(m) => m.faults(),
+        }
     }
 
     #[must_use]
     pub fn cell(&self, n: usize) -> Option<i64> {
-        self.0.cell(n)
+        match self {
+            Self::Code(vm) => vm.cell(n),
+            Self::Foreign(_) => None,
+        }
     }
 
     pub fn set_cell(&mut self, n: usize, value: i64) {
-        self.0.set_cell(n, value);
+        if let Self::Code(vm) = self {
+            vm.set_cell(n, value);
+        }
     }
 
     pub fn set_text(&mut self, n: usize, value: Text) {
-        self.0.set_text(n, value);
+        if let Self::Code(vm) = self {
+            vm.set_text(n, value);
+        }
+    }
+
+    /// As [`Machine::stage_widget`]; the interpreter has no own widgets.
+    pub fn stage_widget(&mut self, n: u32, value: f64, cell: Option<u32>) {
+        if let Self::Foreign(m) = self {
+            m.stage_widget(n, value, cell);
+        }
+    }
+
+    #[must_use]
+    pub fn widget(&self, n: u32) -> Option<WidgetLook> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.widget(n),
+        }
+    }
+
+    /// Copy an own widget's array cells into preallocated storage.
+    pub fn widget_cells(&self, n: u32, out: &mut [f64]) -> bool {
+        match self {
+            Self::Code(_) => false,
+            Self::Foreign(m) => m.widget_cells(n, out),
+        }
+    }
+
+    /// What may have changed its state, wrapping: unchanged, its cells,
+    /// widgets and saved state are as they were. the interpreter's change count, or
+    /// [`Machine::runs`].
+    #[must_use]
+    pub fn runs(&self) -> u32 {
+        match self {
+            Self::Code(vm) => vm.changes,
+            Self::Foreign(m) => m.runs(),
+        }
+    }
+
+    /// The interpreter's cells in `range`; a foreign machine has none.
+    #[must_use]
+    pub fn cells(&self, range: std::ops::Range<usize>) -> Option<&[i64]> {
+        match self {
+            Self::Code(vm) => vm.cells.get(range),
+            Self::Foreign(_) => None,
+        }
+    }
+
+    /// The interpreter's text cells in `range`; a foreign machine has none.
+    #[must_use]
+    pub fn texts(&self, range: std::ops::Range<usize>) -> Option<&[Text]> {
+        match self {
+            Self::Code(vm) => vm.texts.get(range),
+            Self::Foreign(_) => None,
+        }
+    }
+
+    /// As [`Machine::own_page`].
+    #[must_use]
+    pub fn own_page(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.own_page(),
+        }
+    }
+
+    /// As [`Machine::save_state`].
+    pub fn save_state(&mut self, out: &mut [u8]) -> Option<usize> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.save_state(out),
+        }
+    }
+
+    /// As [`Machine::take_file`].
+    pub fn take_file(&mut self, out: &mut [u8]) -> Option<usize> {
+        match self {
+            Self::Code(_) => None,
+            Self::Foreign(m) => m.take_file(out),
+        }
+    }
+
+    pub fn widget_text(&self, n: u32, out: &mut Text) -> bool {
+        match self {
+            Self::Code(_) => false,
+            Self::Foreign(m) => m.widget_text(n, out),
+        }
+    }
+
+    /// As [`Machine::widget_item`].
+    pub fn widget_item(&self, n: u32, i: u32, out: &mut Text) -> bool {
+        match self {
+            Self::Code(_) => false,
+            Self::Foreign(m) => m.widget_item(n, i, out),
+        }
     }
 
     #[must_use]
     pub fn text(&self, n: usize) -> Option<&Text> {
-        self.0.text(n)
+        match self {
+            Self::Code(vm) => vm.text(n),
+            Self::Foreign(_) => None,
+        }
     }
 }

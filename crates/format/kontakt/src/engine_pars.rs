@@ -34,10 +34,91 @@ pub fn engine_pars() -> Vec<ir::ScriptPar> {
         .collect()
 }
 
+/// The effect type (its `$EFFECT_TYPE_*` name) parameter `name` belongs
+/// to, for the families only one module has. On a slot holding another
+/// type it names nothing: Kontakt 8.13.1 drops the set and reads 0, and the
+/// script runs on (`STEREO_PAN` addressed to a Lo-Fi slot, the group index
+/// winning over a bus `<generic>`; probe bus_group_override.lua,
+/// 2026-11-12). A name not listed is left to the slot's own check.
+/// The rate kind each `$NI_SYNC_UNIT_*` value picks (KSP reference: ABS 0,
+/// WHOLE 5 .. 256TH 21; 11 and 14 are unused): free Hz, or one count of the
+/// note value in quarter-note beats (−1: no unit).
+#[must_use]
+pub fn lfo_units() -> Vec<Option<ir::Rate>> {
+    const T: f32 = 2.0 / 3.0;
+    #[rustfmt::skip]
+    let beats = [0.0, -1.0, -1.0, -1.0, -1.0, 4.0, 4.0 * T, 2.0, 2.0 * T, 1.0, T, -1.0, 0.5, 0.5 * T,
+        -1.0, 0.25, 0.25 * T, 0.125, 0.125 * T, 0.0625, 0.0625 * T, 1.0 / 64.0];
+    #[rustfmt::skip]
+    let unit = |b: f32| if b > 0.0 { Some(ir::Rate::Steps { beats: b, count: 1.0 }) }
+        else { (b == 0.0).then_some(ir::Rate::Hz(1.0)) };
+    beats.into_iter().map(unit).collect()
+}
+
+#[must_use]
+pub fn owner(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_uppercase();
+    let family = |pattern: &str| match pattern.strip_suffix('_') {
+        Some(_) => name.starts_with(pattern),
+        None => name == pattern,
+    };
+    OWNERS
+        .iter()
+        .find(|(pattern, _)| family(pattern))
+        .map(|&(_, ty)| ty)
+}
+
+/// Parameter families (a trailing `_` is a prefix, else the exact name)
+/// and their effect type, from the KSP manual's engine parameter sections.
+const OWNERS: &[(&str, &str)] = &[
+    ("$ENGINE_PAR_STEREO", "$EFFECT_TYPE_STEREO"),
+    ("$ENGINE_PAR_STEREO_PAN", "$EFFECT_TYPE_STEREO"),
+    ("$ENGINE_PAR_COMP_", "$EFFECT_TYPE_COMPRESSOR"),
+    ("$ENGINE_PAR_LIM_", "$EFFECT_TYPE_LIMITER"),
+    ("$ENGINE_PAR_SCOMP_", "$EFFECT_TYPE_BUS_COMP"),
+    ("$ENGINE_PAR_FCOMP_", "$EFFECT_TYPE_FB_COMP"),
+    ("$ENGINE_PAR_SEQ_", "$EFFECT_TYPE_SOLID_GEQ"),
+    ("$ENGINE_PAR_SK_", "$EFFECT_TYPE_SKREAMER"),
+    ("$ENGINE_PAR_SKDLX_", "$EFFECT_TYPE_SKREAMERDLX"),
+    ("$ENGINE_PAR_TP_", "$EFFECT_TYPE_TAPE_SAT"),
+    ("$ENGINE_PAR_IRC_", "$EFFECT_TYPE_IRC"),
+    ("$ENGINE_PAR_RV_", "$EFFECT_TYPE_REVERB"),
+    ("$ENGINE_PAR_DL_", "$EFFECT_TYPE_DELAY"),
+    ("$ENGINE_PAR_CH_", "$EFFECT_TYPE_CHORUS"),
+    ("$ENGINE_PAR_FL_", "$EFFECT_TYPE_FLANGER"),
+    ("$ENGINE_PAR_PH_", "$EFFECT_TYPE_PHASER"),
+    ("$ENGINE_PAR_RDL_", "$EFFECT_TYPE_REPLIKA"),
+    ("$ENGINE_PAR_TDL_", "$EFFECT_TYPE_TWINDELAY"),
+    ("$ENGINE_PAR_PSYDL_", "$EFFECT_TYPE_PSYCHEDELAY"),
+    ("$ENGINE_PAR_RAUM_", "$EFFECT_TYPE_RAUM"),
+    ("$ENGINE_PAR_JMP_", "$EFFECT_TYPE_JUMP"),
+    ("$ENGINE_PAR_EPP_", "$EFFECT_TYPE_EP_PREAMPS"),
+    ("$ENGINE_PAR_FREAK_", "$EFFECT_TYPE_FREAK"),
+    ("$ENGINE_PAR_FLAIR_", "$EFFECT_TYPE_FLAIR"),
+    ("$ENGINE_PAR_PHASIS_", "$EFFECT_TYPE_PHASIS"),
+    ("$ENGINE_PAR_CHORAL_", "$EFFECT_TYPE_CHORAL"),
+    ("$ENGINE_PAR_KOLOR_", "$EFFECT_TYPE_KOLOR"),
+    ("$ENGINE_PAR_DIRT_", "$EFFECT_TYPE_DIRT"),
+    ("$ENGINE_PAR_BITE_", "$EFFECT_TYPE_BITE"),
+    ("$ENGINE_PAR_BASSPRO_", "$EFFECT_TYPE_BASSPRO"),
+    ("$ENGINE_PAR_BASSINVADER_", "$EFFECT_TYPE_BASSINVADER"),
+    ("$ENGINE_PAR_SUPERGT_", "$EFFECT_TYPE_SUPERGT"),
+    ("$ENGINE_PAR_REVERBDELIGHT_", "$EFFECT_TYPE_REVERBDELIGHT"),
+    ("$ENGINE_PAR_WOWFLUTTER_", "$EFFECT_TYPE_WOWFLUTTER"),
+    ("$ENGINE_PAR_RINGMOD_", "$EFFECT_TYPE_RINGMOD"),
+    ("$ENGINE_PAR_GATER_", "$EFFECT_TYPE_GATER"),
+    ("$ENGINE_PAR_BEATSLICER_", "$EFFECT_TYPE_BEATSLICER"),
+    ("$ENGINE_PAR_BEATMASHER_", "$EFFECT_TYPE_BEATMASHER"),
+    ("$ENGINE_PAR_BIGFUZZ_", "$EFFECT_TYPE_BIGFUZZ"),
+    ("$ENGINE_PAR_FUZZ_", "$EFFECT_TYPE_FUZZ"),
+    ("$ENGINE_PAR_STEREOTUNE_", "$EFFECT_TYPE_STEREO_TUNE"),
+];
+
 /// The names with an engine parameter of their own.
 const FIXED: &[(&str, ir::EnginePar)] = {
     use ir::EnginePar as P;
     use ir::ReverbPar as R;
+    use ir::ZonePar as Z;
     &[
         ("$ENGINE_PAR_ATTACK", P::Attack),
         ("$ENGINE_PAR_HOLD", P::Hold),
@@ -50,6 +131,47 @@ const FIXED: &[(&str, ir::EnginePar)] = {
         ("$ENGINE_PAR_INTMOD_INTENSITY", P::RouteDepth),
         ("$ENGINE_PAR_INTMOD_BYPASS", P::ModBypass),
         ("$ENGINE_PAR_LFO_DELAY", P::LfoFade),
+        ("$ENGINE_PAR_INTMOD_RETRIGGER", P::LfoRetrigger),
+        ("$ENGINE_PAR_INTMOD_FREQUENCY_UNIT", P::LfoUnit),
+        // Position, the form amounts and Inharm are 0..=1 linear (readouts.rs
+        // shows 0..100); the voice clamps each with its routes to 0..=1
+        // (0x140b52133). The modulator is not carried yet: its text answers,
+        // a set is reported. The form modes are the
+        // `$NI_WT_FORM_*` kinds (wavetable::warp_modes); no mode has text.
+        (
+            "$ENGINE_PAR_WT_POSITION",
+            P::Wavetable(ir::TableValue::Position),
+        ),
+        ("$ENGINE_PAR_WT_FORM", P::Wavetable(ir::TableValue::Warp(0))),
+        ("$ENGINE_PAR_WT_FORM_MODE", P::WarpMode(0)),
+        ("$ENGINE_PAR_WT_FORM2_MODE", P::WarpMode(1)),
+        (
+            "$ENGINE_PAR_WT_FORM2",
+            P::Wavetable(ir::TableValue::Warp(1)),
+        ),
+        (
+            "$ENGINE_PAR_WT_MOD_AMOUNT",
+            P::Wavetable(ir::TableValue::ModAmount),
+        ),
+        ("$ENGINE_PAR_WT_MOD_TYPE", P::ModOscKind),
+        ("$ENGINE_PAR_WT_MOD_WAVE", P::Shown),
+        ("$ENGINE_PAR_WT_MOD_TUNE_UNIT", P::Shown),
+        // Modules CONTRA has no processor for: the knob's text answers, a
+        // set is reported.
+        ("$ENGINE_PAR_CH_DEPTH", P::Shown),
+        ("$ENGINE_PAR_JMP_PREAMP", P::Shown),
+        ("$ENGINE_PAR_JMP_BASS", P::Shown),
+        ("$ENGINE_PAR_JMP_MID", P::Shown),
+        ("$ENGINE_PAR_JMP_TREBLE", P::Shown),
+        (
+            "$ENGINE_PAR_WT_INHARMONIC",
+            P::Wavetable(ir::TableValue::Inharmonic),
+        ),
+        ("$ENGINE_PAR_WT_INHARMONIC_MODE", P::InharmonicOn),
+        (
+            "$ENGINE_PAR_WT_MOD_TUNE",
+            P::Wavetable(ir::TableValue::ModTune),
+        ),
         ("$ENGINE_PAR_RELEASE_TRIGGER", P::ReleaseTrigger),
         ("$ENGINE_PAR_OUTPUT_CHANNEL", P::OutputChannel),
         ("$ENGINE_PAR_EFFECT_BYPASS", P::EffectBypass),
@@ -84,6 +206,18 @@ const FIXED: &[(&str, ir::EnginePar)] = {
         ("$ENGINE_PAR_VOLUME", P::Volume),
         ("$ENGINE_PAR_PAN", P::Pan),
         ("$ENGINE_PAR_TUNE", P::Tune),
+        // get_zone_par's; the fades, volume, pan, tune and BPM are not read.
+        ("$ZONE_PAR_LOW_KEY", P::Zone(Z::LowKey)),
+        ("$ZONE_PAR_HIGH_KEY", P::Zone(Z::HighKey)),
+        ("$ZONE_PAR_LOW_VELO", P::Zone(Z::LowVelocity)),
+        ("$ZONE_PAR_HIGH_VELO", P::Zone(Z::HighVelocity)),
+        ("$ZONE_PAR_ROOT_KEY", P::Zone(Z::RootKey)),
+        ("$ZONE_PAR_GROUP", P::Zone(Z::Group)),
+        ("$ZONE_PAR_SAMPLE_START", P::Zone(Z::SampleStart)),
+        ("$ZONE_PAR_SAMPLE_END", P::Zone(Z::SampleEnd)),
+        ("$ZONE_PAR_SAMPLE_MOD_RANGE", P::Zone(Z::StartRange)),
+        ("$ZONE_PAR_SAMPLE_RATE", P::Zone(Z::SampleRate)),
+        ("$ZONE_PAR_SELECTED", P::Zone(Z::Selected)),
     ]
 };
 

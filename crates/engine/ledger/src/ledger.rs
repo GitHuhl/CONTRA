@@ -78,6 +78,10 @@ pub struct Note {
     pub expression_tune: f64,
     pub expression_gain: f32,
     pub expression_pan: f32,
+    /// Its own pressure and brightness (0..=1) once the host sent them:
+    /// they stand for its channel's pressure and controller 74.
+    pub expression_pressure: Option<f32>,
+    pub expression_brightness: Option<f32>,
     /// Key released while the sustain pedal was down.
     pub pedal_held: bool,
     /// Key released (directly or by the pedal coming up).
@@ -95,7 +99,7 @@ pub struct Note {
     pub noted_off: bool,
     /// The last fade a script asked of it (target, frames): its attack
     /// voices yet to start begin with it.
-    pub fade: Option<(contra_voice::FadeTarget, u32)>,
+    pub fade: Option<(contra_voice::FadeTarget, u32, contra_voice::FadeCurve)>,
     /// Script tuning, millicents.
     pub script_tune: i32,
     /// Script volume, millidecibels.
@@ -118,6 +122,9 @@ pub struct Note {
     pub pass: u8,
     /// Event marks (`set_event_mark`), one bit each.
     pub marks: u32,
+    /// Seconds the key had been held when the note's zones last started:
+    /// the release-trigger counter's input.
+    pub held: f32,
 }
 
 impl Note {
@@ -135,6 +142,8 @@ impl Note {
             expression_tune: 0.0,
             expression_gain: 1.0,
             expression_pan: 0.0,
+            expression_pressure: None,
+            expression_brightness: None,
             pedal_held: false,
             released: false,
             key_up: false,
@@ -153,6 +162,7 @@ impl Note {
             first: 0,
             pass: 0,
             marks: 0,
+            held: 0.0,
         }
     }
 
@@ -287,6 +297,9 @@ struct Entry {
 /// Fixed capacity. Queries fill a caller's list up to its capacity and never allocate.
 pub struct Ledger {
     entries: Vec<Entry>,
+    /// Bumped by every call that may change a note: a cache of a query
+    /// over the notes is good while it is the same.
+    version: u64,
 }
 
 /// The most notes a ledger holds: an event id keeps 16 bits of the slot.
@@ -297,6 +310,7 @@ impl Ledger {
     /// event ids). Not real-time.
     pub fn new(capacity: usize) -> Self {
         Self {
+            version: 0,
             entries: (0..capacity.min(MAX_NOTES))
                 .map(|_| Entry {
                     generation: 0,
@@ -306,6 +320,12 @@ impl Ledger {
         }
     }
 
+    /// Changes whenever a note may have changed.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// How many notes it holds at most.
     pub fn capacity(&self) -> usize {
         self.entries.len()
@@ -313,6 +333,7 @@ impl Ledger {
 
     /// Stores `note` in a free slot; `None` when every slot is taken.
     pub fn insert(&mut self, note: Note) -> Option<NoteRef> {
+        self.version += 1;
         let (index, entry) = self
             .entries
             .iter_mut()
@@ -327,6 +348,15 @@ impl Ledger {
         })
     }
 
+    /// The most recently started live note on `key`, if any.
+    pub fn newest(&self, key: u8) -> Option<&Note> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.note.as_ref())
+            .filter(|n| n.key == key)
+            .max_by_key(|n| n.at.0)
+    }
+
     /// The note `r` names; `None` once it ended.
     pub fn get(&self, r: NoteRef) -> Option<&Note> {
         self.entries
@@ -338,6 +368,7 @@ impl Ledger {
 
     /// As [`Self::get`], to change it.
     pub fn get_mut(&mut self, r: NoteRef) -> Option<&mut Note> {
+        self.version += 1;
         self.entries
             .get_mut(r.index as usize)
             .filter(|e| e.generation == r.generation)?
@@ -347,6 +378,7 @@ impl Ledger {
 
     /// Ends the note `r` names and gives it back; `None` once it ended.
     pub fn remove(&mut self, r: NoteRef) -> Option<Note> {
+        self.version += 1;
         self.entries
             .get_mut(r.index as usize)
             .filter(|e| e.generation == r.generation)?
@@ -396,6 +428,7 @@ impl Ledger {
     /// Marks every live note released: a pending end of one then starts no
     /// release zones and runs no release callback.
     pub fn release_all(&mut self) {
+        self.version += 1;
         let notes = self.entries.iter_mut().filter_map(|e| e.note.as_mut());
         notes.for_each(|n| n.released = true);
     }
@@ -417,6 +450,13 @@ impl Ledger {
             .iter()
             .filter(|e| e.note.as_ref().is_some_and(&keep))
             .count()
+    }
+
+    /// Whether any live note `keep` accepts exists; stops at the first.
+    pub fn any(&self, keep: impl Fn(&Note) -> bool) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.note.as_ref().is_some_and(&keep))
     }
 
     /// Host notes the pattern addresses; script notes answer only to the script.

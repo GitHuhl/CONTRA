@@ -16,6 +16,13 @@
 
 use std::fmt;
 
+mod canvas;
+mod preset_name;
+mod scroll;
+mod value;
+pub use canvas::{Paint, Seg};
+pub use preset_name::preset_file_name;
+
 macro_rules! reference {
     ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
         $(#[$doc])*
@@ -67,6 +74,8 @@ pub struct Interface {
     /// Set when the source shows only the keys it presses (KSP
     /// `set_key_pressed_support`): those keys, in place of the keys played.
     pub key_pressed: Option<Vec<u8>>,
+    /// The last status text the source printed (KSP `message`).
+    pub message: String,
     pub unsupported: Vec<Unsupported>,
 }
 
@@ -99,6 +108,22 @@ pub struct Page {
     pub background: Background,
 }
 
+impl Page {
+    /// The height it shows: its own and the rows above its y 0.
+    #[must_use]
+    pub fn shown_height(&self) -> f64 {
+        self.size.height + f64::from(self.background.above)
+    }
+}
+
+impl Background {
+    /// The wallpaper row at the page's top edge.
+    #[must_use]
+    pub fn top_row(&self) -> u32 {
+        self.origin_y.saturating_sub(self.above)
+    }
+}
+
 /// What is drawn behind every widget on a page.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Background {
@@ -109,6 +134,9 @@ pub struct Background {
     pub offset_y: i32,
     /// Source/profile header rows, independent of the script's skin offset.
     pub origin_y: u32,
+    /// Rows the page shows above its y 0: the wallpaper's rows over
+    /// `origin_y`, and whatever widget a script placed there.
+    pub above: u32,
     /// The selected wallpaper strip frame.
     pub frame: u32,
 }
@@ -214,6 +242,8 @@ pub struct Widget {
     /// Scalar state for controls without a numeric range (toggles/menus).
     pub initial_value: f64,
     pub opacity: f32,
+    /// Degrees clockwise about its own centre (a `native_ui` knob pointer).
+    pub rotation: f64,
     pub intercepts_mouse: bool,
     /// Clip children and offset their origin (UVI Viewport).
     pub viewport: Option<[i32; 2]>,
@@ -274,6 +304,7 @@ impl Widget {
             components: Vec::new(),
             initial_value: 0.0,
             opacity: 1.0,
+            rotation: 0.,
             intercepts_mouse: true,
             viewport: None,
             mapper: None,
@@ -379,6 +410,11 @@ pub struct Waveform {
     pub table: Vec<i32>,
     pub highlighted: Option<u32>,
     pub midi_start_note: u8,
+    /// The zone's sample as columns of (lowest, highest) level, ±127 full
+    /// scale; empty until the host read it.
+    pub peaks: Vec<[i8; 2]>,
+    /// The sample's length, for the cursor.
+    pub length_us: i64,
 }
 
 /// The drag gesture of a continuous control: which way it moves, and how
@@ -517,6 +553,25 @@ pub enum Kind {
     Image,
     /// An invisible drag-and-drop / mouse target.
     MouseArea,
+    /// A shape a Kontakt 8 `native_ui` page draws, filled with
+    /// `colors.background`.
+    Shape(Shape),
+    /// What a Kontakt 8 `native_ui` page's painter drew, in page points.
+    Canvas(Vec<Paint>),
+}
+
+/// A [`Kind::Shape`]'s outline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    /// A rectangle with rounded corners of `radius` points.
+    Rect { radius: f64 },
+    /// An arc of a ring `thickness` points wide, inside the widget's bounds,
+    /// from `start` degrees (0 at 3 o'clock, clockwise) over `sweep`.
+    Ring {
+        thickness: f64,
+        start: f64,
+        sweep: f64,
+    },
 }
 
 impl Kind {
@@ -946,7 +1001,7 @@ fn kontakt_paint_rank(kind: &Kind) -> u8 {
         Kind::Waveform => 2,
         Kind::Wavetable { .. } => 3,
         Kind::LevelMeter { .. } => 4,
-        Kind::Label | Kind::Image => 5,
+        Kind::Label | Kind::Image | Kind::Shape(_) | Kind::Canvas(_) => 5,
         Kind::Knob { .. } => 6,
         Kind::Slider { .. } => 7,
         Kind::Switch => 8,

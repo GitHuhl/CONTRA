@@ -4,8 +4,9 @@
 use contra_ir as ir;
 
 use crate::ledger::Note;
+use ir::TableValue::{Inharmonic, ModAmount, ModTune, Position, Warp};
 use contra_stream::Mix;
-use contra_voice::{Ahdsr, Gain, Lag};
+use contra_voice::{Ahdsr, Gain, Lag, Read};
 
 use crate::effects::{self, product};
 use crate::modulators::{self, Age};
@@ -70,7 +71,6 @@ impl Engine {
                 tau_ms,
             } = m.kind
             {
-                // HeldTime is fixed at the voice's start: see `release_counter`.
                 let intensity = intensity * self.scale(zone, source, note, age);
                 let input = self.unit(zone, source, note, age);
                 let g = input.map_or(1.0, |x| curve.gain(intensity, x));
@@ -150,6 +150,38 @@ impl Engine {
         moved.then_some(mix)
     }
 
+    /// Where this note's voice reads its group's wavetable: each value as
+    /// the group (or a script) set it plus its routes' `source × depth`,
+    /// held within 0..=1. `None` outside a wavetable group.
+    pub(crate) fn voice_read(&self, zone: &Zone, note: &Note, age: Age) -> Option<Read> {
+        let g = self.groups.get(zone.group as usize)?;
+        let mut read = g.wavetable?;
+        read.phase = (read.phase + note.draw.unit() * read.phase_random).fract();
+        read.rate = self.rate as f32;
+        for m in g.mods.iter().filter(|m| !m.bypass) {
+            if let ir::ModKind::Wavetable {
+                source,
+                value,
+                depth,
+            } = m.kind
+            {
+                let input = self.routed(zone, source, note, age);
+                let moved = input.unwrap_or(0.0) * depth;
+                #[cfg(feature = "trace")]
+                self.trace_route(zone, m, input, moved, crate::RouteUnit::TableFraction);
+                if let Some(v) = table_value(&mut read, value) {
+                    *v += moved;
+                }
+            }
+        }
+        for v in [Position, Warp(0), Warp(1), Inharmonic, ModAmount, ModTune] {
+            if let Some(v) = table_value(&mut read, v) {
+                *v = v.clamp(0.0, 1.0);
+            }
+        }
+        Some(read)
+    }
+
     /// The pan the zone's group is set to.
     pub(crate) fn group_pan(&self, zone: &Zone) -> f32 {
         self.level(zone).pan
@@ -166,6 +198,72 @@ impl Engine {
             tune: group.tune + self.instrument.tune,
             ..group
         }
+    }
+
+    /// LFO `n`'s value for this note at `age` (see [`Self::source`]).
+    fn lfo_value(&self, zone: &Zone, n: u8, note: &Note, age: Age) -> Option<f32> {
+        let lfo = self.moved_lfo(zone, n, note, age)?;
+        if let ir::Wave::Chaos { .. } = lfo.wave {
+            return age.chaos.get(usize::from(n)).copied();
+        }
+        Some(modulators::lfo(&lfo, age, u32::from(note.key), self.tempo))
+    }
+
+    /// LFO `n` as this note plays it: its group's, with the note-on routes
+    /// on phase and rate and the live phase warp applied.
+    fn moved_lfo(&self, zone: &Zone, n: u8, note: &Note, age: Age) -> Option<ir::Lfo> {
+        let group = || self.groups.get(zone.group as usize);
+        let g = group()?;
+        let mut lfo = *g.lfos.get(usize::from(n))?;
+        let moving = (self.reshaped.get(zone.group as usize).into_iter())
+            .flat_map(|r| r.moving(n))
+            .filter_map(|i| g.mods.get(i));
+        // ponytail: phase and rate routes read their source at
+        // note-on (exact for velocity and note-on values); a live
+        // controller moving the rate needs a per-voice phase accumulator.
+        for m in moving.filter(|m| !m.bypass) {
+            match m.kind {
+                // An LFO source here would recurse.
+                ir::ModKind::LfoPhase {
+                    source,
+                    lfo: l,
+                    depth,
+                } if l == n && !matches!(source, ir::Source::Lfo(_)) => {
+                    let input = self.source(zone, source, note, Age::START);
+                    let value = input.unwrap_or(0.0) * depth;
+                    #[cfg(feature = "trace")]
+                    self.trace_route(zone, m, input, value, crate::RouteUnit::PhaseCycles);
+                    lfo.phase += value;
+                }
+                ir::ModKind::LfoRate {
+                    source,
+                    lfo: l,
+                    depth,
+                    octaves,
+                    range_hz: [lo, hi],
+                } if l == n && !matches!(source, ir::Source::Lfo(_)) => {
+                    let input = self.source(zone, source, note, Age::START);
+                    let f = (input.unwrap_or(0.0) * depth * octaves).exp2();
+                    #[cfg(feature = "trace")]
+                    self.trace_route(zone, m, input, f, crate::RouteUnit::RateMultiplier);
+                    lfo.rate = match lfo.rate {
+                        ir::Rate::Hz(hz) => ir::Rate::Hz((hz * f).clamp(lo, hi.max(lo))),
+                        ir::Rate::Beats(b) => ir::Rate::Beats(b / f),
+                        ir::Rate::Steps { beats, count } => ir::Rate::Beats(beats * count / f),
+                    };
+                }
+                _ => {}
+            }
+        }
+        lfo.phase += age.warp.get(usize::from(n)).copied().unwrap_or(0.0);
+        Some(lfo)
+    }
+
+    fn envelope_value(&self, zone: &Zone, n: u8, age: Age) -> Option<f32> {
+        let group = || self.groups.get(zone.group as usize);
+        let e = group()?.envelopes.get(usize::from(n))?;
+        let stretch = age.stretch.get(usize::from(n)).copied().unwrap_or(1.0);
+        Some(modulators::stretched(e, age, stretch))
     }
 
     /// A live source's value for this note; `None` for one fixed at the voice's start.
@@ -195,59 +293,17 @@ impl Engine {
                 }
                 Some(sum)
             }
-            ir::Source::Envelope(n) => Some(modulators::envelope(
-                group()?.envelopes.get(usize::from(n))?,
-                age,
-            )),
-            ir::Source::Lfo(n) => {
-                let g = group()?;
-                let mut lfo = *g.lfos.get(usize::from(n))?;
-                // ponytail: phase and rate routes read their source at
-                // note-on (exact for velocity and note-on values); a live
-                // controller moving the rate needs a per-voice phase accumulator.
-                for m in g.mods.iter().filter(|m| !m.bypass) {
-                    match m.kind {
-                        // An LFO source here would recurse.
-                        ir::ModKind::LfoPhase {
-                            source,
-                            lfo: l,
-                            depth,
-                        } if l == n && !matches!(source, ir::Source::Lfo(_)) => {
-                            let input = self.source(zone, source, note, Age::START);
-                            let value = input.unwrap_or(0.0) * depth;
-                            #[cfg(feature = "trace")]
-                            self.trace_route(zone, m, input, value, crate::RouteUnit::PhaseCycles);
-                            lfo.phase += value;
-                        }
-                        ir::ModKind::LfoRate {
-                            source,
-                            lfo: l,
-                            depth,
-                            octaves,
-                            range_hz: [lo, hi],
-                        } if l == n && !matches!(source, ir::Source::Lfo(_)) => {
-                            let input = self.source(zone, source, note, Age::START);
-                            let f = (input.unwrap_or(0.0) * depth * octaves).exp2();
-                            #[cfg(feature = "trace")]
-                            self.trace_route(zone, m, input, f, crate::RouteUnit::RateMultiplier);
-                            lfo.rate = match lfo.rate {
-                                ir::Rate::Hz(hz) => ir::Rate::Hz((hz * f).clamp(lo, hi.max(lo))),
-                                ir::Rate::Beats(b) => ir::Rate::Beats(b / f),
-                                ir::Rate::Steps { beats, count } => {
-                                    ir::Rate::Beats(beats * count / f)
-                                }
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-                if let ir::Wave::Chaos { .. } = lfo.wave {
-                    return age.chaos.get(usize::from(n)).copied();
-                }
-                lfo.phase += age.warp.get(usize::from(n)).copied().unwrap_or(0.0);
-                Some(modulators::lfo(&lfo, age, u32::from(note.key), self.tempo))
-            }
+            ir::Source::Envelope(n) => self
+                .memo
+                .envelope(n, age, || self.envelope_value(zone, n, age)),
+            ir::Source::Lfo(n) => self.memo.lfo(n, age, || self.lfo_value(zone, n, note, age)),
             ir::Source::Velocity => Some(note.velocity as f32),
+            // A note's own brightness is its controller 74 (MPE's timbre).
+            ir::Source::Controller(74) | ir::Source::ControllerFrom { cc: 74, .. }
+                if note.expression_brightness.is_some() =>
+            {
+                note.expression_brightness
+            }
             ir::Source::Controller(cc) => Some(f32::from(self.behaviour.cc(channel, cc)) / 127.0),
             ir::Source::ControllerFrom { cc, start } => {
                 let v = if self.behaviour.cc_arrived(channel, cc) {
@@ -258,6 +314,9 @@ impl Engine {
                 Some(f32::from(v) / 127.0)
             }
             ir::Source::PitchBend => Some(self.behaviour.bend(channel)),
+            ir::Source::Pressure => {
+                Some((note.expression_pressure).unwrap_or_else(|| self.behaviour.pressure(channel)))
+            }
             ir::Source::Key => Some(f32::from(note.key) / 127.0),
             ir::Source::Constant => Some(1.0),
             ir::Source::Script(index) => Some(
@@ -265,7 +324,11 @@ impl Engine {
                     .unwrap_or_else(|| self.script_mod(index)) as f32
                     / 1_000_000.0,
             ),
-            ir::Source::HeldTime { .. } => None,
+            ir::Source::HeldTime { span_ms } => Some(contra_plan::held_time(span_ms, note.held)),
+            ir::Source::Random { bipolar } => {
+                let u = note.draw.unit();
+                Some(if bipolar { 2.0 * u - 1.0 } else { u })
+            }
         }
     }
 
@@ -279,6 +342,39 @@ impl Engine {
         age: Age,
         shaper: bool,
     ) -> Option<f32> {
+        // A smoothed step wave reads its own past, so the glide follows the
+        // tempo through the LFO's rate with no state.
+        if t.smooth_s > 0.0
+            && let ir::Source::Lfo(n) = t.source
+        {
+            let scale = if shaper {
+                self.scale(zone, t.source, note, age)
+            } else {
+                1.0
+            };
+            let smoothed = |back| {
+                let past = Age {
+                    held: age.held - back,
+                    now: age.now - back,
+                    ..age
+                };
+                let x = self.lfo_value(zone, n, note, past)? * scale;
+                Some(t.apply((x + 1.0) / 2.0))
+            };
+            // The wave is the group's unless a note-on route moved it: voices
+            // that play the same wave read the same smoothed value.
+            return match self.moved_lfo(zone, n, note, age) {
+                Some(lfo) => modulators::smoothed_shared(
+                    t,
+                    &lfo,
+                    age,
+                    self.tempo,
+                    scale.to_bits(),
+                    || t.smoothed(smoothed),
+                ),
+                None => t.smoothed(smoothed),
+            };
+        }
         let x = match t.source {
             ir::Source::Shaped(_) => return None,
             ir::Source::Blend(_) if !shaper => return None,
@@ -287,7 +383,10 @@ impl Engine {
             s => self.source(zone, s, note, age)?,
         };
         // An LFO spans the table as `(x + 1)/2`, and pitch bend a table.
-        let bend = t.source == ir::Source::PitchBend && !t.table.is_empty();
+        let bend = matches!(
+            t.source,
+            ir::Source::PitchBend | ir::Source::Random { bipolar: true }
+        ) && !t.table.is_empty();
         let x = if bend || matches!(t.source, ir::Source::Lfo(_)) {
             (x + 1.0) / 2.0
         } else {
@@ -311,7 +410,9 @@ impl Engine {
     pub(crate) fn unit(&self, zone: &Zone, s: ir::Source, note: &Note, age: Age) -> Option<f32> {
         let x = self.source(zone, s, note, age)?;
         Some(match s {
-            ir::Source::Lfo(_) | ir::Source::PitchBend => (x + 1.0) * 0.5,
+            ir::Source::Lfo(_) | ir::Source::PitchBend | ir::Source::Random { bipolar: true } => {
+                (x + 1.0) * 0.5
+            }
             _ => x,
         })
     }
@@ -321,32 +422,34 @@ impl Engine {
         if !matches!(of, ir::Source::Lfo(_) | ir::Source::Envelope(_)) {
             return 1.0;
         }
-        self.groups.get(zone.group as usize).map_or(1.0, |g| {
-            g.mods
-                .iter()
-                .filter(|m| !m.bypass)
-                .filter_map(|m| match m.kind {
-                    ir::ModKind::Intensity {
-                        source,
-                        of: o,
-                        depth,
-                    } if o == of => {
-                        let input = self.unit(zone, source, note, age)?;
-                        let value = 1.0 - (1.0 - input) * depth;
-                        #[cfg(feature = "trace")]
-                        self.trace_route(
-                            zone,
-                            m,
-                            Some(input),
-                            value,
-                            crate::RouteUnit::IntensityMultiplier,
-                        );
-                        Some(value)
-                    }
-                    _ => None,
-                })
-                .product()
-        })
+        let g = zone.group as usize;
+        let (Some(group), Some(reshaped)) = (self.groups.get(g), self.reshaped.get(g)) else {
+            return 1.0;
+        };
+        (reshaped.scaling(of))
+            .filter_map(|i| group.mods.get(i))
+            .filter(|m| !m.bypass)
+            .filter_map(|m| match m.kind {
+                ir::ModKind::Intensity {
+                    source,
+                    of: o,
+                    depth,
+                } if o == of => {
+                    let input = self.unit(zone, source, note, age)?;
+                    let value = 1.0 - (1.0 - input) * depth;
+                    #[cfg(feature = "trace")]
+                    self.trace_route(
+                        zone,
+                        m,
+                        Some(input),
+                        value,
+                        crate::RouteUnit::IntensityMultiplier,
+                    );
+                    Some(value)
+                }
+                _ => None,
+            })
+            .product()
     }
 
     /// The voice's step without its pitch routes, and those routes: the
@@ -409,9 +512,8 @@ impl Engine {
         shift
     }
 
-    /// Frames the zone's start moves for a voice started after the key was
-    /// held `held` seconds, within its start range either way.
-    pub(crate) fn start_offset(&self, zone: &Zone, note: &Note, held: f32) -> i64 {
+    /// Frames the zone's start moves, within its start range either way.
+    pub(crate) fn start_offset(&self, zone: &Zone, note: &Note) -> i64 {
         let Some(g) = self.groups.get(zone.group as usize) else {
             return 0;
         };
@@ -421,10 +523,7 @@ impl Engine {
             .filter(|m| !m.bypass)
             .filter_map(|m| match m.kind {
                 ir::ModKind::SampleStart { source, depth } => {
-                    let x = match source {
-                        ir::Source::HeldTime { span_ms } => contra_plan::held_time(span_ms, held),
-                        source => self.source(zone, source, note, Age::START)?,
-                    };
+                    let x = self.source(zone, source, note, Age::START)?;
                     let value = x * depth;
                     #[cfg(feature = "trace")]
                     self.trace_route(
@@ -443,11 +542,51 @@ impl Engine {
         (f64::from(x) * range).round().clamp(-range, range) as i64
     }
 
-    /// The group's envelope for a voice started after the key was held
-    /// `held` seconds, its attack and release scaled by their routes.
+    /// How much its attack routes stretch each of the group's first
+    /// [`modulators::WARPS`] envelopes' first segment for a voice starting
+    /// now: read once, so a controller moving mid-attack times the next
+    /// note, not this one (as the amplitude envelope's attack).
+    // ponytail: envelopes past the eighth keep their drawn attack; widen
+    // WARPS if a group routes one.
+    pub(crate) fn stretches(&self, zone: &Zone, note: &Note) -> [f32; modulators::WARPS] {
+        let mut out = [1.0; modulators::WARPS];
+        let Some(g) = self.groups.get(zone.group as usize) else {
+            return out;
+        };
+        let reshaped = self.reshaped.get(zone.group as usize);
+        for ((n, stretch), e) in (0u8..).zip(&mut out).zip(&g.envelopes) {
+            let drawn = e.points.first().map_or(0.0, |p| p.ms.max(0.0));
+            if drawn <= 0.0 {
+                continue;
+            }
+            let mut ms = drawn;
+            let routes = reshaped.into_iter().flat_map(|r| r.attacking(n));
+            for m in routes.filter_map(|i| g.mods.get(i)).filter(|m| !m.bypass) {
+                if let ir::ModKind::Attack {
+                    source,
+                    intensity,
+                    floor_ms,
+                    ..
+                } = m.kind
+                    // Sources are read at note-on, as Kontakt reads them. An
+                    // envelope source is then its start level: its arm reads
+                    // the voice's latched stretch, never these routes, so an
+                    // envelope timing itself (or another) cannot recurse.
+                    && let Some(x) = self.unit(zone, source, note, Age::START)
+                {
+                    ms = time_route(ms, x, intensity, floor_ms);
+                }
+            }
+            *stretch = ms / drawn;
+        }
+        out
+    }
+
+    /// The group's envelope for a voice, its attack and release scaled by
+    /// their routes.
     /// ponytail: release routes read at note-on too; a source moving
     /// before note-off is missed, read at release if a library needs it.
-    pub(crate) fn envelope(&self, zone: &Zone, note: &Note, held: f32) -> Ahdsr {
+    pub(crate) fn envelope(&self, zone: &Zone, note: &Note) -> Ahdsr {
         let Some(g) = self.groups.get(zone.group as usize) else {
             return Ahdsr::GATE;
         };
@@ -459,6 +598,7 @@ impl Engine {
                     source,
                     intensity,
                     floor_ms,
+                    envelope: None,
                 } => (source, intensity, floor_ms, &mut e.attack),
                 ir::ModKind::Release {
                     source,
@@ -467,25 +607,11 @@ impl Engine {
                 } => (source, intensity, floor_ms, &mut e.release),
                 _ => continue,
             };
-            let x = match source {
-                ir::Source::HeldTime { span_ms } => Some(contra_plan::held_time(span_ms, held)),
-                // Outside the signed families the law compiler (FUN_140873040)
-                // reads a bipolar source without `frange_bi`: 0..=1.
-                source => self.unit(zone, source, note, Age::START),
-            };
-            let Some(x) = x else {
+            let Some(x) = self.unit(zone, source, note, Age::START) else {
                 continue;
             };
-            let x = if intensity < 0.0 { 1.0 - x } else { x };
-            let multiplier = 1.0 - (1.0 - x.clamp(0.0, 1.0)) * intensity.abs();
-            let ms = *frames as f32 * 1000.0 / rate;
-            let ms = if floor_ms > 0.0 {
-                let span = ir::common::geometric(floor_ms, (ms + floor_ms) / floor_ms);
-                span.eval_unclamped(multiplier * multiplier * multiplier) - floor_ms
-            } else {
-                ms * multiplier
-            };
-            *frames = (ms.max(0.0) * rate / 1000.0).round() as u32;
+            let ms = time_route(*frames as f32 * 1000.0 / rate, x, intensity, floor_ms);
+            *frames = (ms * rate / 1000.0).round() as u32;
             #[cfg(feature = "trace")]
             self.trace_route(
                 zone,
@@ -496,26 +622,6 @@ impl Engine {
             );
         }
         e
-    }
-
-    /// The release-trigger counter's gain for a voice started after the key
-    /// was held `held` seconds.
-    pub(crate) fn release_counter(&self, zone: &Zone, held: f32) -> f32 {
-        self.groups.get(zone.group as usize).map_or(1.0, |g| {
-            g.mods
-                .iter()
-                .filter(|m| !m.bypass)
-                .map(|m| match m.kind {
-                    ir::ModKind::Volume {
-                        source: ir::Source::HeldTime { span_ms: ms },
-                        intensity,
-                        curve,
-                        ..
-                    } => curve.gain(intensity, contra_plan::held_time(ms, held)),
-                    _ => 1.0,
-                })
-                .product()
-        })
     }
 
     /// Whether moving `cc` changes this zone's level.
@@ -531,7 +637,8 @@ impl Engine {
                     | ir::ModKind::EqGain { source, .. }
                     | ir::ModKind::EffectParam { source, .. }
                     | ir::ModKind::Mix { source, .. }
-                    | ir::ModKind::Intensity { source, .. } => g.reads(source, cc),
+                    | ir::ModKind::Intensity { source, .. }
+                    | ir::ModKind::Wavetable { source, .. } => g.reads(source, cc),
                     ir::ModKind::Envelope
                     | ir::ModKind::SampleStart { .. }
                     | ir::ModKind::Attack { .. }
@@ -539,6 +646,7 @@ impl Engine {
                     | ir::ModKind::LfoPhase { .. }
                     | ir::ModKind::LfoRate { .. }
                     | ir::ModKind::LfoHz { .. }
+                    | ir::ModKind::LfoDivision { .. }
                     | ir::ModKind::Send { .. }
                     | ir::ModKind::LoopShift { .. } => false,
                 })
@@ -565,4 +673,32 @@ fn gain(zone: &Zone, note: &Note, level: Level, modulated: f32) -> [f32; 2] {
         (zone.pan + level.pan + modulated + note.expression_pan + note.script_pan as f32 / 1000.0)
             .clamp(-1.0, 1.0);
     [g * (1.0 - pan).min(1.0), g * (1.0 + pan).min(1.0)]
+}
+
+/// An envelope time `ms` as an attack or release route sets it from its
+/// source `x` (0..=1) at note-on: `m = 1 − (1 − x)·|intensity|` (`1 − x`
+/// for a negative intensity), then `ms·m`, or with a floor a knob linear in
+/// `ln(ms + floor)`. Outside the signed families the law compiler
+/// (FUN_140873040) reads a bipolar source without `frange_bi`: 0..=1.
+fn time_route(ms: f32, x: f32, intensity: f32, floor_ms: f32) -> f32 {
+    let x = if intensity < 0.0 { 1.0 - x } else { x };
+    let multiplier = 1.0 - (1.0 - x.clamp(0.0, 1.0)) * intensity.abs();
+    let ms = if floor_ms > 0.0 {
+        let span = ir::common::geometric(floor_ms, (ms + floor_ms) / floor_ms);
+        span.eval_unclamped(multiplier * multiplier * multiplier) - floor_ms
+    } else {
+        ms * multiplier
+    };
+    ms.max(0.0)
+}
+
+/// The wavetable value `v` of `read`.
+pub(crate) fn table_value(read: &mut Read, v: ir::TableValue) -> Option<&mut f32> {
+    match v {
+        Position => Some(&mut read.position),
+        Warp(n) => read.warps.get_mut(usize::from(n)).map(|w| &mut w.amount),
+        Inharmonic => Some(&mut read.inharmonic.amount),
+        ModAmount => Some(&mut read.modosc.amount),
+        ModTune => Some(&mut read.modosc.tune),
+    }
 }

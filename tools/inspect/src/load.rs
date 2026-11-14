@@ -14,8 +14,9 @@ use super::RATE;
 
 pub fn run(path: &Path) -> Result<(Value, String)> {
     let (instrument, law_applications) =
-        contra_law::collect(|| contra_host::instrument::read(path));
-    let instrument = instrument.map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        contra_law::collect(|| contra_host::instrument::read_timed(path));
+    let (instrument, read_time, translate_time) =
+        instrument.map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
     // Prepare requests samples referenced by at least one non-purged group.
     let resident_samples: HashSet<usize> = instrument
         .groups
@@ -61,7 +62,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         })
         .collect();
     let mut scripts: Vec<_> = instrument.scripts.iter().enumerate().map(|(slot, s)| json!({
-        "original_slot": slot, "name": s.name,
+        "original_slot": slot, "name": s.name, "dialect": format!("{:?}", s.dialect),
         "data": s.data.iter().map(|(name, bytes)| json!({"name": name, "bytes": bytes.len()})).collect::<Vec<_>>(),
         "runtime_slot": null, "compile_status": "unknown", "callbacks": null,
     })).collect();
@@ -79,7 +80,16 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         "sends": format!("{:?}", instrument.sends), "main": format!("{:?}", instrument.main),
         "buses": format!("{:?}", instrument.buses), "slot_laws": format!("{:?}", instrument.slot_laws)});
     let mut store = Store::new(StoreConfig::DEFAULT).context("creating sample store")?;
+    // CONTRA_DEFER_HEADS: the plugin's path, a part playable before its heads are in.
+    store.defer_heads(std::env::var_os("CONTRA_DEFER_HEADS").is_some());
     let loaded = contra_host::instrument::build(instrument, RATE, &mut store);
+    let build_times = loaded.timings;
+    let heads_start = std::time::Instant::now();
+    let heads = store.take_heads().map(|heads| {
+        let lanes = std::thread::available_parallelism().map_or(4, |n| n.get() * 3);
+        std::thread::spawn(move || heads.load(lanes))
+    });
+    let pinned_bytes = store.pinned_bytes();
     let original_slots: Vec<_> = loaded.persist.iter().map(|vars| vars.script).collect();
     let mapping = script_mapping(scripts.len(), &original_slots, loaded.plan.scripts.len());
     let mut callback_count = 0usize;
@@ -117,13 +127,17 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                         contra_engine::ir::ReverbPar::ALL
                             .iter()
                             .enumerate()
-                            .map(|(index, par)| json!({"index":index, "law":law(script.reverb_laws.get(*par))}))
+                            .map(|(index, par)| json!({"index":index, "id":par.id(), "law":law(script.reverb_laws.get(*par))}))
                             .collect::<Vec<_>>()
                     ),
                 );
                 fields.insert(
                     "callback_entry_kind".into(),
-                    json!("bytecode_offset"),
+                    json!(if script.foreign.is_some() {
+                        "foreign_dispatch"
+                    } else {
+                        "bytecode_offset"
+                    }),
                 );
             }
         }
@@ -173,7 +187,9 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         })
         .collect();
     let plan = Arc::new(loaded.plan);
+    let started = std::time::Instant::now();
     let engine = Engine::new(Arc::clone(&plan), store.client(), RATE);
+    let engine_init_time = started.elapsed();
     let library = RefCell::new(contra_host::ui::Library::open(path));
     let asset_cache = RefCell::new(HashMap::<String, Option<usize>>::new());
     let metadata = |name: &str| library.borrow_mut().meta(name);
@@ -185,9 +201,13 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         asset_cache.borrow_mut().insert(name.to_owned(), size);
         size
     };
-    let ui: Vec<_> = loaded.faces.iter().enumerate().map(|(slot, face)| {
+    let ui_time = std::cell::Cell::new(build_times.faces);
+    let ui: Vec<_> = loaded.faces.iter().zip(&loaded.pages).enumerate().map(|(slot, (face, page))| {
         if let (Some(face), Ok(slot_id)) = (face, u8::try_from(slot)) {
-            match contra_host::ui::interface(face, slot_id, &engine, &metadata) {
+            let started = std::time::Instant::now();
+            let tree = contra_host::ui::interface(face, slot_id, &engine, &metadata);
+            ui_time.set(ui_time.get() + started.elapsed());
+            match tree {
                 Ok(tree) => json!({"runtime_slot": slot, "original_slot": mapping.as_ref().and_then(|_| loaded.persist.get(slot)).map(|p| p.script), "widgets": tree.widgets.iter().map(|w| json!({"name": w.name, "source_id": w.source_id, "kind": format!("{:?}", w.kind), "hidden": w.hidden, "enabled": w.enabled, "text": w.text, "details": format!("{w:?}")})).collect::<Vec<_>>(), "assets": tree.assets.iter().map(|a| {
                     let size = asset_size(&a.path);
                     json!({"path": a.path, "kind": format!("{:?}", a.kind),
@@ -196,8 +216,19 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                 }).collect::<Vec<_>>(), "unsupported": tree.unsupported.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>()}),
                 Err(e) => json!({"runtime_slot": slot, "error": e.to_string()}),
             }
+        } else if let Some(page) = page {
+            let started = std::time::Instant::now();
+            let tree = contra_host::ui::lua::tree(page, &metadata);
+            ui_time.set(ui_time.get() + started.elapsed());
+            json!({"runtime_slot": slot, "original_slot": mapping.as_ref().and_then(|_| loaded.persist.get(slot)).map(|p| p.script), "widgets": tree.widgets.iter().map(|w| json!({"name": w.name, "source_id": w.source_id, "kind": format!("{:?}", w.kind), "hidden": w.hidden, "enabled": w.enabled, "text": w.text, "details": format!("{w:?}")})).collect::<Vec<_>>(), "assets": tree.assets.iter().map(|a| {
+                    let size = asset_size(&a.path);
+                    json!({"path": a.path, "kind": format!("{:?}", a.kind),
+                        "found": size.map(|_| true), "bytes": size,
+                        "read_status": if size.is_some() { "resolved" } else { "not_resolved" }})
+                }).collect::<Vec<_>>(), "unsupported": tree.unsupported.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>()})
         } else { json!({"runtime_slot": slot, "error": "no UI model"}) }
     }).collect();
+    let ui_time = ui_time.get();
     let (resolved_assets, unresolved_assets) = ui
         .iter()
         .filter_map(|model| model.get("assets").and_then(Value::as_array))
@@ -223,9 +254,23 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         ]);
     }
     let unanswered = format!("{:?}", engine.unhandled_actions());
+    let unanswered_pars: Vec<_> = (engine.unanswered_pars().into_iter())
+        .map(|([par, group, slot, generic], calls)| {
+            // An engine-parameter id is a symbol of the script that passed
+            // it, so an address is named by every script that resolves its id
+            // to an engine parameter, as the engine compiled it.
+            let n = usize::try_from(par - contra_ksp::SYMBOL_BASE).ok();
+            let mut names: Vec<&str> = (loaded.symbols.iter())
+                .filter_map(|s| s.get(n?).map(|n| &**n))
+                .filter(|n| n.starts_with("$ENGINE_PAR"))
+                .collect();
+            names.dedup();
+            json!({"par": par, "names": names, "group": group, "slot": slot, "generic": generic, "calls": calls})
+        })
+        .collect();
     let faults = format!("{:?}", engine.script_faults());
     let summary = format!(
-        "{}\n  samples: {}; groups: {}; zones: {} translated / {} prepared; scripts: {}; UI models: {}\n  unprepared zones by reason: {unprepared_reasons:?}\n  diagnostics: {}; init unanswered: {}; script faults: {}\n  compiled callback/dispatch entries: {callback_summary}; referenced UI assets: {resolved_assets} resolved / {unresolved_assets} not resolved\n  recorded translator law applications: {}; other law provenance unavailable\n",
+        "{}\n  samples: {}; groups: {}; zones: {} translated / {} prepared; scripts: {}; UI models: {}\n  unprepared zones by reason: {unprepared_reasons:?}\n  diagnostics: {}; init unanswered: {}; unanswered engine parameters: {}; script faults: {}\n  compiled callback/dispatch entries: {callback_summary}; referenced UI assets: {resolved_assets} resolved / {unresolved_assets} not resolved\n  recorded translator law applications: {}; other law provenance unavailable\n",
         loaded.name,
         samples.len(),
         groups.len(),
@@ -235,14 +280,27 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
         ui.len(),
         diagnostics.len(),
         unanswered,
+        unanswered_pars.len(),
         faults,
         law_applications.len()
     );
+    let first_note = read_time
+        + translate_time.unwrap_or_default()
+        + build_times.files
+        + build_times.prepare
+        + build_times.scripts
+        + engine_init_time;
+    let heads_time = heads.map(|h| {
+        let _ = h.join();
+        heads_start.elapsed()
+    });
+    let timings = json!({"time_to_first_note_seconds": first_note.as_secs_f64(), "heads_seconds": heads_time.map(|t| t.as_secs_f64()), "read_seconds": read_time.as_secs_f64(),"translate_seconds": translate_time.map(|t| t.as_secs_f64()), "file_open_seconds": build_times.files.as_secs_f64(), "prepare_seconds": build_times.prepare.as_secs_f64(), "script_seconds": build_times.scripts.as_secs_f64(), "engine_init_seconds": engine_init_time.as_secs_f64(), "ui_seconds": ui_time.as_secs_f64(), "pinned_bytes": pinned_bytes});
+    let summary = format!("{summary}  load stages: {timings}\n");
     Ok((
-        json!({"schema_version": 1, "command": "load", "instrument": path,
+        json!({"timings": timings, "schema_version": 1, "command": "load", "instrument": path,
         "engine": "v3", "result": {"name": loaded.name, "samples": samples, "groups": groups,
         "translated_zones": input_zones, "prepared_zones": zones, "unprepared_reasons": unprepared_reasons, "effects": effects, "slot_parameter_laws": parameter_laws, "scripts": scripts, "ui": ui,
-        "diagnostics": diagnostics, "init_unanswered": unanswered, "script_faults": faults,
+        "diagnostics": diagnostics, "init_unanswered": unanswered, "init_unanswered_pars": unanswered_pars, "script_faults": faults,
         "laws": null, "law_applications": law_applications.iter().map(|a| json!({"law_id":a.id.0, "location":a.location, "input":a.input, "output":a.output})).collect::<Vec<_>>(), "law_coverage":"partial: Kontakt group/zone gain-pan-tune, group envelopes/release counter, timed envelopes/LFO/flex gate/EQ, external volume/lag/EQ/LFO rate/shapers saved EQ/filters, compressor/limiter, time floor, stream and filter lookups; UVI keygroup/zone gain-pan-tune, amplitude/AHD envelopes, LFO shape, matrix cell, filter and key/velocity fades", "compiled_callback_count": callback_count, "script_mapping_available": mapping.is_some(), "unavailable": unavailable}}),
         summary,
     ))
@@ -326,13 +384,14 @@ fn callbacks(c: &Callbacks) -> (Value, usize) {
         c.pgs_changed,
         c.ui_controls,
         c.async_complete,
+        c.widget,
     ];
     let count = entries.iter().filter(|e| e.is_some()).count()
         + c.ui_control.iter().filter(|(_, e)| e.is_some()).count();
     (
         json!({"init":c.init,"note":c.note,"release":c.release,"controller":c.controller,
         "persistence_changed":c.persistence_changed,"listener":c.listener,"pgs_changed":c.pgs_changed,
-        "ui_controls":c.ui_controls,"async_complete":c.async_complete,
+        "ui_controls":c.ui_controls,"async_complete":c.async_complete,"widget_dispatch":c.widget,
         "ui_control":c.ui_control.iter().map(|(id,entry)| json!({"control_id":id,"entry":entry})).collect::<Vec<_>>()}),
         count,
     )

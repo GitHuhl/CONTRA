@@ -20,6 +20,13 @@ use contra_vm::{Action, HostCall, HostValue, Text};
 /// One control's number parameters, by parameter id, in the order set.
 type Pars = Vec<(i32, i32)>;
 
+/// Room each control gets at load for the number and text parameters its
+/// callbacks set, so setting one on the audio thread does not allocate.
+// ponytail: a control setting more distinct parameters than this grows its
+// list on the audio thread once; size by the parameter ids if a library does.
+const PARS: usize = 32;
+const TEXTS: usize = 4;
+
 /// Keys on the keyboard a script colours and names.
 const KEYS: usize = 128;
 
@@ -117,6 +124,17 @@ pub struct LookPars {
     pub meter_generic: i32,
     pub picture: i32,
     pub picture_state: i32,
+    /// `$CONTROL_PAR_TEXTLINE`: a text set under it adds a line, as
+    /// `add_text_line` does.
+    pub textline: i32,
+    /// `attach_zone`'s zone and flags, and the play cursor
+    /// `set_ui_wf_property` sets, in microseconds.
+    pub wf_zone: i32,
+    pub wf_flags: i32,
+    pub wf_cursor: i32,
+    /// The `set_ui_wf_property` properties for the cursor and the flags.
+    pub wf_prop_cursor: i32,
+    pub wf_prop_flags: i32,
     /// The UI ids that address the instrument's wallpaper and icon.
     pub wallpaper: i32,
     pub icon: i32,
@@ -133,6 +151,9 @@ pub struct Store {
     menus: Box<[Box<[Vec<MenuItem>]>]>,
     /// Per script slot, by control: the entry a menu last selected.
     selected: Box<[Box<[u16]>]>,
+    /// Per script slot, by control: the saved entry a menu restored before
+    /// it had it waits for (`u16::MAX`: none).
+    waiting: Box<[Box<[u16]>]>,
     /// Per script slot, by control: the text parameters it set.
     texts: Box<[Box<[Texts]>]>,
     keys: Box<[Key]>,
@@ -179,16 +200,17 @@ impl Store {
         Self {
             pars: controls
                 .clone()
-                .map(|n| vec![Vec::new(); n].into())
+                .map(|n| (0..n).map(|_| Vec::with_capacity(PARS)).collect())
                 .collect(),
             menus: controls
                 .clone()
                 .map(|n| vec![Vec::new(); n].into())
                 .collect(),
             selected: controls.clone().map(|n| vec![0; n].into()).collect(),
+            waiting: controls.clone().map(|n| vec![u16::MAX; n].into()).collect(),
             texts: controls
                 .clone()
-                .map(|n| vec![Vec::new(); n].into())
+                .map(|n| (0..n).map(|_| Vec::with_capacity(TEXTS)).collect())
                 .collect(),
             keys: vec![Key::UNTOUCHED; KEYS].into(),
             pressed_support: false,
@@ -259,6 +281,29 @@ impl Store {
         let entries = self.menus.get(usize::from(slot))?.get(n)?;
         let found = entries.iter().position(|e| i64::from(e.value) == value);
         (!entries.is_empty()).then(|| found.unwrap_or_else(|| self.selected(slot, n)))
+    }
+
+    /// Menu control `n` of script `slot` selects entry `index` once it has it.
+    pub fn wait_for(&mut self, slot: u8, n: usize, index: usize) {
+        if let Some(w) = self
+            .waiting
+            .get_mut(usize::from(slot))
+            .and_then(|w| w.get_mut(n))
+        {
+            *w = u16::try_from(index).unwrap_or(u16::MAX);
+        }
+    }
+
+    /// The index of the entry menu control `n` of script `slot` just got,
+    /// when it is the one it waited for.
+    pub fn arrived(&mut self, slot: u8, n: usize) -> Option<usize> {
+        let at = self.menu(slot, Some(n)).len().checked_sub(1)?;
+        let w = self.waiting.get_mut(usize::from(slot))?.get_mut(n)?;
+        if usize::from(*w) != at {
+            return None;
+        }
+        *w = u16::MAX;
+        Some(at)
     }
 
     /// The entry menu control `n` of script `slot` last selected.
@@ -515,10 +560,19 @@ impl Store {
             Action::GetMenuItemVisibility => {
                 HostValue::Int(item(self).map_or(0, |i| i32::from(i.visible)))
             }
+            // A text line is `add_text_line` by another name.
+            Action::SetControlParStr if look.is_some_and(|l| int(1) == l.textline) => {
+                let text_par = look.map_or(0, |l| l.text);
+                self.set_text_par(slot, n, text_par, text, true);
+                HostValue::Nothing
+            }
             // ponytail: a text parameter first set after init allocates its
             // slot on the audio thread, as `set_control_par` does.
             Action::SetControlParStr => {
-                self.set_text_par(slot, n, int(1), text, false);
+                match look.filter(|l| l.textline != l.text && int(1) == l.textline) {
+                    Some(l) => self.set_text_par(slot, n, l.text, text, true),
+                    None => self.set_text_par(slot, n, int(1), text, false),
+                }
                 HostValue::Nothing
             }
             Action::GetControlParStr => {
@@ -578,6 +632,19 @@ impl Store {
                 self.ranges
                     .retain(|r| !(i32::from(r.low)..=i32::from(r.high)).contains(&k));
                 HostValue::Nothing
+            }
+            // The range holding the note; -1 and "" for a note in none (unprobed).
+            Action::GetKeyrangeMinNote | Action::GetKeyrangeMaxNote | Action::GetKeyrangeName => {
+                let k = int(0);
+                let range = self
+                    .ranges
+                    .iter()
+                    .find(|r| (i32::from(r.low)..=i32::from(r.high)).contains(&k));
+                match call.action {
+                    Action::GetKeyrangeMinNote => HostValue::Int(range.map_or(-1, |r| i32::from(r.low))),
+                    Action::GetKeyrangeMaxNote => HostValue::Int(range.map_or(-1, |r| i32::from(r.high))),
+                    _ => out(range.map_or(Text::EMPTY, |r| r.name)),
+                }
             }
             Action::SetText
             | Action::AddTextLine
@@ -682,5 +749,39 @@ mod tests {
             });
             assert_eq!(&got, want, "{steps:?}");
         }
+    }
+
+    /// A range answers its edges and name for any note in it; a note in none
+    /// reads -1 and "".
+    #[test]
+    fn key_range_getters_read_back_what_set_keyrange_made() {
+        let name = Text::from_str_cut("Mid").0;
+        let call = |s: &mut Store, action: Action, ints: &[i64]| {
+            let (mut cells, mut out) = ([0; 0], Text::EMPTY);
+            let mut c = HostCall {
+                action,
+                context: 0,
+                ints,
+                texts: &[name],
+                cells: &mut cells,
+                text_cells: &mut [],
+                text_out: &mut out,
+            };
+            let got = s.call(0, None, None, &mut c);
+            (got, out)
+        };
+        let mut s = Store::new([1].into_iter());
+        call(&mut s, Action::SetKeyrange, &[36, 72]);
+        let edge = |s: &mut Store, action, note| match call(s, action, &[note]).0 {
+            Some(HostValue::Int(v)) => v,
+            _ => -2,
+        };
+        assert_eq!(edge(&mut s, Action::GetKeyrangeMinNote, 50), 36);
+        assert_eq!(edge(&mut s, Action::GetKeyrangeMaxNote, 50), 72);
+        assert_eq!(edge(&mut s, Action::GetKeyrangeMinNote, 20), -1);
+        assert_eq!(call(&mut s, Action::GetKeyrangeName, &[50]).1.as_str(), "Mid");
+        call(&mut s, Action::RemoveKeyrange, &[60]);
+        assert_eq!(edge(&mut s, Action::GetKeyrangeMaxNote, 50), -1);
+        assert_eq!(call(&mut s, Action::GetKeyrangeName, &[50]).1.as_str(), "");
     }
 }

@@ -49,8 +49,8 @@ symphonia-format-riff = { path = "vendor/symphonia-format-riff" }
 symphonia-bundle-flac = { path = "vendor/symphonia-bundle-flac" }
 
 [workspace]
-members = ["vendor/mui", "vendor/mui-vello", "tools/inspect", "tools/clap-probe", "tools/vst3-probe", "tools/ui-shots", "tools/contra-window", "vendor/moose-mui", "vendor/moose-params", "vendor/moose-derive", "vendor/moose-clap", "vendor/moose-vst3", "vendor/mui-baseview", "crates/app/align", "crates/app/host", "crates/app/library", "crates/app/ui", "crates/app/ui-pictures", "crates/base/law", "crates/base/macros", "crates/base/time", "crates/dsp/core", "crates/dsp/delay", "crates/dsp/drive", "crates/dsp/dynamics", "crates/dsp/eq", "crates/dsp/filter", "crates/dsp/modulators", "crates/dsp/registry", "crates/dsp/reverb", "crates/dsp/spatial", "crates/engine/behaviour", "crates/engine/effects", "crates/engine/engine", "crates/engine/ledger", "crates/engine/plan", "crates/engine/prepare", "crates/engine/racks", "crates/engine/script-ui", "crates/engine/stream", "crates/engine/trace", "crates/engine/vm", "crates/engine/voice", "crates/format/common", "crates/format/kontakt", "crates/model/events", "crates/model/ir", "crates/model/params", "crates/model/protocol", "crates/model/ui-model", "crates/script/ksp", "plugin"]
-exclude = ["vendor/ni-file", "vendor/ncw", "vendor/vello", "vendor/moose-baseview", "vendor/xim-rs", "vendor/symphonia-format-riff", "vendor/symphonia-bundle-flac", "vendor/moose", "vendor/moose-build", "vendor/moose-core", "vendor/moose-cpu", "vendor/moose-driver", "vendor/moose-font", "vendor/moose-gpu", "vendor/moose-gui", "vendor/moose-gui-types", "vendor/moose-gui-utils", "vendor/moose-loader", "vendor/moose-plugin", "vendor/moose-standalone", "vendor/moose-test", "vendor/moose-utils", "vendor/mui-access", "vendor/mui-geometry", "vendor/mui-input", "vendor/mui-layout", "vendor/mui-material", "vendor/mui-motion", "vendor/mui-native-dialog", "vendor/mui-scene", "vendor/mui-style", "vendor/mui-symbols", "vendor/mui-text", "vendor/mui-weld", "vendor/mui-baseview-upstream", "vendor/accesskit_unix"]
+members = ["tools/xtask", "tools/inspect", "tools/ui-shots", "tools/contra-window", "crates/app/align", "crates/app/face", "crates/app/host", "crates/app/library", "crates/app/ui", "crates/app/ui-pictures", "crates/app/ui-view", "crates/base/law", "crates/base/fastlz", "crates/base/macros", "crates/base/time", "crates/dsp/core", "crates/dsp/delay", "crates/dsp/drive", "crates/dsp/dynamics", "crates/dsp/eq", "crates/dsp/filter", "crates/dsp/modulators", "crates/dsp/registry", "crates/dsp/reverb", "crates/dsp/spatial", "crates/engine/behaviour", "crates/engine/effects", "crates/engine/engine", "crates/engine/ledger", "crates/engine/plan", "crates/engine/prepare", "crates/engine/racks", "crates/engine/script-ui", "crates/engine/stream", "crates/engine/trace", "crates/engine/vm", "crates/engine/voice", "crates/format/common", "crates/format/kontakt", "crates/format/kontakt-effects", "crates/format/native", "crates/format/sfz", "crates/format/uvi", "crates/model/events", "crates/model/ir", "crates/model/params", "crates/model/protocol", "crates/model/ui-model", "crates/script/ksp", "crates/script/lua", "plugin"]
+exclude = ["vendor/ni-file", "vendor/ncw", "vendor/uvi-file", "vendor/symphonia-format-riff", "vendor/symphonia-bundle-flac", "vendor/derpcat-flight-recorder", "vendor/buffr-durable-file"]
 resolver = "3"
 
 [workspace.package]
@@ -58,6 +58,14 @@ edition = "2024"
 
 # Versions match Cargo.lock today. Later v3 tasks depend on these with `workspace = true`.
 [workspace.dependencies]
+mui = { git = "https://github.com/Matari-Audio/MUI" }
+mui-headless = { git = "https://github.com/Matari-Audio/MUI" }
+mui-native-dialog = { git = "https://github.com/Matari-Audio/MUI" }
+moose = { git = "https://github.com/Matari-Audio/moose", default-features = false }
+moose-clap = { git = "https://github.com/Matari-Audio/moose" }
+moose-vst3 = { git = "https://github.com/Matari-Audio/moose" }
+moose-test = { git = "https://github.com/Matari-Audio/moose" }
+moose-standalone = { git = "https://github.com/Matari-Audio/moose" }
 thiserror = "2"
 smallvec = "1"
 serde = { version = "1", features = ["derive"] }

@@ -3,8 +3,8 @@
 //! that went silent leave it.
 
 use crate::ledger::{Note, NoteRef, Origin};
-use crate::{Engine, Slot, Trigger};
-use contra_voice::FadeTarget;
+use crate::{Engine, Slot};
+use contra_voice::{FadeCurve, FadeTarget};
 
 impl Engine {
     /// Enters `note` in the table. When it is full, the note that matters
@@ -61,7 +61,7 @@ impl Engine {
         let index = match self.voices.iter().position(|s| !s.voice.is_active()) {
             Some(i) => i,
             None => {
-                // Even the fade reserve is full: cut the oldest fading voice.
+                // More than the limit fading at once: cut the oldest fading voice.
                 let (i, _) = self
                     .voices
                     .iter()
@@ -107,23 +107,29 @@ impl Engine {
 
     /// Fades the voices of `notes` to `target`, and the attack voices they
     /// start later; an ending fade releases them.
-    pub(crate) fn fade_notes(&mut self, notes: &[NoteRef], frames: u32, target: FadeTarget) {
+    pub(crate) fn fade_notes(
+        &mut self,
+        notes: &[NoteRef],
+        frames: u32,
+        target: FadeTarget,
+        curve: FadeCurve,
+    ) {
         for &note in notes {
             let mut ends = false;
             if let Some(n) = self.notes.get_mut(note) {
                 // A note yet to start starts with the fade and ends at its silence;
                 // a stopping fade stays, as a voice's does, unless a shorter one comes.
-                let ending = matches!(n.fade, Some((FadeTarget::End, _)));
+                let ending = matches!(n.fade, Some((FadeTarget::End, ..)));
                 n.released |= target == FadeTarget::End && n.started;
-                if !matches!(n.fade, Some((FadeTarget::End, left))
+                if !matches!(n.fade, Some((FadeTarget::End, left, _))
                     if target != FadeTarget::End || frames >= left)
                 {
-                    n.fade = Some((target, frames));
+                    n.fade = Some((target, frames, curve));
                 }
                 ends = target == FadeTarget::End && !ending;
             }
             for slot in self.voices.iter_mut().filter(|s| s.note == Some(note)) {
-                slot.voice.fade(target, frames);
+                slot.voice.fade_along(target, frames, curve);
             }
             // Ending a note ends the notes played for its length, once.
             if ends {
@@ -151,11 +157,7 @@ impl Engine {
     /// still down stays alive while the plan has release triggers to play.
     pub(crate) fn end_silent_notes(&mut self) {
         // A held key stays a live event while something may still act on its release.
-        let release_triggers = self
-            .plan
-            .zones
-            .iter()
-            .any(|z| z.trigger == Trigger::Release)
+        let release_triggers = self.release_zones
             || self
                 .plan
                 .scripts

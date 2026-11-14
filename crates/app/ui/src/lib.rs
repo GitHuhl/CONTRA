@@ -16,8 +16,8 @@ pub mod kit;
 pub mod layout;
 pub mod meter;
 pub use contra_ui_pictures as pictures;
-pub mod theme;
-pub mod view;
+pub use contra_ui_view as view;
+pub use contra_ui_view::theme;
 
+pub use contra_ui_view::{NOTO_SANS, ui};
 pub use pictures::Pictures;
-pub use theme::{NOTO_SANS, ui};

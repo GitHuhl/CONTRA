@@ -48,6 +48,47 @@ pub enum EnginePar {
     OutputChannel,
     /// Entry n of the script plan's knobs: a 0..=1 knob through its law.
     Knob(u16),
+    /// Read only, by zone id: what a zone was saved with.
+    Zone(ZonePar),
+    /// Whether an LFO restarts with each voice (1) or runs free (0).
+    LfoRetrigger,
+    /// An LFO's rate unit: the value indexes the script's unit table (free
+    /// Hz, or a note value whose count the rate knob then moves).
+    LfoUnit,
+    /// A wavetable value, 0..=1 linear in the raw 0..=1e6.
+    Wavetable(crate::TableValue),
+    /// The kind of wavetable form n (0 or 1): the value indexes the
+    /// script's form table.
+    WarpMode(u8),
+    /// Whether a wavetable's partials stretch ([`crate::Inharmonic::on`]):
+    /// 0 off, any other value on.
+    InharmonicOn,
+    /// A wavetable's mod oscillator kind: the value indexes the script's
+    /// kind table.
+    ModOscKind,
+    /// A control the engine does not carry yet: only the text of a value
+    /// the script passes answers (`get_engine_par_disp_ext`); a set or a
+    /// read is reported as unhandled.
+    Shown,
+}
+
+/// What a script reads of a zone (`get_zone_par`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZonePar {
+    LowKey,
+    HighKey,
+    LowVelocity,
+    HighVelocity,
+    RootKey,
+    /// Its group's index.
+    Group,
+    /// Frames of the sample it plays, and how far a start offset may move.
+    SampleStart,
+    SampleEnd,
+    StartRange,
+    SampleRate,
+    /// Whether it is selected in an editor (CONTRA has none: never).
+    Selected,
 }
 
 /// What one script parameter name drives.

@@ -4,6 +4,12 @@
 //! morphs between neighbouring cycles, and two forms bend where in the
 //! cycle it reads and shape what it read.
 
+/// The share of its own output a feedback kind feeds back, and a ring
+/// kind's depth.
+const FEEDBACK: f64 = 0.5;
+const FM_FEEDBACK: f64 = 0.62;
+const RING: f32 = 0.24;
+
 /// Frames in one cycle.
 pub const CYCLE: u64 = 2048;
 /// Cursor frames a voice moves per cycle played: a table zone's rate is
@@ -17,8 +23,102 @@ pub struct Read {
     pub position: f32,
     /// Where in the cycle a note starts, 0..1.
     pub phase: f32,
+    /// How far past `phase` a note's start may fall, 0..=1: each note adds
+    /// its random draw times this (1 starts anywhere, `phase` then moot).
+    pub phase_random: f32,
+    /// The level the table plays at, linear: 1 plays the cycles as their
+    /// samples are.
+    pub gain: f32,
+    pub inharmonic: Inharmonic,
+    pub modosc: ModOsc,
+    /// The host's rate, Hz: what the mod oscillator's Hz swing is read at.
+    pub rate: f32,
     /// Applied in order.
     pub warps: [Warp; 2],
+}
+
+/// A sine oscillator at `ratio()` times the note that moves the table's
+/// read or joins its output by `amount`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModOsc {
+    pub kind: ModKind,
+    pub amount: f32,
+    pub tune: f32,
+    pub tune_range: (f32, f32),
+    pub fm_hz: f32,
+}
+
+impl ModOsc {
+    pub const OFF: Self = Self {
+        kind: ModKind::Off,
+        amount: 0.0,
+        tune: 0.5,
+        tune_range: (1.0, 1.0),
+        fm_hz: 0.0,
+    };
+
+    /// Its frequency over the note's.
+    #[must_use]
+    pub fn ratio(self) -> f32 {
+        let (lo, hi) = self.tune_range;
+        if lo > 0.0 {
+            lo * (hi / lo).powf(self.tune.clamp(0.0, 1.0))
+        } else {
+            1.0
+        }
+    }
+}
+
+/// What the oscillator `m` does at amount `a` (see `contra_ir::ModOscKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModKind {
+    Off,
+    Fm,
+    FmBy,
+    FmFeedback,
+    Pm,
+    PmFeedback,
+    Ring,
+    Mix,
+    Blend,
+}
+
+/// A voice's mod oscillator: its phase, the table's extra phase from FM,
+/// and the table's last output, in cycles and levels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Osc {
+    phase: f64,
+    offset: f64,
+    last: f32,
+}
+
+/// How far apart the partials above the first lie, in fundamentals: partial
+/// `n` plays at `f·(1 + (n − 1)·s)`, each at its level, `s` geometric from
+/// `range.0` at amount 0 to `range.1` at 1; harmonic when off.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Inharmonic {
+    pub on: bool,
+    pub amount: f32,
+    pub range: (f32, f32),
+}
+
+impl Inharmonic {
+    pub const OFF: Self = Self {
+        on: false,
+        amount: 0.5,
+        range: (1.0, 1.0),
+    };
+
+    /// `s`, 1 when off.
+    #[must_use]
+    pub fn stretch(self) -> f32 {
+        let (lo, hi) = self.range;
+        if self.on && lo > 0.0 {
+            lo * (hi / lo).powf(self.amount.clamp(0.0, 1.0))
+        } else {
+            1.0
+        }
+    }
 }
 
 /// One form by `amount`, 0..1: a bend of the read phase, then a shaper of
@@ -179,7 +279,13 @@ pub struct Table {
     /// Where in `data` level `k` of cycle `c` lies, at `c * LEVELS + k`:
     /// its first frame and its length, a power of two.
     pub spans: std::sync::Arc<[(u32, u32)]>,
+    /// The levels a quarter cycle on (each harmonic's sine for its cosine),
+    /// laid out as `data`: what a stretched read shifts in frequency with.
+    /// Every table has them, so a script may stretch any (~2 % memory).
+    pub quad: Option<std::sync::Arc<[i16]>>,
     pub read: Read,
+    /// Each voice's own copy runs its own oscillator.
+    pub osc: Osc,
 }
 
 impl Table {
@@ -199,42 +305,100 @@ impl Table {
             data,
             scale,
             spans,
+            quad: None,
             read,
+            osc: Osc::default(),
         })
     }
 
     /// Fills `out` from cursor `x` ([`PERIOD`] a cycle since the note
     /// began), moving `step` a frame, as Kontakt reads (`0x140cd55c0`):
     /// Hermite within the two levels about the period, blended, then the
-    /// two cycles about `position`; each form's shaper last.
-    pub(crate) fn render(&self, (x, step): (f64, f64), out: &mut [[f32; 2]]) {
+    /// two cycles about `position`; each form's shaper last. A stretched
+    /// read plays the table at `stretch` times the rate and shifts every
+    /// partial down by `1 − stretch` fundamentals (single sideband: the
+    /// read times a cosine less its quadrature times a sine), so the first
+    /// stays on pitch.
+    /// The mod oscillator (a sine at its ratio of the note) runs per frame
+    /// from the voice's own state: FM accumulates into the read phase, PM
+    /// adds to it, the output kinds act on the level read.
+    pub(crate) fn render(&mut self, (x, step): (f64, f64), out: &mut [[f32; 2]]) {
         let at = f64::from(self.read.position.clamp(0.0, 1.0)) * (self.cycles - 1) as f64;
         let c0 = at as usize;
         let c1 = (c0 + 1).min(self.cycles - 1);
         let morph = at.fract() as f32;
         let [w1, w2] = self.read.warps;
-        let (l0, l1, blend) = level(PERIOD / (step * sync(w2)));
-        let cycle = |c: usize, q: f32| {
-            let a = self.hermite(c * LEVELS + l0, q);
-            a + (self.hermite(c * LEVELS + l1, q) - a) * blend
+        let stretch = f64::from(self.read.inharmonic.stretch());
+        let quad = self.quad.as_deref().filter(|_| stretch != 1.0);
+        let rate = if quad.is_some() { stretch } else { 1.0 };
+        let (l0, l1, blend) = level(PERIOD / (step * rate * sync(w2)));
+        let cycle = |data: &[i16], c: usize, q: f32| {
+            let a = self.hermite(data, c * LEVELS + l0, q);
+            a + (self.hermite(data, c * LEVELS + l1, q) - a) * blend
         };
-        for (i, frame) in out.iter_mut().enumerate() {
-            let cursor = x + i as f64 * step;
-            let p = ((cursor / PERIOD) + f64::from(self.read.phase)).fract() as f32;
-            let q = warp(w2, warp(w1, p));
-            let a = cycle(c0, q);
-            let s = if morph == 0.0 {
+        let read = |data: &[i16], q: f32| {
+            let a = cycle(data, c0, q);
+            if morph == 0.0 {
                 a
             } else {
-                a + (cycle(c1, q) - a) * morph
+                a + (cycle(data, c1, q) - a) * morph
+            }
+        };
+        let osc = self.read.modosc;
+        let a = osc.amount.clamp(0.0, 1.0);
+        let a64 = f64::from(a);
+        let cycles = step / PERIOD * rate;
+        let mod_step = cycles * f64::from(osc.ratio());
+        let hz = f64::from(osc.fm_hz) / f64::from(self.read.rate.max(1.0));
+        let gain = self.read.gain;
+        let mut st = self.osc;
+        for (i, frame) in out.iter_mut().enumerate() {
+            let cursor = (x + i as f64 * step) / PERIOD;
+            let m = (std::f64::consts::TAU * st.phase).sin();
+            let y = f64::from(st.last);
+            let pm = match osc.kind {
+                ModKind::Pm => a64 * m,
+                ModKind::PmFeedback => FEEDBACK * a64 * y,
+                _ => 0.0,
             };
-            let s = shape(w2, p, shape(w1, p, s));
+            let p = (cursor * rate + f64::from(self.read.phase) + st.offset + pm).rem_euclid(1.0)
+                as f32;
+            let q = warp(w2, warp(w1, p));
+            let mut s = read(&self.data, q);
+            if let Some(quad) = quad {
+                let (sin, cos) =
+                    (std::f64::consts::TAU * (cursor * (1.0 - stretch)).fract()).sin_cos();
+                s = s * cos as f32 - read(quad, q) * sin as f32;
+            }
+            let s = shape(w2, p, shape(w1, p, s)) * gain;
+            st.last = s;
+            let m32 = m as f32;
+            let s = match osc.kind {
+                ModKind::FmBy => gain * m32,
+                ModKind::Ring => s * (1.0 - a + RING * a * m32),
+                ModKind::Mix => s + 2.0 * a * gain * m32,
+                ModKind::Blend => s + (gain * m32 - s) * a,
+                _ => s,
+            };
+            st.offset = (st.offset
+                + match osc.kind {
+                    ModKind::Fm => hz * a64 * m,
+                    ModKind::FmFeedback => FM_FEEDBACK * hz * a64 * f64::from(st.last),
+                    _ => 0.0,
+                })
+            .rem_euclid(1.0);
+            let by = match osc.kind {
+                ModKind::FmBy => 2.0 * hz * a64 * f64::from(st.last),
+                _ => 0.0,
+            };
+            st.phase = (st.phase + mod_step + by).rem_euclid(1.0);
             *frame = [s, s];
         }
+        self.osc = st;
     }
 
     /// The level at `span` read at phase `q`, wrapping within it.
-    fn hermite(&self, span: usize, q: f32) -> f32 {
+    fn hermite(&self, data: &[i16], span: usize, q: f32) -> f32 {
         let Some(&(first, len)) = self.spans.get(span) else {
             return 0.0;
         };
@@ -242,7 +406,7 @@ impl Table {
         let i = at as u32;
         let tap = |k: u32| {
             let at = first + (i.wrapping_add(k).wrapping_sub(1) & (len - 1));
-            f32::from(self.data.get(at as usize).copied().unwrap_or(0)) * self.scale
+            f32::from(data.get(at as usize).copied().unwrap_or(0)) * self.scale
         };
         crate::hermite(tap(0), tap(1), tap(2), tap(3), at.fract())
     }
@@ -399,6 +563,11 @@ mod tests {
         let read = Read {
             position: 0.0,
             phase: 0.0,
+            phase_random: 0.0,
+            gain: 1.0,
+            inharmonic: Inharmonic::OFF,
+            modosc: ModOsc::OFF,
+            rate: 48_000.0,
             warps: [Warp::OFF; 2],
         };
         let spans: std::sync::Arc<[_]> = vec![(0, 8); LEVELS].into();

@@ -25,6 +25,9 @@ mod params;
 mod pgs;
 mod racks;
 mod recall;
+mod refresh;
+mod reshaped;
+mod runtime;
 mod script_files;
 
 mod script;
@@ -36,6 +39,8 @@ mod ui;
 mod voice_gain;
 mod voice_groups;
 mod voice_rack;
+mod zone_edits;
+mod zone_index;
 
 use std::sync::Arc;
 
@@ -46,7 +51,7 @@ use contra_plan as plan;
 
 use contra_stream::StreamClient;
 use contra_time::Frames;
-use contra_voice::{KeyUp, Voice, VoiceStart};
+use contra_voice::{KeyUp, Scratch, Voice, VoiceStart};
 
 pub use fx_types::{EffectRequest, Prepared};
 pub use inspect::{
@@ -57,23 +62,26 @@ pub use contra_effects::response;
 pub use contra_effects::stem;
 pub use contra_events::{Event, HostNote, HostPattern, NoteExpression};
 pub use contra_ir as ir;
-pub use contra_plan::{EnginePar, EnginePars, Recall, Saved, files};
+pub use contra_plan::{
+    EnginePar, EnginePars, Recall, Saved, ZoneFacts, ZoneRules, files, zone_name,
+};
 pub use contra_script_ui::FIRST_FONT;
 pub use contra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
 pub use contra_time::SampleTime;
-pub use contra_vm::{Action, Faults, Op, Program, Text, Vm};
-pub use contra_voice::{Ahdsr, Loop, Region};
+pub use contra_vm::{Action, Faults, Foreign, Op, Program, Text, Vm, WidgetLook};
+pub use contra_voice::{Ahdsr, Loop, Region, RenderMode};
 pub use ledger::NoteRef;
 pub use pgs::PgsBudget;
 pub use plan::{
-    Atom, Bus, Control, Crossfade, Group, Level, Plan, ReleaseZones, Response, RoundRobin,
+    Atom, Bus, Control, Crossfade, Dormant, Group, Level, Plan, ReleaseZones, Response, RoundRobin,
     RrCounter, SustainPedal, Trigger, Zone,
 };
 pub use queue::Timed;
-pub use script::{Callbacks, CcLink, Controls, LookPars, ScriptPlan};
+pub use script::{Callbacks, CcLink, Controls, KnobModPlan, LookPars, ScriptPlan};
 #[cfg(feature = "trace")]
 pub use trace::{RouteUnit, RouteValue, TraceEvent, VoiceEvent};
 pub use transport::Play;
+pub use zone_edits::{Unpurge, ZoneEdit};
 
 use buses::BusState;
 use group_masks::GroupMasks;
@@ -84,6 +92,12 @@ use script::{Kind, Running};
 
 use contra_effects::MAX_SPAN;
 use contra_effects::matrix as effects;
+/// Loop turns the resumed script callbacks may run in one block, a
+/// millisecond or less of a heavy script. A run that reaches it yields at its next
+/// loop turn and goes on at the next block, as the rest of a chain of waits
+/// does: a block never holds all of a script's chunked work.
+const BLOCK_SCRIPT_TURNS: u64 = 12;
+
 /// A voice ended early outside a voice group fades this long, a cut that never clicks.
 const FADE_SECONDS: f64 = 0.010;
 
@@ -92,18 +106,26 @@ const FADE_SECONDS: f64 = 0.010;
 pub struct Stats {
     /// Voices faded out because the plan's polyphony was reached.
     pub voices_stolen: u64,
-    /// Voices cut without a fade because even the fade reserve was full.
+    /// Voices cut without a fade: more than the voice limit were fading at once.
     pub voices_cut: u64,
     /// Note-ons refused because the note table was full.
     pub notes_refused: u64,
     /// Events refused because the queue was full.
     pub events_refused: u64,
+    /// Script resumes put off to the next frame: one frame already ran as
+    /// many as the queue holds.
+    pub resumes_deferred: u64,
     /// Source frames voices played as silence because data was late.
     pub missing_frames: u64,
     /// Script actions this engine does not implement yet (they returned 0).
     pub actions_unhandled: u64,
     /// Script `message` calls.
     pub messages: u64,
+    /// Script callbacks started, and waits resumed.
+    pub script_starts: u64,
+    pub script_resumes: u64,
+    /// Script loop turns run, a measure of the work a script did.
+    pub script_turns: u64,
 }
 
 struct Slot {
@@ -116,6 +138,8 @@ struct Slot {
     factor: f32,
     /// Its group's inserts that run on this voice alone.
     rack: Vec<voice_rack::Unit>,
+    /// The delay lines its combs run on, sized at build.
+    comb_lines: Vec<[f32; 2]>,
     /// Its lagging pitch routes' semitones: where they are, where they go.
     bend: [f32; 2],
     /// Its group's pan, gliding the same way.
@@ -124,6 +148,8 @@ struct Slot {
     warp: [f32; modulators::WARPS],
     /// Its chaotic LFOs' states ([`modulators::Chaos`]).
     chaos: [modulators::Chaos; modulators::WARPS],
+    /// Its envelopes' attack stretch, fixed at note-on ([`modulators::Age::stretch`]).
+    stretch: [f32; modulators::WARPS],
     #[cfg(feature = "trace")]
     pending_trace_cc: std::cell::Cell<u128>,
 }
@@ -147,11 +173,32 @@ pub struct Engine {
     init_impulses: Vec<impulse_knobs::InitImpulse>,
     /// Effects scripts asked to load since the host last drained them.
     requests: Vec<fx_types::EffectRequest>,
+    /// `set_zone_par` calls waiting for the host (zone_edits.rs).
+    zone_edits: Vec<ZoneEdit>,
+    /// `purge_group(g, 1)` of dormant groups waiting for the host (zone_edits.rs).
+    unpurges: Vec<Unpurge>,
+    /// Per script slot, the edits refused because that queue was full.
+    zone_refused: Box<[u32]>,
+    /// The block being rendered ends here; script turns run before it began.
+    block_end: SampleTime,
+    /// Loop turns resumed callbacks have run this block.
+    block_turns: u64,
+    /// Loop turns the next resumed script run may take before it yields.
+    fuel: u32,
+    /// Whether the plan has zones that play on release (a scan of every zone,
+    /// so kept, not asked each block).
+    release_zones: bool,
+    /// The host keys held down (bit = key) as of this ledger version.
+    keys_down: (u64, u128),
+    /// Each zone's key range, packed: a note's start scans these, not the zones.
+    zone_index: Arc<zone_index::ZoneIndex>,
     stream: StreamClient,
     queue: EventQueue,
     notes: Ledger,
     behaviour: Behaviour,
     voices: Vec<Slot>,
+    /// The buffers every voice renders through, in turn.
+    voice_scratch: Scratch,
     buses: Vec<BusState>,
     /// Sustain pedal down, per MIDI channel.
     pedal: [bool; 16],
@@ -175,8 +222,14 @@ pub struct Engine {
     masks: GroupMasks,
     /// Scratch for script event targets (an action may run inside a ledger query).
     targets_scratch: Vec<NoteRef>,
+    /// Notes a running callback changed; their voices refresh when it ends.
+    refresh_later: Vec<NoteRef>,
     /// Latest controller values on any channel, as scripts read them.
     cc_values: [u8; 130],
+    /// Each key's last polyphonic aftertouch (`%POLY_AT`).
+    poly_at: [u8; 128],
+    /// Where `$KSP_TIMER` counts from (`reset_ksp_timer`).
+    timer_at: SampleTime,
     last_message: Text,
     /// What a recall of saved values does to the scripts.
     recall: Recall,
@@ -184,11 +237,21 @@ pub struct Engine {
     recalled: Box<[Saved]>,
     /// True while `new` runs the scripts' `init`, off the audio thread.
     building: bool,
+    /// While `on init` runs at load, the cells `read_persistent_var`
+    /// reloaded, by slot (texts flagged): the end-of-init restore skips them.
+    reloaded: Vec<(u8, std::ops::Range<u32>, bool)>,
     /// Array files scripts asked to load or save, for the control side.
     files: Vec<contra_plan::files::FileRequest>,
+    /// The editor's answers to picks (`PickFile`): slot, async id, and the
+    /// file name, none when cancelled; until the script reads them.
+    picked: Vec<(u8, i32, Option<contra_vm::Text>)>,
     /// Calls per action the engine does not implement yet, by action id.
     unhandled: Box<[u32]>,
+    /// The engine-parameter addresses behind those calls (par, group, slot,
+    /// generic) and their counts; fixed size, the first ones seen.
+    unanswered_pars: Box<[([i32; 4], u32)]>,
     called: Box<[u32]>,
+    memo: modulators::Memo,
     /// The instrument's level, pan and tune (a script's group -1); level and
     /// pan move [`Self::output`], after every effect.
     instrument: Level,
@@ -209,11 +272,17 @@ pub struct Engine {
     /// the order asked.
     /// The plan's groups as scripts have changed them.
     groups: Box<[Group]>,
+    /// What each group's routes reshape, by group.
+    reshaped: Box<[reshaped::Reshaped]>,
     /// The routes each script `#key` names.
     route_names: ir::RouteNames,
-    /// Shared EQ chains, and each zone's chain.
+    /// The group whose route amounts the running callback moved, and whether
+    /// others too: its voices refresh once, when it returns or waits.
+    routes_moved: Option<(usize, bool)>,
+    /// Shared EQ chains, and each group's chain (a zone plays through its
+    /// group's, so `set_zone_par` moving it needs no rebuild).
     chains: Vec<filters::Chain>,
-    zone_chain: Box<[Option<u16>]>,
+    group_chain: Box<[Option<u16>]>,
     /// Per group, the inserts that run on each voice.
     voice_units: Box<[Arc<[voice_rack::Unit]>]>,
     /// Per group, the first slot its summed voices run (group_racks.rs).
@@ -223,8 +292,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Allocates every pool the plan asks for, plus a quarter more voices so
-    /// stolen voices can fade. Not real-time.
+    /// Allocates every pool the plan asks for, plus as many voices again so
+    /// every stolen voice can fade. Not real-time.
     #[must_use]
     pub fn new(plan: Arc<Plan>, stream: StreamClient, rate: u32) -> Self {
         Self::new_inner(plan, stream, rate, None)
@@ -255,7 +324,12 @@ impl Engine {
             .map(|_| vec![[0.0; 2]; MAX_SPAN as usize].into())
             .collect();
         let main = racks::Rack::new(&plan.main, rate, &[]);
-        let pool = plan.voices + plan.voices / 4 + 1;
+        // A voice that ends early (stolen, choked or faded by a script)
+        // fades for FADE_SECONDS in a spare slot. A chord on a full pool
+        // steals one voice per note at once, up to the whole limit, so with
+        // a spare per voice no fade is cut short (a click) unless more than
+        // the limit are fading at once (tests/playability.rs).
+        let pool = 2 * plan.voices + 1;
         let voices = (0..pool)
             .map(|_| Slot {
                 voice: Voice::allocate(),
@@ -264,10 +338,12 @@ impl Engine {
                 started: SampleTime(0),
                 factor: 1.0,
                 rack: Vec::new(),
+                comb_lines: Vec::new(),
                 bend: [0.0; 2],
                 pan: [0.0; 2],
                 warp: [0.0; modulators::WARPS],
                 chaos: [modulators::CHAOS_START; modulators::WARPS],
+                stretch: [1.0; modulators::WARPS],
                 #[cfg(feature = "trace")]
                 pending_trace_cc: std::cell::Cell::new(0),
             })
@@ -283,15 +359,22 @@ impl Engine {
             .max()
             .unwrap_or(0)
             .max(plan.groups.len());
+        let script_count = plan.scripts.len();
         let vms = plan
             .scripts
             .iter()
             .map(|s| {
-Some(contra_vm::Vm::new(&s.program, s.coroutines))
+                Some(contra_vm::Vm::new(
+                    &s.program,
+                    s.coroutines,
+                    s.foreign.as_ref(),
+                ))
             })
             .collect();
         let timers = vec![[None; 2]; plan.scripts.len()].into();
         let ui = contra_script_ui::Store::new(plan.scripts.iter().map(|s| s.controls.cells.len()));
+        let zone_index = Arc::new(zone_index::ZoneIndex::new(&plan.zones));
+        let release_zones = plan.zones.iter().any(|z| z.trigger == Trigger::Release);
         let mut engine = Self {
             #[cfg(feature = "trace")]
             trace: _trace_capacity.map(trace::Trace::new),
@@ -310,17 +393,29 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
             loaded: Vec::with_capacity(fx_types::REQUESTS),
             init_impulses: Vec::new(),
             requests: Vec::with_capacity(fx_types::REQUESTS),
+            zone_edits: Vec::with_capacity(zone_edits::ZONE_EDITS),
+            unpurges: Vec::with_capacity(16),
+            zone_refused: vec![0; script_count].into(),
+            block_end: SampleTime(0),
+            block_turns: 0,
+            fuel: 0,
+            release_zones,
+            keys_down: (u64::MAX, 0),
+            zone_index,
             stream,
             voices,
+            voice_scratch: Scratch::allocate(),
             buses,
             pedal: [false; 16],
             stats: Stats::default(),
             vms,
+            routes_moved: None,
             route_names: ir::RouteNames::of_names(
                 shared
                     .iter()
                     .map(|g| g.mods.iter().map(|m| m.name.as_str())),
             ),
+            reshaped: shared.iter().map(reshaped::Reshaped::of).collect(),
             groups: shared,
             running: Running::IDLE,
             pending: Vec::with_capacity(capacity),
@@ -330,14 +425,21 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
             stop_waits: Vec::with_capacity(16),
             masks: GroupMasks::new(capacity, groups),
             targets_scratch: Vec::with_capacity(capacity),
+            refresh_later: Vec::with_capacity(64),
             cc_values: [0; 130],
+            poly_at: [0; 128],
+            timer_at: SampleTime(0),
             last_message: Text::EMPTY,
             recall: Recall::Restart,
             recalled: Box::new([]),
             building: true,
+            reloaded: Vec::new(),
             files: Vec::with_capacity(script_files::FILES),
+            picked: Vec::with_capacity(script_files::FILES),
             unhandled: vec![0; contra_vm::Action::all().len()].into(),
+            unanswered_pars: vec![([0; 4], 0); 64].into(),
             called: vec![0; contra_vm::Action::all().len()].into(),
+            memo: Default::default(),
             ui,
             ids: callbacks::Ids::START,
             instrument: Level::panned(ir::common::DB_GAIN.eval_unclamped(out.volume_db), out.pan),
@@ -349,7 +451,7 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
             taps,
             main,
             chains: Vec::new(),
-            zone_chain: Box::new([]),
+            group_chain: Box::new([]),
             voice_units: Box::new([]),
             group_split: Box::new([]),
             scratch: vec![[0.0; 2]; MAX_SPAN as usize].into(),
@@ -361,7 +463,7 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
             if let Some(init) = script.callbacks.init {
                 engine.run_callback(slot, init, Running::new(Kind::Init, None));
             }
-            engine.write_saved(slot, &script.restore, &script.restore_texts);
+            engine.restore_after_init(slot);
             engine.persistence_changed(slot);
         }
         engine.pgs.prepare_runtime();
@@ -426,9 +528,25 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
         }
         let start = self.now;
         let end = start.advance(Frames(u32::try_from(out.len()).unwrap_or(u32::MAX)));
+        self.block_end = end;
+        self.block_turns = 0;
         while self.now < end {
-            while let Some(work) = self.queue.pop_due(self.now) {
-                self.dispatch(work);
+            // One frame runs at most a queue's worth of resumes: a script
+            // chain of sub-frame waits goes on next frame, never spins here.
+            let mut resumes = 0;
+            while let Some((due, work)) = self.queue.pop_due(self.now) {
+                if let Work::Resume(..) = work {
+                    resumes += 1;
+                    if resumes > self.queue.capacity() {
+                        let next = queue::Due::at(SampleTime(self.now.0 + 1));
+                        self.stats.resumes_deferred += 1;
+                        if !self.queue.push_due(next, work) {
+                            self.stats.events_refused += 1;
+                        }
+                        continue;
+                    }
+                }
+                self.dispatch(due, work);
             }
             let until = self
                 .queue
@@ -449,11 +567,12 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
         self.end_silent_notes();
     }
 
-    fn dispatch(&mut self, work: Work) {
+    fn dispatch(&mut self, due: queue::Due, work: Work) {
         let event = match work {
             Work::Input(event) => event,
-            Work::Resume(slot, co, wait) => return self.resume(slot, co, wait),
+            Work::Resume(slot, co, wait) => return self.resume(slot, co, wait, due),
             Work::Release(note) => return self.end_note(note),
+            Work::ParentUp(note) => return self.parent_up(note),
             Work::PgsChanged => return self.run_pgs_changed(),
             Work::Listen {
                 slot,
@@ -539,8 +658,10 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
                 // The key is up whatever the script does with its event:
                 // a `play_note(.., -1)` child still ends (KSP manual,
                 // play_note), through its own release callbacks.
-                let _ = slot;
-                self.end_children(note);
+                let script = self.plan.scripts.get(usize::from(slot));
+                if script.is_some_and(|s| s.held_release_ends_children) {
+                    self.end_children(note);
+                }
                 continue;
             }
             if self.pedal.get(usize::from(channel)) == Some(&true) {
@@ -569,6 +690,29 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
             self.release_callbacks(note);
         }
         self.release(note);
+    }
+
+    /// A `play_note(.., -1)` child's parent is released: its release
+    /// callbacks run, and one that ignores it keeps it playing until a
+    /// `note_off` (Una Corda's pedal holds its dry tones this way; native
+    /// rings on, and stops at the pedal-up `note_off`).
+    fn parent_up(&mut self, note: NoteRef) {
+        match self.notes.get(note) {
+            Some(n) if !n.released && !n.key_up => {}
+            _ => return,
+        }
+        if let Some(slot) = self.release_callbacks(note) {
+            if let Some(n) = self.notes.get_mut(note) {
+                n.key_up = true;
+            }
+            // As for a held key-up: its own children still end (note_off).
+            let script = self.plan.scripts.get(usize::from(slot));
+            if script.is_some_and(|s| s.held_release_ends_children) {
+                self.end_children(note);
+            }
+        } else {
+            self.release(note);
+        }
     }
 
     /// Ends `note` at the current time, after the running callback returns.
@@ -617,7 +761,10 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
         let mut from = 0;
         while let Some(child) = self.notes.next_child(note, from) {
             from = child.slot() + 1;
-            self.queue_end(child);
+            if !self.queue.push(self.now, Work::ParentUp(child)) {
+                self.stats.events_refused += 1;
+                self.release(child);
+            }
         }
     }
 
@@ -625,7 +772,12 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
         let fade = self.fade_frames();
         let mut hits = std::mem::take(&mut self.hits);
         self.notes.matching(pattern, &mut hits);
-        self.fade_notes(&hits, fade, contra_voice::FadeTarget::End);
+        self.fade_notes(
+            &hits,
+            fade,
+            contra_voice::FadeTarget::End,
+            contra_voice::FadeCurve::Linear,
+        );
         self.hits = hits;
     }
 
@@ -640,78 +792,29 @@ Some(contra_vm::Vm::new(&s.program, s.coroutines))
                 NoteExpression::Tune(semitones) => n.expression_tune = semitones,
                 NoteExpression::Gain(g) => n.expression_gain = g as f32,
                 NoteExpression::Pan(p) => n.expression_pan = p as f32,
-                // ponytail: pressure and brightness reach the modulation matrix once it exists.
-                NoteExpression::Pressure(_) | NoteExpression::Brightness(_) => continue,
+                NoteExpression::Pressure(p) => n.expression_pressure = Some(p as f32),
+                NoteExpression::Brightness(b) => n.expression_brightness = Some(b as f32),
             }
             self.refresh_note(note, None);
         }
+        // A note's pressure is its key's polyphonic aftertouch to the
+        // scripts: `on poly_at` hears it, as it hears an MPE controller's.
+        let mut keys = [false; 128];
+        if let NoteExpression::Pressure(p) = expression {
+            for n in hits.iter().filter_map(|&note| self.notes.get(note)) {
+                if let Some(k) = keys.get_mut(usize::from(n.key)) {
+                    *k = true;
+                }
+            }
+            let value = (p.clamp(0.0, 1.0) * 127.0).round() as u8;
+            for (v, _) in self.poly_at.iter_mut().zip(keys).filter(|(_, k)| *k) {
+                *v = value;
+            }
+        }
+        // The scripts run with the hit list back in place: they use it.
         self.hits = hits;
-    }
-
-    /// Recomputes pitch and gain of a note's voices; with `cc`, only the gain
-    /// of voices whose zone crossfades on that controller.
-    fn refresh_note(&mut self, note: NoteRef, cc: Option<u8>) {
-        let Some(n) = self.notes.get(note).copied() else {
-            return;
-        };
-        let plan = self.plan.clone();
-        for i in 0..self.voices.len() {
-            let Some(slot) = self.voices.get(i) else {
-                continue;
-            };
-            if slot.note != Some(note) || !slot.voice.is_active() {
-                continue;
-            }
-            #[cfg(feature = "trace")]
-            let trace_cc = cc.or_else(|| {
-                (self.running.kind == Kind::Controller).then_some(self.running.controller)
-            });
-            #[cfg(feature = "trace")]
-            if self.trace.is_some()
-                && let Some(cc) = trace_cc
-            {
-                slot.pending_trace_cc
-                    .set(slot.pending_trace_cc.get() | (1u128 << cc));
-            }
-            let Some(zone) = plan.zones.get(slot.zone) else {
-                continue;
-            };
-            if cc.is_some_and(|cc| !self.follows(zone, cc)) {
-                continue;
-            }
-            let age = modulators::Age {
-                warp: slot.warp,
-                chaos: slot.chaos.map(|c| c[3]),
-                ..self.age(slot.started, slot.voice.released_at().map(SampleTime))
-            };
-            #[cfg(feature = "trace")]
-            if let (Some(trace), Some(cc)) = (&self.trace, trace_cc) {
-                trace.routes.begin(i, slot.zone, cc);
-            }
-            let pan = [slot.pan[0], self.group_pan(zone)];
-            let (gain, lag) = self.voice_gain(zone, &n, slot.factor, age, pan[0]);
-            let mix = self.voice_mix(zone, &n, age);
-            let (step, bend) = self.step(zone, &n, age);
-            let law = self.plan.route_pitch;
-            let pitch = cc.is_none_or(|cc| self.pitch_follows(zone, cc));
-            self.retune_rack(i, zone, &n, age);
-            #[cfg(feature = "trace")]
-            if let Some(trace) = &self.trace {
-                trace.routes.end();
-            }
-            if let Some(slot) = self.voices.get_mut(i) {
-                slot.pan = pan;
-                slot.voice.set_gain(gain);
-                slot.voice.set_lag(lag);
-                if let Some(mix) = mix {
-                    slot.voice.set_mix(mix);
-                }
-                if pitch {
-                    slot.bend[1] = bend.semitones;
-                    slot.voice
-                        .set_step(voice_gain::bent(law, step, bend.instant + slot.bend[0]));
-                }
-            }
+        for key in (0u8..).zip(keys).filter_map(|(key, k)| k.then_some(key)) {
+            self.run_poly_at(key);
         }
     }
 }

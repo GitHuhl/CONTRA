@@ -19,17 +19,19 @@ mod route_names;
 mod wavetable;
 pub use bus::{Bus, BusSend};
 pub use drive::{
-    Clipper, Crush, Curve as DriveCurve, EffectParam, KnobTarget, Overdrive, RackAt, Shaper,
-    SlotKnob, SlotLaw, SlotShape, SlotShapes, SlotType,
+    Clipper, Crush, Curve as DriveCurve, EffectParam, KnobModel, KnobTarget, Overdrive, RackAt,
+    Shaper, SlotKnob, SlotLaw, SlotShape, SlotShapes, SlotType,
 };
 pub use effects::{
-    Cascade, CascadeStage, Clocked, ClockedShape, Compressor, Delay, DelayTime, Detector, Formant,
-    IDENTITY, ImpulseCuts, ImpulseKnob, Limiter, Matrix, Phaser, Reverb, Transient, VowelSet,
+    COMB_LOWEST_HZ, Cascade, CascadeStage, Clocked, ClockedShape, Comb, CombBank, CombMode,
+    Compressor, Delay, DelayTime, Detector, ENSEMBLE_VOICES, Ensemble, EnsembleVoices, Formant,
+    IDENTITY, ImpulseCuts, ImpulseKnob, Limiter, Matrix, Notches, Phaser, Polarity, Reverb,
+    ScanShape, Transient, VowelSet,
 };
-pub use engine_par::{Drives, EnginePar, ScriptPar};
-pub use contra_law::{FormulaId, common};
-pub use link::{CcLink, Linked};
-pub use mods::{Attractor, Blend, Curve, Exp2, Factor, ModKind, Term, Transfer, Wave};
+pub use engine_par::{Drives, EnginePar, ScriptPar, ZonePar};
+pub use contra_law::{FormulaId, Section, Sections, Stage, common};
+pub use link::{CcLink, KnobMod, Linked};
+pub use mods::{Attractor, Blend, Curve, Exp2, Factor, ModKind, Source, Term, Transfer, Wave};
 pub use output::{Balance, Output, OutputControllers};
 pub use readout::{Form, Readout};
 pub use reverb::{
@@ -37,7 +39,9 @@ pub use reverb::{
     ReverbPar,
 };
 pub use route_names::RouteNames;
-pub use wavetable::{FormShaper, Side, Warp, WarpShape, Wavetable};
+pub use wavetable::{
+    FormShaper, Inharmonic, ModOsc, ModOscKind, Side, TableValue, Warp, WarpShape, Wavetable,
+};
 
 #[derive(Clone, Debug)]
 pub struct Instrument {
@@ -76,8 +80,12 @@ pub struct Instrument {
     pub responses: Vec<(String, usize)>,
     /// How [`KnobTarget::Slot`] knobs move the effects they address.
     pub slot_laws: Vec<SlotLaw>,
+    /// Slots whose knobs [`KnobModel`]s rebuild together.
+    pub slot_models: Vec<(RackAt, u8, KnobModel)>,
     /// The filter shapes a script may switch slots to.
     pub slot_shapes: SlotShapes,
+    /// Controllers that move a (Lua) script's knobs by name.
+    pub knob_mods: Vec<KnobMod>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -102,7 +110,9 @@ impl Instrument {
         impulses: Vec::new(),
         responses: Vec::new(),
         slot_laws: Vec::new(),
+        slot_models: Vec::new(),
         slot_shapes: SlotShapes::NONE,
+        knob_mods: Vec::new(),
         diagnostics: Vec::new(),
     };
 }
@@ -122,6 +132,10 @@ pub struct Impulse {
     /// The new left and right channels as `[from left, from right]`, after
     /// the envelope and before normalizing.
     pub mix: Option<[[f32; 2]; 2]>,
+    /// The early and late parts' lengths over their own (1 unchanged),
+    /// stretched without changing pitch; they part where [`ImpulseCuts`]'s
+    /// crossover does, else where the decay turns diffuse.
+    pub size: [f32; 2],
 }
 
 /// Scales a response's channel energy toward `energy`, by at most `max_gain`;
@@ -260,6 +274,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_synced_rate_moves_along_the_note_ladder_and_stays_on_it() {
+        // 2/3 of a beat is place 18; four places on is 1/4 (place 22).
+        assert!((ladder_beats(0.666_666_7, 4.0) - 0.25).abs() < 1e-6);
+        assert_eq!(ladder_beats(2.0, -40.0), 128.0);
+        assert!((ladder_beats(1.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn block_keystream_reads_in_any_piece_and_undoes_itself() {
         let plain: Vec<u8> = (0..1500u32).map(|i| (i * 7 + 3) as u8).collect();
         let key = Keystream::Blocks {
@@ -277,6 +299,14 @@ mod tests {
         assert_eq!(piece, plain[300..1100]);
         key.apply(4096, &mut whole);
         assert_eq!(whole, plain);
+    }
+
+    /// An effect travels by value through racks and commands: an effect kind
+    /// that grows past this bound states its shared fields once instead.
+    #[test]
+    fn an_effect_stays_small() {
+        let size = std::mem::size_of::<Effect>();
+        assert!(size <= 208, "ir::Effect is {size} bytes");
     }
 }
 
@@ -311,6 +341,9 @@ pub struct Group {
     pub stream: Option<Stream>,
     /// Its zones are wavetables.
     pub wavetable: Option<Wavetable>,
+    /// Its source stretches time: voices play at this speed (1 as
+    /// recorded) at their own pitch. `None`: speed follows pitch.
+    pub speed: Option<f32>,
     /// Index into [`Instrument::voice_groups`].
     pub voice_group: Option<usize>,
     /// Effects on this group's voices, by slot.
@@ -336,6 +369,9 @@ pub struct Routes {
     /// The modulator's name, what scripts find it by.
     pub name: String,
     pub names: Vec<String>,
+    /// Each target's signed depth as saved; what a script reads and
+    /// writes on a route the engine does not carry.
+    pub depths: Vec<f32>,
 }
 
 impl Group {
@@ -357,6 +393,7 @@ impl Group {
         purged: false,
         stream: None,
         wavetable: None,
+        speed: None,
         voice_group: None,
         inserts: Vec::new(),
         envelopes: Vec::new(),
@@ -414,6 +451,55 @@ pub enum Clock {
     Free,
 }
 
+/// Beats per cycle of a tempo-synced rate knob's 30 places, slowest first
+/// (a format's note values: 32 bars down to a 32nd triplet).
+pub const NOTE_LADDER: [f32; 30] = [
+    128.0,
+    64.0,
+    32.0,
+    28.0,
+    24.0,
+    20.0,
+    16.0,
+    12.0,
+    8.0,
+    6.0,
+    4.0,
+    3.0,
+    8.0 / 3.0,
+    2.0,
+    1.5,
+    4.0 / 3.0,
+    1.0,
+    0.75,
+    2.0 / 3.0,
+    0.5,
+    0.375,
+    1.0 / 3.0,
+    0.25,
+    0.1875,
+    1.0 / 6.0,
+    0.125,
+    0.093_75,
+    1.0 / 12.0,
+    0.0625,
+    1.0 / 24.0,
+];
+
+/// `beats` moved `shift` places along [`NOTE_LADDER`] from its nearest place,
+/// held on the ladder.
+#[must_use]
+pub fn ladder_beats(beats: f32, shift: f32) -> f32 {
+    let near = |b: f32| (b / beats.max(1e-6)).ln().abs();
+    let at = NOTE_LADDER
+        .iter()
+        .enumerate()
+        .min_by(|a, b| near(*a.1).total_cmp(&near(*b.1)))
+        .map_or(0, |(i, _)| i);
+    let to = (at as f32 + shift).round().clamp(0.0, 29.0) as usize;
+    NOTE_LADDER.get(to).copied().unwrap_or(beats)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rate {
     Hz(f32),
@@ -466,52 +552,6 @@ pub struct Mod {
     /// Its modulator is switched off (scripts may switch it on).
     pub bypass: bool,
     pub kind: ModKind,
-}
-
-/// A per-note modulation source, 0..=1 unless noted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Source {
-    Velocity,
-    Controller(u8),
-    /// Controller `cc`, reading `start` (0..=127) until its first message
-    /// on the channel arrives.
-    ControllerFrom {
-        cc: u8,
-        start: u8,
-    },
-    /// The channel's pitch bend, −1..=1.
-    PitchBend,
-    /// The note's key over 127.
-    Key,
-    /// The group's [`Group::envelopes`] entry.
-    Envelope(u8),
-    /// The group's [`Group::shapers`] entry: its source through its table.
-    Shaped(u8),
-    /// The group's [`Group::lfos`] entry, −1..=1.
-    Lfo(u8),
-    /// The group's [`Group::blends`] entry.
-    Blend(u8),
-    /// Always 1.
-    Constant,
-    /// The value a script sent this note for "from script" modulator `id`,
-    /// −1..=1; 0 until sent.
-    Script(u16),
-    /// 1 at note-on, falling linearly to 0 after `span_ms` held; frozen at
-    /// key-up, so a release sample is quieter the longer its key was held.
-    HeldTime {
-        span_ms: u32,
-    },
-}
-
-impl Source {
-    /// The controller it reads, if any.
-    #[must_use]
-    pub fn controller(self) -> Option<u8> {
-        match self {
-            Self::Controller(cc) | Self::ControllerFrom { cc, .. } => Some(cc),
-            _ => None,
-        }
-    }
 }
 
 /// A streamed zone's resident head: `bytes_per_channel` of stored audio
@@ -584,6 +624,8 @@ pub enum StartRule {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Zone {
+    /// The id scripts address it by: its place in the format's zone list.
+    pub id: u32,
     /// Index into [`Instrument::samples`].
     pub sample: usize,
     pub keys: RangeInclusive<u8>,
@@ -681,6 +723,14 @@ pub enum EffectKind {
     Delay(Delay),
     /// A phaser (the wet path; `dry` mixes the input back).
     Phaser(Phaser),
+    /// A phaser of second-order allpasses, its input mixed in (`dry` 0).
+    Notches(Notches),
+    /// A chorus ensemble, its input mixed in (`dry` 0).
+    Ensemble(Ensemble),
+    /// A bank of tuned combs, its input mixed in (`dry` 0).
+    CombBank(CombBank),
+    /// A feedback comb run on each voice (`dry` mixes the input back).
+    Comb(Comb),
     /// A transient shaper, in place.
     Transient(Transient),
     /// Not carried, an insert: audio passes unchanged (its output gain trims

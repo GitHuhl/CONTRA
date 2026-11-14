@@ -5,14 +5,14 @@
 use contra_events::HostNote;
 use contra_time::SampleTime;
 use contra_vm::{Action, HostApi, HostCall, HostValue, Text, event};
-use contra_voice::FadeTarget;
+use contra_voice::{FadeCurve, FadeTarget};
 
 use crate::ledger::{Note, NoteRef, Origin, Releases};
 use crate::queue::{Exit, Work};
 use crate::{Engine, EnginePar};
 
 pub(crate) use contra_ledger::running::{Kind, Running};
-pub use contra_plan::{Callbacks, CcLink, Controls, LookPars, ScriptPlan};
+pub use contra_plan::{Callbacks, CcLink, Controls, KnobModPlan, LookPars, ScriptPlan};
 
 /// KSP's `$NI_NOT_FOUND`, what the `get_*_idx` lookups answer for a miss
 /// (measured on the oracle: `probes/ni_not_found.lua`).
@@ -38,15 +38,34 @@ impl Engine {
         }
     }
 
-    /// Applies `f` to every addressed note, then refreshes the sounding ones.
+    /// Refreshes, in one pass over the voices, every note a callback wrote to.
+    pub(crate) fn flush_refresh(&mut self) {
+        if self.refresh_later.is_empty() {
+            return;
+        }
+        let notes = std::mem::take(&mut self.refresh_later);
+        self.refresh_voices(None, |slot, _| {
+            slot.note.is_some_and(|n| notes.contains(&n))
+        });
+        self.refresh_later = notes;
+        self.refresh_later.clear();
+    }
+
+    /// Applies `f` to every addressed note, then refreshes the sounding ones
+    /// (at the end of the callback).
     fn each(&mut self, id: i32, mut f: impl FnMut(&mut Note)) {
         let mut hits = std::mem::take(&mut self.targets_scratch);
         self.targets(id, &mut hits);
         for &note in &hits {
             if let Some(n) = self.notes.get_mut(note) {
                 f(n);
-                if n.started {
-                    self.refresh_note(note, None);
+                // The running callback's writes refresh once, when it ends.
+                if n.started && !self.refresh_later.contains(&note) {
+                    if self.refresh_later.len() < self.refresh_later.capacity() {
+                        self.refresh_later.push(note);
+                    } else {
+                        self.refresh_note(note, None);
+                    }
                 }
             }
         }
@@ -113,13 +132,16 @@ impl Engine {
             n.first = first;
             n.pass = first;
         }
-        let list = if usize::from(first) < self.plan.scripts.len() {
-            &mut self.forward
+        if usize::from(first) == self.plan.scripts.len() {
+            self.queue_start(r);
+        } else if self.forward.len() < self.forward.capacity() {
+            self.forward.push(r);
         } else {
-            &mut self.pending
-        };
-        if list.len() < list.capacity() {
-            list.push(r);
+            // ponytail: a full forward list refuses the note; pruning it would
+            // shift the indices an outer `forward_from` walks.
+            self.notes.remove(r);
+            self.stats.notes_refused += 1;
+            return 0;
         }
         r.event_id()
     }
@@ -152,10 +174,22 @@ impl Engine {
     }
 
     fn event_par(&self, id: i32, par: i32) -> i32 {
-        let Some(n) = NoteRef::from_event_id(id).and_then(|r| self.notes.get(r)) else {
+        let note = NoteRef::from_event_id(id);
+        let Some(n) = note.and_then(|r| self.notes.get(r)) else {
             return 0;
         };
+        // Only a voice carries a zone: the note's first sounding one.
+        let voice = (self.voices.iter())
+            .find(|s| s.note == note && s.voice.is_active())
+            .and_then(|s| Some((s, self.plan.zones.get(s.zone)?)));
         match par {
+            event::ZONE_ID => voice.map_or(-1, |(_, z)| z.id as i32),
+            event::PLAY_POS => voice.map_or(0, |(s, z)| {
+                // The position in the sample: a looped or reversed voice's
+                // cursor is not its elapsed frames.
+                let frame = s.voice.sample_frame(&z.region).unwrap_or(z.region.end);
+                (frame as f64 * 1e6 / f64::from(z.sample_rate.max(1))) as i32
+            }),
             0..=event::CUSTOM_LAST => n.custom.get(par as usize).copied().unwrap_or(0),
             event::VOLUME => n.script_volume,
             event::TUNE => n.script_tune,
@@ -202,8 +236,7 @@ impl Engine {
 
     fn key_down(&self, key: i32) -> bool {
         self.notes
-            .count(|n| n.origin == Origin::Host && i32::from(n.host.key) == key && !n.is_up())
-            > 0
+            .any(|n| n.origin == Origin::Host && i32::from(n.host.key) == key && !n.is_up())
     }
 
     /// The value sent every event for "from script" modulator `index`; 0 until sent.
@@ -219,6 +252,55 @@ impl Engine {
 }
 
 impl HostApi for Engine {
+    fn groups(&self) -> i64 {
+        #[cfg(feature = "trace")]
+        if self.trace.is_some() {
+            return -1;
+        }
+        self.masks.groups as i64
+    }
+
+    /// `num_groups` and `key_down`, answered without the call machinery. A
+    /// traced engine records every call, so it takes the general path.
+    fn query(&mut self, action: Action, ints: &[i64]) -> Option<i32> {
+        #[cfg(feature = "trace")]
+        if self.trace.is_some() {
+            return None;
+        }
+        let value = match action {
+            Action::NumGroups => self.masks.groups as i32,
+            Action::KeyDown => {
+                if self.keys_down.0 != self.notes.version() {
+                    let mut mask = 0u128;
+                    for (_, n) in self.notes.live() {
+                        if n.origin == Origin::Host && !n.is_up() && n.host.key < 128 {
+                            mask |= 1 << n.host.key;
+                        }
+                    }
+                    self.keys_down = (self.notes.version(), mask);
+                }
+                let key = ints.first().map_or(-1, |&v| v as i32);
+                i32::from(
+                    u32::try_from(key).is_ok_and(|k| k < 128 && self.keys_down.1 >> k & 1 == 1),
+                )
+            }
+            Action::EventNote | Action::EventVelocity | Action::EventId => {
+                let running = self.running.event;
+                let current = running.and_then(|r| self.notes.get(r));
+                match action {
+                    Action::EventNote => current.map_or(0, |n| i32::from(n.key)),
+                    Action::EventVelocity => current.map_or(0, |n| i32::from(n.velocity_byte)),
+                    _ => running.map_or(0, NoteRef::event_id),
+                }
+            }
+            _ => return None,
+        };
+        if let Some(n) = self.called.get_mut(usize::from(action.id())) {
+            *n += 1;
+        }
+        Some(value)
+    }
+
     fn call(&mut self, mut call: HostCall<'_>) -> HostValue {
         #[cfg(feature = "trace")]
         if let Some(trace) = &mut self.trace {
@@ -260,6 +342,9 @@ impl HostApi for Engine {
         if let Some(value) = self.ui_call(&mut call) {
             return value;
         }
+        if let Some(value) = self.runtime_call(&mut call) {
+            return value;
+        }
         let int = |i: usize| call.ints.get(i).map_or(0, |&v| v as i32);
         if let Some(value) = self.transport_value(call.action, int(0)) {
             return value;
@@ -289,6 +374,7 @@ impl HostApi for Engine {
             Action::EngineUptime => {
                 HostValue::Int((self.now.0 * 1000 / u64::from(self.rate)) as i32)
             }
+            Action::EngineMs => HostValue::Real(self.now.0 as f64 * 1000.0 / f64::from(self.rate)),
             Action::NumGroups => HostValue::Int(self.masks.groups as i32),
             Action::Random => HostValue::Int(self.random(int(0), int(1))),
             Action::GroupVolume | Action::GroupPan | Action::GroupTune => {
@@ -297,6 +383,19 @@ impl HostApi for Engine {
             }
             Action::RouteAmount => {
                 self.set_route_amount(int(0), int(1));
+                HostValue::Nothing
+            }
+            Action::EffectBypass => {
+                self.set_effect_bypass(int(0), int(1), int(2), int(3) != 0);
+                HostValue::Nothing
+            }
+            Action::EffectField => {
+                let value = int(4) as f32 / 1000.0;
+                self.set_effect_field(int(0), int(1), int(2), int(3), value);
+                HostValue::Nothing
+            }
+            Action::EffectGain => {
+                self.set_effect_gain(int(0), int(1), int(2), int(3) as f32 / 1e6);
                 HostValue::Nothing
             }
             Action::BusVolume => {
@@ -328,15 +427,25 @@ impl HostApi for Engine {
                 HostValue::Nothing
             }
             Action::FadeOut | Action::FadeIn => {
-                let target = match call.action {
-                    Action::FadeIn => FadeTarget::Hold(1.0),
-                    _ if int(2) != 0 => FadeTarget::End,
-                    _ => FadeTarget::Hold(0.0),
+                let (target, curve) = match call.action {
+                    Action::FadeIn => (FadeTarget::Hold(1.0), int(2)),
+                    _ if int(2) != 0 => (FadeTarget::End, int(3)),
+                    _ => (FadeTarget::Hold(0.0), int(3)),
+                };
+                // The optional last argument, $NI_FADE_LINEAR..LOGARITHMIC =
+                // 0..=4 (measured, ksp_constants.py); Kontakt warns on any
+                // other and fades linearly (0x1407aa490, 0x14086d699).
+                let curve = match curve {
+                    1 => FadeCurve::QuarterSine,
+                    2 => FadeCurve::HalfCosine,
+                    3 => FadeCurve::Square,
+                    4 => FadeCurve::InverseSquare,
+                    _ => FadeCurve::Linear,
                 };
                 let frames = micros_to_frames(i64::from(int(1)), self.rate) as u32;
                 let mut hits = std::mem::take(&mut self.targets_scratch);
                 self.targets(int(0), &mut hits);
-                self.fade_notes(&hits, frames, target);
+                self.fade_notes(&hits, frames, target, curve);
                 self.targets_scratch = hits;
                 HostValue::Nothing
             }
@@ -463,6 +572,17 @@ impl HostApi for Engine {
             Action::EventParAt => HostValue::Int(
                 running.map_or(0, |r| self.event_par(r.event_id(), int(0).clamp(0, 3))),
             ),
+            // `%NOTE_DURATION[key]`: microseconds since the newest live note on
+            // that key started (the KSP manual's time-and-transport array).
+            Action::NoteDuration => HostValue::Int(
+                u8::try_from(int(0))
+                    .ok()
+                    .and_then(|key| self.notes.newest(key))
+                    .map_or(0, |n| {
+                        let frames = self.now.0.saturating_sub(n.at.0);
+                        i32::try_from(frames * 1_000_000 / u64::from(self.rate)).unwrap_or(i32::MAX)
+                    }),
+            ),
             Action::NumZones | Action::GetNumZones => HostValue::Int(self.plan.zones.len() as i32),
             // find_group answers 0 for an unknown name, get_group_idx $NI_NOT_FOUND.
             Action::FindGroup | Action::GetGroupIdx => {
@@ -493,14 +613,17 @@ impl HostApi for Engine {
                 *call.text_out = Text::from_str_cut(name).0;
                 HostValue::Text
             }
-            // ponytail: answered at once, then on async_complete; the samples
-            // stay in memory until the host reloads without the group.
-            Action::PurgeGroup => {
-                if let Some(g) = self.groups.get_mut(int(0) as usize) {
-                    g.purged = int(1) == 0;
+            // ponytail: a purge answers at once (the samples stay in memory); an un-purge
+            // of a dormant group answers when the host has loaded it.
+            Action::PurgeGroup => match u32::try_from(int(0)) {
+                Ok(group) if int(1) != 0 => HostValue::Int(self.unpurge(group)),
+                _ => {
+                    if let Some(g) = self.groups.get_mut(int(0) as usize) {
+                        g.purged = true;
+                    }
+                    HostValue::Int(self.start_async(Exit::Done))
                 }
-                HostValue::Int(self.start_async(Exit::Done))
-            }
+            },
             Action::AsyncId => HostValue::Int(self.ids.async_done),
             Action::AsyncExitStatus => HostValue::Int(i32::from(self.ids.async_exit == Exit::Done)),
             // A command still running (an effect type loading off the audio
@@ -572,6 +695,7 @@ impl HostApi for Engine {
                     .flatten();
                 if !set && loaded.is_none() && !self.absent(int(0), int(2), int(3), int(4)) {
                     self.count_unhandled(Action::SetEnginePar);
+                    self.count_par([int(0), int(2), int(3), int(4)]);
                 }
                 HostValue::Int(match loaded {
                     Some(answer) => answer,
@@ -592,6 +716,13 @@ impl HostApi for Engine {
                     }
                 }
             }
+            // A polyphonic aftertouch message on the channel of the note running.
+            Action::SetPolyAt => {
+                let channel = running.and_then(|r| self.notes.get(r)).map_or(0, |n| n.host.channel);
+                let at = |i| u8::try_from(int(i).clamp(0, 127)).unwrap_or(0);
+                self.poly_aftertouch(channel, at(0), at(1));
+                HostValue::Nothing
+            }
             Action::SetController => {
                 self.set_controller(int(0), int(1));
                 HostValue::Nothing
@@ -608,10 +739,23 @@ impl HostApi for Engine {
                     HostValue::Nothing
                 }
             }
-            // Mode 0 asks for a file in a dialog CONTRA does not show yet,
-            // taken as cancelled; mode 1 is the user's Data folder, which
-            // CONTRA never holds. The array stays as it is and `on
-            // async_complete` reports failure (KSP manual).
+            // Mode 0 asks for a file in a dialog. CONTRA shows none: each
+            // array has one file of its own (an empty path the control side
+            // names after the array), so a save loads back. Not while built:
+            // init has no dialog to answer.
+            action @ (Action::LoadArray | Action::SaveArray) if int(2) == 0 && !self.building => {
+                let save = action == Action::SaveArray;
+                let (slot, at) = (self.running.slot, (int(0) as u32, int(1) as u32));
+                let script = self.script();
+                match script.map(|s| s.file_request(slot, Text::EMPTY, at, i64::from(int(3)), save))
+                {
+                    Some(request) => HostValue::Int(self.request_file(request)),
+                    None => HostValue::Int(self.start_async(Exit::Failed)),
+                }
+            }
+            // Mode 1 is the user's Data folder, which CONTRA never holds:
+            // the array stays as it is and `on async_complete` reports
+            // failure (KSP manual).
             Action::LoadArray | Action::SaveArray if int(2) <= 1 => {
                 HostValue::Int(self.start_async(Exit::Failed))
             }
@@ -644,6 +788,30 @@ impl HostApi for Engine {
                 };
                 HostValue::Int(self.request_file(request))
             }
+            // A file the player picks: a request with no path and no array,
+            // the editor's answer read back by `PickedFile`.
+            Action::PickFile => {
+                let ext = call.texts.first().copied().unwrap_or(Text::EMPTY);
+                let request = contra_plan::files::FileRequest {
+                    slot: self.running.slot,
+                    id: 0,
+                    base: 0,
+                    len: 0,
+                    kind: contra_plan::files::ArrayKind::Text,
+                    path: Text::EMPTY,
+                    name: ext,
+                    save: int(0) == 1,
+                };
+                HostValue::Int(self.request_file(request))
+            }
+            Action::PickedFile => match self.take_picked(self.running.slot, int(0)) {
+                Some(Some(name)) => {
+                    *call.text_out = name;
+                    HostValue::Text
+                }
+                Some(None) => HostValue::Int(0),
+                None => HostValue::Nothing,
+            },
             Action::SetSnapshotType => {
                 self.recall = contra_plan::Recall::of_type(i64::from(int(0)));
                 HostValue::Nothing
@@ -654,6 +822,11 @@ impl HostApi for Engine {
             }
             other => {
                 self.count_unhandled(other);
+                match other {
+                    Action::GetEngineParDisp => self.count_par([int(0), int(1), int(2), int(3)]),
+                    Action::GetEngineParDispExt => self.count_par([int(0), int(2), int(3), int(4)]),
+                    _ => {}
+                }
                 HostValue::Nothing
             }
         }
@@ -665,6 +838,19 @@ impl Engine {
     pub(crate) fn count_unhandled(&mut self, action: Action) {
         self.stats.actions_unhandled += 1;
         if let Some(n) = self.unhandled.get_mut(usize::from(action.id())) {
+            *n += 1;
+        }
+    }
+
+    /// Counts an engine-parameter address left unanswered (par, group, slot,
+    /// generic), in the first free entry when it is new; none when full.
+    fn count_par(&mut self, address: [i32; 4]) {
+        let entry = self
+            .unanswered_pars
+            .iter()
+            .position(|(a, n)| *n == 0 || *a == address);
+        if let Some((a, n)) = entry.and_then(|i| self.unanswered_pars.get_mut(i)) {
+            *a = address;
             *n += 1;
         }
     }

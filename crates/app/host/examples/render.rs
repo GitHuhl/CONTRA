@@ -2,7 +2,7 @@
 //! a WAV file, for listening and A/B against other samplers. Prints load time,
 //! gaps and the script actions the engine does not answer yet.
 //! `cargo run --release -p contra-host --example render -- <file> <key> <out.wav>`
-//! `<file>` is a Kontakt instrument.
+//! `<file>` is a Kontakt instrument, or a UVI program as `bank.ufs/Name.uvip`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             for (name, bytes) in &s.data {
                 std::fs::write(
+                    // A UVI module's name is a path in its bank.
                     std::path::Path::new(&dir).join(format!("{n}-{}.nka", name.replace('/', "_"))),
                     bytes,
                 )?;
@@ -101,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ir.scripts.push(contra_engine::ir::Script {
                 name: "append".into(),
                 slot: ir.scripts.len(),
+                dialect: contra_engine::ir::Dialect::Ksp,
                 source,
                 saved: Vec::new(),
                 data: Vec::new(),
@@ -108,8 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
     }
-    let scripts: Vec<String> = ir.scripts.iter().map(|s| s.source.clone()).collect();
+    let scripts = ir.scripts.clone();
     let loaded = contra_host::instrument::build(ir, RATE, &mut store);
+    let pages = loaded.pages.clone();
     println!(
         "{}: {} zones, loaded in {:?}",
         loaded.name,
@@ -259,6 +262,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let plan = Arc::new(loaded.plan);
     let mut engine = Engine::new(Arc::clone(&plan), store.client(), RATE);
+    if let Some(p) = contra_prepare::tables(engine.plan(), &stream) {
+        engine.swap_plan(&mut Arc::new(p), &[]);
+    }
     println!("init: unanswered {:?}", engine.unhandled_actions());
     if std::env::var_os("CONTRA_MODS").is_some() {
         let mut seen = Vec::new();
@@ -294,14 +300,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     // A quarter second after load before the first note, as a player gives
-    // a program: a script may wait while it loads.
+    // a program: a script may wait while it loads (UVI `onLoad`).
     let mut silent = vec![[0.0f32; 2]; 512];
     for _ in 0..RATE as usize / 4 / 512 {
         engine.process(&mut silent, &[]);
-        install_requests(&mut engine, &plan);
+        install_requests(&mut engine, &plan, &stream);
     }
     // CONTRA_CONTROL=name=value,...: each script control (a KSP one named
-    // without its type prefix) moves there
+    // without its type prefix, a UVI widget or macro by its name) moves there
     // in turn and its callbacks run, as a user's edit would; its effect loads
     // install over a quarter second. "name=value@1.5" moves it 1.5 s into
     // the render instead, at the start of that block.
@@ -328,7 +334,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine.set_control(slot, id, value);
         for _ in 0..RATE as usize / 4 / 512 {
             engine.process(&mut silent, &[]);
-            install_requests(&mut engine, &plan);
+            install_requests(&mut engine, &plan, &stream);
+        }
+    }
+    // CONTRA_WIDGET=name=value,...: a Lua script's own widget moves there,
+    // as the editor moves it, and its `changed` runs.
+    for pair in std::env::var("CONTRA_WIDGET")
+        .iter()
+        .flat_map(|s| s.split(','))
+    {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let Ok(value) = value.parse::<f64>() else {
+            continue;
+        };
+        let found = pages.iter().enumerate().find_map(|(slot, page)| {
+            let n = page.as_ref()?.widgets.iter().position(|w| w.name == name)?;
+            Some((u8::try_from(slot).ok()?, u32::try_from(n).ok()?))
+        });
+        let Some((slot, n)) = found else {
+            println!("widget {name}: no such widget");
+            continue;
+        };
+        println!("widget {name} (script {slot}, number {n}) := {value}");
+        engine.set_widget(slot, n, value, None);
+        for _ in 0..RATE as usize / 4 / 512 {
+            engine.process(&mut silent, &[]);
+            install_requests(&mut engine, &plan, &stream);
         }
     }
     let before: std::collections::HashMap<_, _> = engine.action_calls().into_iter().collect();
@@ -377,6 +410,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut block = vec![[0.0f32; 2]; 512];
     // Time inside `Engine::process` alone (not disk waits): the render's CPU.
     let mut busy = std::time::Duration::ZERO;
+    // The slowest block and its index: the Peak readout's worst case.
+    let mut slowest = (std::time::Duration::ZERO, 0);
     // CONTRA_BEND=0: pitch bend (its high 7 bits) sent with the wheel at 1 s.
     let bend = std::env::var("CONTRA_BEND")
         .ok()
@@ -507,7 +542,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let processing = std::time::Instant::now();
         engine.process(&mut block, input);
         busy += processing.elapsed();
-        install_requests(&mut engine, &plan);
+        slowest = slowest.max((processing.elapsed(), n));
+        if timed_controls.iter().any(|c| c.0 + 1 == n) {
+            let us = processing.elapsed().as_secs_f64() * 1e6;
+            println!("  block {n} after a control's edits: {us:.1} µs");
+        }
+        install_requests(&mut engine, &plan, &stream);
         if n == 0 || n == 3 * RATE as usize / 512 {
             let during: Vec<_> = engine
                 .action_calls()
@@ -572,12 +612,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         busy.as_secs_f64() * 1e3,
         busy.as_secs_f64() / seconds.max(1e-9)
     );
+    println!(
+        "slowest block {}: {:.1} µs",
+        slowest.1,
+        slowest.0.as_secs_f64() * 1e6
+    );
     println!("stream: {:?}", stream.stats());
     println!("all actions: {:?}", engine.unhandled_actions());
     println!("last message: {}", engine.last_message());
     println!("calls: {:?}", engine.action_calls());
     println!("script faults: {:?}", engine.script_faults());
-    println!("memory after render: {}", memory());
+    println!(
+        "script arena spills: {}, memory after render: {}",
+        contra_lua::alloc::spills(),
+        memory()
+    );
     write_wav(&out, &audio)?;
     println!("wrote {}", out.display());
     Ok(())
@@ -616,16 +665,33 @@ fn write_wav(path: &std::path::Path, frames: &[[f32; 2]]) -> std::io::Result<()>
 }
 
 /// Script control `name` and `value` as `Engine::set_control` takes them:
-/// its UI id is the first one plus its variable's index (persist.rs), its
-/// value an integer.
-fn control(plan: &Plan, scripts: &[String], name: &str, value: &str) -> Option<(u8, i32, i64)> {
+/// a UVI script's by its name among its controls (the last of that name, a
+/// widget before a macro), its value an `f64`; a KSP one's UI id is the first
+/// one plus its variable's index (persist.rs), its value an integer.
+fn control(
+    plan: &Plan,
+    scripts: &[contra_engine::ir::Script],
+    name: &str,
+    value: &str,
+) -> Option<(u8, i32, i64)> {
     plan.scripts
         .iter()
         .zip(scripts)
         .enumerate()
-        .find_map(|(n, (_, source))| {
+        .find_map(|(n, (script, ir))| {
             let slot = u8::try_from(n).ok()?;
-            let compiled = contra_ksp::compile(source, &[]).ok()?;
+            if let Some(foreign) = &script.foreign {
+                let id = foreign.controls().iter().rposition(|c| c == name)?;
+                let value = value.parse::<f64>().ok()?.to_bits() as i64;
+                return Some((slot, i32::try_from(id).ok()?, value));
+            }
+            // As the host compiles it: a performance view's controls take
+            // their UI ids in the view's order.
+            let view = contra_host::perf_view::find(&ir.data).map(|(_, v)| v);
+            let view: Vec<(&str, &[i32])> = (view.iter().flat_map(|v| &v.controls))
+                .map(|c| (c.name.as_str(), c.params.as_slice()))
+                .collect();
+            let compiled = contra_ksp::compile_with_view(&ir.source, &[], &view).ok()?;
             let bare = |v: &str| v.trim_start_matches(['$', '%', '~', '?', '@', '!']) == name;
             let at = compiled.variables.iter().position(|v| bare(&v.name))?;
             let id = contra_ksp::FIRST_UI_ID + i32::try_from(at).ok()?;
@@ -635,7 +701,7 @@ fn control(plan: &Plan, scripts: &[String], name: &str, value: &str) -> Option<(
 
 /// Builds and installs the effects and responses scripts asked for, between
 /// blocks, as the host's rack does off the audio thread.
-fn install_requests(engine: &mut Engine, plan: &Plan) {
+fn install_requests(engine: &mut Engine, plan: &Plan, client: &contra_stream::StreamClient) {
     let mut asked = Vec::new();
     engine.drain_requests(|r| asked.push(r));
     for r in asked {
@@ -647,5 +713,32 @@ fn install_requests(engine: &mut Engine, plan: &Plan) {
             );
         }
         engine.install(Prepared::new(r, Some(plan), RATE));
+    }
+    // Zone edits (`set_zone_par`), applied together as the host does.
+    let mut edits = Vec::new();
+    engine.drain_zone_edits(|e| {
+        edits.push(e);
+        true
+    });
+    if !edits.is_empty() {
+        let started = std::time::Instant::now();
+        let mut plan = Plan::clone(engine.plan());
+        let done: Vec<_> = (edits.iter())
+            .map(|e| (*e, plan.edit_zone(e.zone, e.par, e.value)))
+            .collect();
+        let plan = contra_prepare::tables(&plan, client).unwrap_or(plan);
+        let built = started.elapsed();
+        // The old plan comes back in `plan`; the host frees it off audio.
+        let mut plan = Arc::new(plan);
+        let swapping = std::time::Instant::now();
+        engine.swap_plan(&mut plan, &done);
+        let swap = swapping.elapsed();
+        drop(plan);
+        println!(
+            "zone swap: {} edits, plan and tables built in {:.2} ms off audio, swap {:.1} µs",
+            edits.len(),
+            built.as_secs_f64() * 1e3,
+            swap.as_secs_f64() * 1e6
+        );
     }
 }

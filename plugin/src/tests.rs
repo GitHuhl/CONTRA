@@ -2,8 +2,11 @@
 //! reset, the control tick, audio blocks with notes, state out.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use contra_host::state::{Saved, SavedPart};
+use moose::core::{ExactEvent, ExactEventBody, ExactNoteAddress};
 use moose::prelude::*;
 
 use crate::{Dsp, Contra, ContraParams, Tick};
@@ -38,6 +41,8 @@ pub(super) fn activate(saved: &str) -> (ContraParams, Dsp) {
     params.restore();
     let mut dsp = Dsp::default();
     <Contra as PluginLogic>::reset(&mut dsp, &params, &AudioConfig::new(RATE, BLOCK));
+    // The tests read the parts' interfaces, as an open editor does.
+    params.shared.shown.store(true, Ordering::Release);
     Tick.run(&params);
     (params, dsp)
 }
@@ -162,6 +167,8 @@ fn recall(path: PathBuf) -> Result<String, String> {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     }]);
     let t = std::time::Instant::now();
     let (live, mut live_dsp) = activate(&saved.write());
@@ -305,6 +312,8 @@ fn auto_align_reports_the_latest_part_and_holds_the_other() {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     };
     let saved = Saved::new(vec![part(0, a), part(1, b)]);
     let (params, mut dsp) = activate(&saved.write());
@@ -396,6 +405,8 @@ fn a_library_control_moved_in_the_editor_reaches_its_script_and_shows() {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     }]);
     let (params, mut dsp) = activate(&saved.write());
     settle(&params, &mut dsp);
@@ -501,6 +512,7 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
         .request(crate::Request::Browse(contra_ui::app::Action::Load {
             library,
             preset,
+            into: None,
         }));
     Tick.run(&params);
     let name = crate::lock(&params.shared.rack).as_ref().unwrap().parts()[0]
@@ -538,6 +550,11 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
     let count = presets.len();
     browse(contra_ui::app::Action::Step { part: 0, by: 1 });
     assert_eq!(path(&params), Some(presets[(preset + 1) % count].clone()));
+    // The header names the preset by its path, whatever its instrument's
+    // own name (a snapshot recalled in place keeps the load).
+    let shown = format!("{:?}", *crate::lock(&params.shared.view));
+    let want = format!("preset: Some({})", (preset + 1) % count);
+    assert!(shown.contains(&want), "the header's preset: {shown:.300}");
     browse(contra_ui::app::Action::Step { part: 0, by: -1 });
     assert_eq!(path(&params), Some(felt.clone()), "back");
     browse(contra_ui::app::Action::Switch { part: 0, preset: 0 });
@@ -550,16 +567,382 @@ fn a_preset_picked_in_the_browser_loads_and_plays() {
     browse(contra_ui::app::Action::Switch { part: 0, preset });
     let back = path(&params).unwrap();
     assert!(back.ends_with("Una Corda Felt.nki"), "{back:?}");
+    // A snapshot the library ships is in the same list: picked, it applies
+    // (the header names it, its values differ from the instrument's), and
+    // the arrows step on from it through that list.
+    let scripts = |params: &ContraParams| {
+        crate::lock(&params.shared.rack)
+            .as_ref()
+            .unwrap()
+            .saved_scripts(0)
+    };
+    let base = scripts(&params);
+    let snap = (presets.iter())
+        .position(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("nksn"))
+        })
+        .expect("Una Corda ships snapshots");
+    browse(contra_ui::app::Action::Switch {
+        part: 0,
+        preset: snap,
+    });
+    assert_eq!(path(&params), Some(presets[snap].clone()));
+    let shown = format!("{:?}", *crate::lock(&params.shared.view));
+    assert!(
+        shown.contains(&format!("preset: Some({snap})")),
+        "{shown:.300}"
+    );
+    assert_ne!(scripts(&params), base, "the snapshot changed nothing");
+    browse(contra_ui::app::Action::Step { part: 0, by: 1 });
+    assert_eq!(path(&params), Some(presets[(snap + 1) % count].clone()));
+    browse(contra_ui::app::Action::Switch { part: 0, preset });
+    users_own_preset(&params, library, preset);
     // With the settings on, a second part takes its own channel and output.
+    // An instrument double-clicked adds a part even with part 0 focused.
     browse(contra_ui::app::Action::NewParts {
         next_channel: true,
         own_output: true,
     });
-    browse(contra_ui::app::Action::Load { library, preset });
+    browse(contra_ui::app::Action::Load {
+        library,
+        preset,
+        into: Some(0),
+    });
     let mix = crate::lock(&params.shared.rack).as_ref().unwrap().parts()[1]
         .as_ref()
         .map(|p| (p.mix.channel, p.mix.output));
     assert_eq!(mix, Some((1, 1)));
+}
+
+/// ANALOG STRINGS' own arrows load an in-script preset and show its name
+/// (`002. Blown Fuse`, then back to `NEO 99. Oscillating Current`, its own
+/// list's order); the header follows each by name to the factory snapshot
+/// of that name, unchanged.
+#[test]
+fn the_header_follows_an_instruments_own_preset_arrows_by_name() {
+    let Some(analog) = library("ANALOG STRINGS/Instruments/ANALOG STRINGS.nki") else {
+        return;
+    };
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    params
+        .shared
+        .request(crate::Request::AddRoot(PathBuf::from(KONTAKT)));
+    let t = std::time::Instant::now();
+    while crate::lock(&params.shared.browser)
+        .as_ref()
+        .is_none_or(|b| b.scanning())
+    {
+        Tick.run(&params);
+        assert!(t.elapsed().as_secs() < 300, "the scan never finished");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    params.shared.request(crate::Request::Load {
+        part: Some(0),
+        path: analog,
+    });
+    let settle = |dsp: &mut Dsp| {
+        for _ in 0..60 {
+            Tick.run(&params);
+            block(&params, dsp, &[]);
+        }
+    };
+    settle(&mut dsp);
+    let part = |params: &ContraParams| {
+        let rack = crate::lock(&params.shared.rack);
+        let p = rack.as_ref().unwrap().parts()[0].as_ref().unwrap();
+        (p.path.clone().unwrap(), p.modified)
+    };
+    // Each arrow pressed once, as a click sets a button that is off.
+    for (arrow, want) in [
+        ("$header__next_preset", "Blown Fuse.nksn"),
+        ("$header__prev_preset", "Oscillating Current.nksn"),
+    ] {
+        {
+            let mut rack = crate::lock(&params.shared.rack);
+            let rack = rack.as_mut().unwrap();
+            let p = rack.parts()[0].as_ref().unwrap();
+            let tree = p.view.as_ref().unwrap().tree();
+            let at = (tree.widgets.iter()).position(|w| w.name == arrow);
+            rack.control(
+                0,
+                at.expect("ANALOG's arrow"),
+                None,
+                1.0,
+                Default::default(),
+            );
+        }
+        settle(&mut dsp);
+        let (now, modified) = part(&params);
+        println!("{arrow}: {} modified {modified}", now.display());
+        assert!(
+            now.ends_with(want) && !modified,
+            "the header did not follow: {now:?}"
+        );
+    }
+}
+
+/// A folder of this test alone, removed when dropped (also when an
+/// assertion fails).
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        Self(std::env::temp_dir().join(format!("contra-{name}-{}", std::process::id())))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// UVI's side of the player's own preset (VWinds Clarinet A): two knobs
+/// and a menu moved, saved from the header, and a project reload plays it
+/// with the panel values it saved.
+#[test]
+fn a_uvi_preset_saved_in_the_header_reopens_with_its_panel() {
+    use contra_ui::app::{Action, PresetEdit};
+    const ROOT: &str = "/data/main/Libraries/UVI/VWinds - Clarinets";
+    if !Path::new(ROOT).exists() {
+        eprintln!("skipped: no {ROOT}");
+        return;
+    }
+    let scratch = Scratch::new("uvi-presets");
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    params
+        .shared
+        .request(crate::Request::AddRoot(PathBuf::from(ROOT)));
+    let t = std::time::Instant::now();
+    let (library, preset) = loop {
+        Tick.run(&params);
+        let guard = crate::lock(&params.shared.browser);
+        let b = guard.as_ref().unwrap();
+        let found = b.catalog.libraries.iter().enumerate().find_map(|(n, l)| {
+            let p = l
+                .presets
+                .iter()
+                .position(|p| p.ends_with("Clarinet A.uvip"))?;
+            Some((n, p))
+        });
+        if let Some(found) = found.filter(|_| !b.scanning()) {
+            break found;
+        }
+        drop(guard);
+        assert!(
+            t.elapsed().as_secs() < 300,
+            "the scan never found Clarinet A"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    crate::lock(&params.shared.browser)
+        .as_mut()
+        .unwrap()
+        .set_user(scratch.0.clone());
+    let browse = |action| {
+        params.shared.request(crate::Request::Browse(action));
+        Tick.run(&params);
+    };
+    browse(Action::Load {
+        library,
+        preset,
+        into: None,
+    });
+    settle(&params, &mut dsp);
+    let moved = move_panel(&params);
+    settle(&params, &mut dsp);
+    settle(&params, &mut dsp);
+    let now = crate::lock(&params.shared.rack)
+        .as_ref()
+        .unwrap()
+        .saved_scripts(0)
+        .concat();
+    for (name, to) in &moved {
+        let entry = now
+            .iter()
+            .find(|e| e.split_once('=').is_some_and(|(n, _)| n == name));
+        let value = entry.and_then(|e| e.split_once('=')?.1.parse::<f64>().ok());
+        assert!(
+            value.is_some_and(|v| (v - to).abs() < 1e-3),
+            "{name} → {to}: {entry:?}"
+        );
+    }
+    browse(Action::Preset {
+        part: 0,
+        edit: PresetEdit::Save("Mine".into()),
+    });
+    let playing = |params: &ContraParams| {
+        let rack = crate::lock(&params.shared.rack);
+        let rack = rack.as_ref().unwrap();
+        let p = rack.parts()[0].as_ref().unwrap();
+        (p.path.clone().unwrap(), p.modified, rack.saved_scripts(0))
+    };
+    let (mine, modified, values) = playing(&params);
+    assert!(mine.ends_with("Mine.contra") && !modified, "{mine:?}");
+    assert!(
+        values.concat().iter().any(|e| e.contains('=')),
+        "no panel values: {values:?}"
+    );
+    params.capture();
+    let state = params.saved.read().unwrap().clone();
+    let (again, mut again_dsp) = activate(&state);
+    settle(&again, &mut again_dsp);
+    assert_eq!(playing(&again), (mine, false, values));
+}
+
+/// Moves part 0's first two persistent knobs a quarter of their range and
+/// its first persistent menu to its third item, by the Lua widget's name;
+/// each name and the value it was set to.
+fn move_panel(params: &ContraParams) -> Vec<(String, f64)> {
+    use contra_ui_model::Kind;
+    let (moves, saved) = {
+        let guard = crate::lock(&params.shared.rack);
+        let rack = guard.as_ref().unwrap();
+        let view = (rack.parts()[0].as_ref().unwrap().view.as_ref()).expect("a panel");
+        let saved = rack.saved_scripts(0).concat();
+        let listed =
+            |name: &str| (saved.iter()).any(|e| e.split_once('=').is_some_and(|(n, _)| n == name));
+        let mut knobs = Vec::new();
+        let mut menu = None;
+        let widgets = view.tree().widgets.iter().enumerate();
+        for (n, w) in widgets.filter(|(_, w)| !w.name.is_empty() && listed(&w.name)) {
+            match &w.kind {
+                Kind::Knob { range, .. } if knobs.len() < 2 && range.max > range.min => {
+                    let to = range.min + (range.max - range.min) * 0.25;
+                    knobs.push((n, w.name.clone(), to));
+                }
+                Kind::Menu { items } if menu.is_none() && items.len() > 2 => {
+                    menu = Some((n, w.name.clone(), 3.0));
+                }
+                _ => {}
+            }
+        }
+        (knobs.into_iter().chain(menu).collect::<Vec<_>>(), saved)
+    };
+    assert_eq!(moves.len(), 3, "two knobs and a menu among {saved:?}");
+    for (widget, _, value) in &moves {
+        params
+            .shared
+            .request(crate::Request::Ui(crate::editor::Edit {
+                slot: Some(0),
+                action: contra_ui::app::Action::Control {
+                    part: 0,
+                    widget: *widget,
+                    value: *value,
+                    cell: None,
+                    keys: Default::default(),
+                },
+            }));
+    }
+    moves
+        .into_iter()
+        .map(|(_, name, value)| (name, value))
+        .collect()
+}
+
+/// The player's own preset of the part playing `preset`: saved into the
+/// presets folder, listed under its library and named by the header,
+/// picked back with the values it saved, renamed, then deleted.
+fn users_own_preset(params: &ContraParams, library: usize, preset: usize) {
+    use contra_ui::app::{Action, PresetEdit};
+    let scratch = Scratch::new("user-presets");
+    let folder = scratch.0.clone();
+    crate::lock(&params.shared.browser)
+        .as_mut()
+        .unwrap()
+        .set_user(folder.clone());
+    let browse = |action| {
+        params.shared.request(crate::Request::Browse(action));
+        Tick.run(params);
+    };
+    let playing = || {
+        let rack = crate::lock(&params.shared.rack);
+        let rack = rack.as_ref().unwrap();
+        let p = rack.parts()[0].as_ref().unwrap();
+        (p.path.clone().unwrap(), p.modified, rack.saved_scripts(0))
+    };
+    let listed = |path: &std::path::Path| {
+        let b = crate::lock(&params.shared.browser);
+        let presets = &b.as_ref().unwrap().catalog.libraries[library].presets;
+        presets.iter().position(|p| p == path)
+    };
+    browse(Action::Preset {
+        part: 0,
+        edit: PresetEdit::Save("Mine".into()),
+    });
+    let (mine, modified, values) = playing();
+    assert!(
+        mine.starts_with(&folder) && mine.ends_with("Mine.contra"),
+        "{mine:?}"
+    );
+    assert!(!modified);
+    let at = listed(&mine).expect("listed with its library");
+    let shown = format!("{:?}", *crate::lock(&params.shared.view));
+    assert!(
+        shown.contains(&format!("preset: Some({at})")),
+        "{shown:.300}"
+    );
+    // Picked again from another preset: the values it saved, exactly.
+    browse(Action::Switch { part: 0, preset });
+    browse(Action::Switch {
+        part: 0,
+        preset: at,
+    });
+    assert_eq!(playing(), (mine.clone(), false, values.clone()));
+    // Double-clicked in the browser with part 0 focused: a preset recalls
+    // into that part, never into a new one.
+    browse(Action::Switch { part: 0, preset });
+    browse(Action::Load {
+        library,
+        preset: at,
+        into: Some(0),
+    });
+    assert_eq!(playing(), (mine.clone(), false, values.clone()));
+    let rack = crate::lock(&params.shared.rack);
+    assert!(rack.as_ref().unwrap().parts()[1].is_none(), "no new part");
+    drop(rack);
+    // A project reload plays the same preset with the same values.
+    params.capture();
+    let state = params.saved.read().unwrap().clone();
+    let (again, _again_dsp) = activate(&state);
+    Tick.run(&again);
+    let reloaded = {
+        let rack = crate::lock(&again.shared.rack);
+        let rack = rack.as_ref().unwrap();
+        let p = rack.parts()[0].as_ref().unwrap();
+        (p.path.clone().unwrap(), p.modified, rack.saved_scripts(0))
+    };
+    assert_eq!(reloaded, (mine.clone(), false, values));
+    browse(Action::Preset {
+        part: 0,
+        edit: PresetEdit::Rename("Yours".into()),
+    });
+    let (yours, ..) = playing();
+    assert!(yours.ends_with("Yours.contra") && !mine.exists() && listed(&yours).is_some());
+    // A project saved now does not need the preset's file to reopen.
+    let (_, _, kept) = playing();
+    params.capture();
+    let project = params.saved.read().unwrap().clone();
+    // Deleted: the part plays on, as its base instrument, changed.
+    browse(Action::Preset {
+        part: 0,
+        edit: PresetEdit::Delete,
+    });
+    let (base, modified, _) = playing();
+    assert!(base.ends_with("Una Corda Felt.nki") && modified, "{base:?}");
+    assert!(!yours.exists() && listed(&yours).is_none());
+    let (reopened, _reopened_dsp) = activate(&project);
+    Tick.run(&reopened);
+    let rack = crate::lock(&reopened.shared.rack);
+    let rack = rack.as_ref().unwrap();
+    let p = rack.parts()[0].as_ref().expect("the part reopens");
+    let base = p.path.clone().unwrap();
+    assert!(
+        base.ends_with("Una Corda Felt.nki") && p.modified,
+        "{base:?}"
+    );
+    assert_eq!(rack.saved_scripts(0), kept, "with the project's values");
 }
 
 const SHREDDAGE: &str = "Shreddage 3.5 E-Upright 1.0.1 [Impact Soundworks] rutracker.org/Instruments/Shreddage 3.5 E-Upright.nki";
@@ -602,6 +985,8 @@ fn shreddage_eq() -> Option<(ContraParams, Dsp, f32)> {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     }]);
     let (params, mut dsp) = activate(&saved.write());
     settle(&params, &mut dsp);
@@ -667,6 +1052,35 @@ fn shreddage_loads_an_eq_from_its_console_and_a_reload_keeps_it() {
         "the console's own record comes back"
     );
     assert_eq!(first, second, "re-save after reload is identical");
+}
+
+/// A user preset carries the effect types its scripts loaded after init:
+/// picked into a fresh part, the EQ is back in its slot.
+#[test]
+fn a_user_preset_keeps_an_effect_its_script_loaded() {
+    let Some((live, mut live_dsp, _)) = shreddage_eq() else {
+        return;
+    };
+    settle(&live, &mut live_dsp);
+    let folder = Scratch::new("user-fx");
+    let mut rack = crate::lock(&live.shared.rack);
+    let create = contra_host::presets::Overwrite::Create;
+    let path = rack
+        .as_mut()
+        .unwrap()
+        .save_preset(0, &folder.0, "Shreddage", "EQ", create);
+    drop(rack);
+    let path = path.unwrap();
+    let user = contra_host::presets::read(&path).expect("saved");
+    assert_eq!(user.slot_types.len(), 1, "{user:?}");
+    let (fresh, mut fresh_dsp) = activate(&Saved::new(Vec::new()).write());
+    let loaded = crate::lock(&fresh.shared.rack)
+        .as_mut()
+        .unwrap()
+        .load(0, &path);
+    assert!(loaded.is_ok(), "{loaded:?}");
+    settle(&fresh, &mut fresh_dsp);
+    assert_eq!(slot_types(&fresh), slot_types(&live));
 }
 
 #[test]
@@ -799,6 +1213,8 @@ fn the_same_state_restored_again_loads_nothing_twice() {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     }]);
     let (params, mut dsp) = activate(&saved.write());
     settle(&params, &mut dsp);
@@ -822,7 +1238,6 @@ fn the_same_state_restored_again_loads_nothing_twice() {
 /// it shows leaves it clean, and one that does marks it.
 #[test]
 fn an_idle_tick_draws_no_frame() {
-    use std::sync::atomic::Ordering;
     let (params, mut dsp) = activate("");
     settle(&params, &mut dsp);
     params.shared.dirty.store(false, Ordering::Release);
@@ -880,6 +1295,8 @@ fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     };
     let (params, mut dsp) = activate(&Saved::new(vec![part(path)]).write());
     settle(&params, &mut dsp);
@@ -965,26 +1382,25 @@ fn an_augmented_orchestra_knob_moved_on_its_page_changes_the_sound_and_survives_
 }
 
 #[test]
-fn a_host_save_during_a_long_load_does_not_wait_for_it() {
-    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
-    params
-        .shared
-        .request(crate::Request::Browse(contra_ui::app::Action::Panic));
-    Tick.run(&params);
-    block(&params, &mut dsp, &[]);
-    let before = params.saved.read().unwrap().clone();
-    assert!(before.contains("parts"), "the tick left no state: {before}");
+fn a_host_save_waits_out_a_tick_but_not_a_load() {
+    let (params, _dsp) = activate(&Saved::new(Vec::new()).write());
+    *params.saved.write().unwrap() = "before the load".into();
     // A tick loading a program holds the rack for seconds.
     let held = crate::lock(&params.shared.rack);
+    params.shared.holding.store(true, Ordering::Release);
     let t = std::time::Instant::now();
     params.capture();
-    assert!(
-        t.elapsed() < std::time::Duration::from_millis(50),
-        "{:?}",
-        t.elapsed()
-    );
-    drop(held);
-    assert_eq!(*params.saved.read().unwrap(), before);
+    assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
+    assert_eq!(*params.saved.read().unwrap(), "before the load");
+    // Any other tick is short: the save waits for it and writes the rack.
+    params.shared.holding.store(false, Ordering::Release);
+    std::thread::scope(|s| {
+        s.spawn(|| params.capture());
+        std::thread::sleep(Duration::from_millis(20));
+        drop(held);
+    });
+    let saved = params.saved.read().unwrap().clone();
+    assert!(saved.contains("parts"), "the save wrote no rack: {saved}");
 }
 
 /// A load asked for shows as loading until the tick carries it out, even
@@ -1009,7 +1425,7 @@ fn a_load_shows_until_the_tick_is_done_with_it() {
 /// transport stopped and nothing clicked; the audio thread never stalls on
 /// the control tick's capture of its persistent cells (it scanned every
 /// control per cell: about 9 s per capture, so no timer ran and a page
-/// switch showed the panel).
+/// switch showed the panel; then 11 ms, a whole block, per capture).
 #[test]
 fn a_script_timer_runs_with_the_transport_stopped_and_no_block_stalls() {
     let Some(path) = library(
@@ -1030,6 +1446,8 @@ fn a_script_timer_runs_with_the_transport_stopped_and_no_block_stalls() {
         delays: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
     }]);
     let (params, mut dsp) = activate(&saved.write());
     let panel = |params: &ContraParams| {
@@ -1040,17 +1458,48 @@ fn a_script_timer_runs_with_the_transport_stopped_and_no_block_stalls() {
         t.visible(contra_ui_model::WidgetRef(n.expect("Areia's panel")))
     };
     assert!(panel(&params), "init shows the panel until the timer runs");
-    let mut slowest = std::time::Duration::ZERO;
-    for _ in 0..10 {
-        Tick.run(&params);
+    // The editor closed: the timer runs all the same, and an idle tick
+    // stays cheap.
+    params.shared.shown.store(false, Ordering::Release);
+    let (mut commands, mut ticks) = (0, Duration::ZERO);
+    for _ in 0..TICKS {
         let t = std::time::Instant::now();
+        Tick.run(&params);
+        ticks += t.elapsed();
         live_block(&params, &mut dsp);
-        slowest = slowest.max(t.elapsed());
+        let stats = crate::lock(&params.shared.rack)
+            .as_ref()
+            .and_then(|r| r.stats());
+        commands = commands.max(stats.map_or(0, |s| s.slowest_commands_ns));
+    }
+    let tick = ticks / TICKS;
+    assert!(tick < IDLE_TICK, "an idle tick took {tick:?}");
+    // Opened, the interface catches up with what the timer did.
+    params.shared.shown.store(true, Ordering::Release);
+    for _ in 0..2 {
+        Tick.run(&params);
+        live_block(&params, &mut dsp);
     }
     Tick.run(&params);
     assert!(!panel(&params), "the timer never hid the panel");
-    assert!(slowest.as_secs_f64() < 2.0, "a live block took {slowest:?}");
+    // Its 1.28 million persistent cells are read a budget a block: the
+    // commands keep to 5% of a block (a debug build is ten times slower).
+    // Its timer's own script work is the playtest's to bound.
+    let real_ns = BLOCK as f64 * 1e9 / RATE;
+    let share = if cfg!(debug_assertions) { 0.5 } else { 0.05 };
+    assert!(
+        commands as f64 <= share * real_ns,
+        "a block's commands took {commands} ns of {real_ns} ns"
+    );
 }
+
+/// Idle ticks the timer test times.
+const TICKS: u32 = 20;
+
+/// The most an idle tick of a loaded Areia may take on average, at 20 ticks
+/// a second (1 ms there is 2% of one core; measured 34 us, the capture's
+/// room reused).
+const IDLE_TICK: Duration = Duration::from_millis(if cfg!(debug_assertions) { 10 } else { 1 });
 
 /// One live block with no events and the transport stopped, as a host
 /// plays a part nobody is playing.
@@ -1063,4 +1512,821 @@ fn live_block(params: &ContraParams, dsp: &mut Dsp) {
     let mut out_events = EventList::with_capacity(16);
     let mut cx = ProcessContext::new(&transport, RATE, BLOCK, &mut out_events);
     <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+}
+
+/// An instrument under this machine's Kontakt libraries, whether the test
+/// root [`KONTAKT`] is the real one or the user's own root
+/// (`$CONTRA_LIBRARY_ROOT`, else `~/Armory/VSTs/Kontakt1`); a test without it
+/// says so and passes, as CI has no libraries.
+fn armory(path: &str) -> Option<PathBuf> {
+    let own = std::env::var_os("CONTRA_LIBRARY_ROOT").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map_or_else(|| PathBuf::from("/home"), PathBuf::from)
+                .join("Armory/VSTs/Kontakt1")
+        },
+        PathBuf::from,
+    );
+    for root in [PathBuf::from(KONTAKT), own] {
+        let path = root.join(path);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    eprintln!("skipped: no {path}");
+    None
+}
+
+/// A state holding `path` in part 0.
+fn one_part(path: &Path) -> String {
+    Saved::new(vec![SavedPart {
+        part: 0,
+        path: path.to_owned(),
+        channel: 0,
+        output: 0,
+        gain: 1.0,
+        pan: 0.0,
+        solo: false,
+        mute: false,
+        scripts: Vec::new(),
+        delays: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
+    }])
+    .write()
+}
+
+/// The multi from the user's report: five C.A.P.S.U.L.E. slots. Slot 1 asks
+/// for the performance view and carries the artwork (373 widgets); slot 0 is
+/// a helper's admin page (137 widgets of which three show) and slots 2-4 are
+/// 3-4 widget overlays. The editor must open the page the script asked
+/// Kontakt to show, not the first page with a face: the latter is a black
+/// rectangle with a "LOAD" button, which is what the user saw.
+#[test]
+fn a_multis_page_is_the_performance_view_not_its_first_slot() {
+    const GLORY: &str = "Glory Days - Big Band Horns/Instruments/GDH - Glory Days - Big Band Horns 1.0/Multi Instruments/01. Trumpet 1/01. Trumpet 1 Multi.nki";
+    let Some(path) = armory(GLORY) else {
+        return;
+    };
+    let (params, mut dsp) = activate(&one_part(&path));
+    settle(&params, &mut dsp);
+    let (slot, widgets, performance, pictures) = {
+        let guard = crate::lock(&params.shared.rack);
+        let part = guard
+            .as_ref()
+            .and_then(|rack| rack.parts()[0].as_ref())
+            .expect("part 0");
+        let view = part.view.as_ref().expect("a view");
+        let tree = view.tree();
+        (
+            view.slot,
+            tree.widgets.len(),
+            tree.performance,
+            (tree.assets.iter())
+                .filter(|a| matches!(a.kind, contra_ui_model::AssetKind::Image(_)))
+                .count(),
+        )
+    };
+    println!(
+        "Glory Days: slot {slot}, {widgets} widgets, performance {performance}, {pictures} pictures"
+    );
+    assert!(performance, "slot {slot} is not the performance view");
+    assert_eq!(
+        slot, 1,
+        "the editor opened slot {slot}: the first page with a face, not the performance view"
+    );
+    assert!(widgets > 300, "slot {slot} shows {widgets} widgets");
+    assert!(
+        pictures > 100,
+        "the page names {pictures} pictures, so it is not the instrument's page"
+    );
+}
+
+/// A snapshot that saves other effects recalls into the part playing its
+/// base without holding the rack or the audio thread for the read: its
+/// plan is made on a thread, and a tick restarts the part on it. Prints
+/// the time the recall held the rack, the time until the part plays the
+/// snapshot's effects, the slowest tick and the slowest audio block while
+/// a note plays through it, and the effects that changed.
+#[test]
+#[ignore = "real libraries; run with --ignored --nocapture"]
+fn a_snapshot_recalls_its_effects_without_holding_the_rack() {
+    use std::time::{Duration, Instant};
+    let cases = [
+        (
+            "ANALOG STRINGS/Instruments/ANALOG STRINGS.nki",
+            "ANALOG STRINGS/Snapshots/ANALOG STRINGS/Factory/Blown Fuse.nksn",
+        ),
+        (
+            "Una Corda Library/Instruments/Una Corda Cotton.nki",
+            "Una Corda Library/Snapshots/Una Corda Cotton/Cotton - Tape Echo.nksn",
+        ),
+    ];
+    for (base, snapshot) in cases {
+        let (Some(base), Some(snapshot)) = (library(base), library(snapshot)) else {
+            continue;
+        };
+        let saved = Saved::new(vec![SavedPart {
+            part: 0,
+            path: base,
+            channel: 0,
+            output: 0,
+            gain: 1.0,
+            pan: 0.0,
+            solo: false,
+            mute: false,
+            scripts: Vec::new(),
+            delays: None,
+            slot_types: Vec::new(),
+            slot_responses: Vec::new(),
+            preset: None,
+            modified: false,
+        }]);
+        let (params, mut dsp) = activate(&saved.write());
+        settle(&params, &mut dsp);
+        let effects = |params: &ContraParams| {
+            let rack = crate::lock(&params.shared.rack);
+            let p = rack.as_ref().and_then(|r| r.parts()[0].as_ref());
+            let plan = p.and_then(|p| p.plan.clone()).unwrap();
+            let generation = p.map(|p| p.script.generation());
+            (plan, generation)
+        };
+        let (before, generation) = effects(&params);
+        block(&params, &mut dsp, &[note(true, 60)]);
+        let t = Instant::now();
+        let loaded = crate::lock(&params.shared.rack)
+            .as_mut()
+            .unwrap()
+            .load(0, &snapshot);
+        let held = t.elapsed();
+        assert!(loaded.is_ok(), "{loaded:?}");
+        let (mut slowest_block, mut slowest_tick) = (Duration::ZERO, Duration::ZERO);
+        // Clock-free: the engines the recall puts in. A snapshot reaches
+        // the audio thread whole, once: one install, nothing landing block
+        // by block (its `on init` and values ran off the audio thread).
+        let (mut installs, mut playing, mut switched, mut after) = (0, generation, None, 0);
+        // Up to the block that applies the install, and 8 after it.
+        while after < 9 {
+            let b = Instant::now();
+            block(&params, &mut dsp, &[]);
+            slowest_block = slowest_block.max(b.elapsed());
+            after += usize::from(switched.is_some());
+            let k = Instant::now();
+            Tick.run(&params);
+            slowest_tick = slowest_tick.max(k.elapsed());
+            let now = effects(&params).1;
+            if now != playing {
+                (installs, playing) = (installs + 1, now);
+                switched.get_or_insert(t.elapsed());
+            }
+            assert!(t.elapsed().as_secs() < 30, "the snapshot's plan never came");
+        }
+        assert_eq!(
+            installs, 1,
+            "the recall reaches the audio thread as one engine"
+        );
+        let switched = switched.unwrap_or_default();
+        block(&params, &mut dsp, &[note(false, 60)]);
+        let (after, _) = effects(&params);
+        // Two slots as text, from a little before where they first differ.
+        let diff = |x: &Option<contra_host::rack::ir::Effect>, y: &Option<_>| {
+            let (x, y) = (format!("{x:?}"), format!("{y:?}"));
+            let at = x.bytes().zip(y.bytes()).take_while(|(a, b)| a == b).count();
+            let from =
+                |t: &str| -> String { t.chars().skip(at.saturating_sub(20)).take(60).collect() };
+            format!("…{} -> …{}", from(&x), from(&y))
+        };
+        // Every slot of two whole insert lists, added and removed ones too.
+        let mut changed = Vec::new();
+        let mut slots = |at: String, a: &[Option<_>], b: &[Option<_>]| {
+            for s in 0..a.len().max(b.len()) {
+                let (x, y) = (a.get(s).cloned().flatten(), b.get(s).cloned().flatten());
+                if x != y {
+                    changed.push(format!("{at} slot {s}: {}", diff(&x, &y)));
+                }
+            }
+        };
+        for (n, (a, b)) in before.groups.iter().zip(&after.groups).enumerate() {
+            let purged = if a.purged { " (purged)" } else { "" };
+            slots(format!("group {n}{purged}"), &a.inserts, &b.inserts);
+        }
+        for (n, (a, b)) in before.buses.iter().zip(&after.buses).enumerate() {
+            slots(format!("bus {n}"), &a.inserts, &b.inserts);
+        }
+        let racks = [
+            ("insert", &before.inserts, &after.inserts),
+            ("send", &before.sends, &after.sends),
+            ("main", &before.main, &after.main),
+        ];
+        for (name, a, b) in racks {
+            slots(format!("instrument {name}"), a, b);
+        }
+        let rack_changed = racks.iter().filter(|(_, a, b)| a != b).count();
+        let sounding = changed.iter().filter(|c| !c.contains("purged")).count();
+        println!(
+            "{}: recall held the rack {held:?}; plays the snapshot's effects after {switched:?}; \
+             slowest tick {slowest_tick:?}, slowest block {slowest_block:?} of {:?}; \
+             {} slots changed ({sounding} outside purged groups), {rack_changed} instrument racks",
+            snapshot.display(),
+            Duration::from_secs_f64(BLOCK as f64 / RATE),
+            changed.len(),
+        );
+        for c in changed.iter().filter(|c| !c.contains("purged")).take(12) {
+            println!("  {c}");
+        }
+        assert!(!changed.is_empty() || rack_changed > 0, "no effect changed");
+    }
+}
+
+/// Kontakt's user snapshots list under `User Content/<instrument>`, never
+/// by their absolute folder, and not as the player's own (`User/`, which
+/// the editor offers to rename and delete): Kontakt's files are only read.
+#[test]
+fn kontakts_user_snapshots_list_under_user_content() {
+    let mut browser = contra_host::browser::Browser::open(None, None);
+    let content = PathBuf::from("/home/me/Documents/Native Instruments/User Content");
+    browser.prefs.kontakt_snapshots = Some(content.clone());
+    browser.catalog.libraries = vec![contra_library::Library {
+        dir: PathBuf::from("/libs/Strings"),
+        name: "Strings".into(),
+        presets: vec![
+            PathBuf::from("/libs/Strings/Instruments/Strings.nki"),
+            content.join("Strings/Mine.nksn"),
+        ],
+        ..Default::default()
+    }];
+    let listed = crate::editor::libraries(&browser);
+    let names = listed
+        .first()
+        .map(|l| l.presets.clone())
+        .unwrap_or_default();
+    assert_eq!(names, ["Instruments/Strings", "User Content/Strings/Mine"]);
+}
+
+/// Conflux's header Edit tab, a native page's tap: pressed and let go, the
+/// page shows its Edit page, as Kontakt does.
+#[test]
+fn conflux_edit_tab_switches_the_page() {
+    let Some(path) = library("Conflux 1.1.0 [Native Instruments]/Instruments/Conflux.nki") else {
+        return;
+    };
+    let saved = Saved::new(vec![SavedPart {
+        part: 0,
+        path,
+        channel: 0,
+        output: 0,
+        gain: 1.0,
+        pan: 0.0,
+        solo: false,
+        mute: false,
+        scripts: Vec::new(),
+        delays: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
+    }]);
+    let (params, mut dsp) = activate(&saved.write());
+    settle(&params, &mut dsp);
+    let shown = |params: &ContraParams| {
+        let guard = crate::lock(&params.shared.rack);
+        let view = guard.as_ref().unwrap().parts()[0]
+            .as_ref()
+            .unwrap()
+            .view
+            .as_ref()
+            .unwrap();
+        let tree = view.tree();
+        let taps: Vec<(usize, f64, f64)> = (tree.widgets.iter().enumerate())
+            .filter(|(_, w)| w.name.starts_with("native_ui tap") && !w.hidden)
+            .map(|(n, w)| (n, w.rect.x, w.rect.y))
+            .collect();
+        let visible = tree.widgets.iter().filter(|w| !w.hidden).count();
+        (taps, visible, tree.widgets.len())
+    };
+    let (taps, before, _) = shown(&params);
+    let mut header: Vec<_> = taps
+        .iter()
+        .filter(|t| t.2 < 60. && t.1 > 700.)
+        .copied()
+        .collect();
+    header.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // The header's Play, Edit and Settings tabs, left to right.
+    let edit = header.get(1).expect("Play, Edit, Settings").0;
+    for value in [1., 0.] {
+        params
+            .shared
+            .request(crate::Request::Ui(crate::editor::Edit {
+                slot: Some(0),
+                action: contra_ui::app::Action::Control {
+                    part: 0,
+                    widget: edit,
+                    value,
+                    cell: None,
+                    keys: Default::default(),
+                },
+            }));
+        settle(&params, &mut dsp);
+    }
+    settle(&params, &mut dsp);
+    let (_, after, _) = shown(&params);
+    assert_ne!(before, after, "the Edit tab changed nothing shown");
+}
+
+/// A bug in the render must cost one silent block and a message, never an
+/// unwind into the host; the next block plays on.
+#[test]
+fn a_panic_in_the_render_is_one_silent_block_and_the_next_plays() {
+    let scratch = Scratch::new("render-panic");
+    std::fs::create_dir_all(&scratch.0).unwrap();
+    // One second of a 440 Hz sine, 16-bit mono at 48 kHz, played by one SFZ region.
+    let samples: Vec<u8> = (0..48_000)
+        .flat_map(|n| {
+            let x = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin();
+            ((x * 20_000.0) as i16).to_le_bytes()
+        })
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend(b"RIFF");
+    wav.extend((36 + samples.len() as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend([1, 0, 1, 0]);
+    wav.extend(48_000u32.to_le_bytes());
+    wav.extend(96_000u32.to_le_bytes());
+    wav.extend([2, 0, 16, 0]);
+    wav.extend(b"data");
+    wav.extend((samples.len() as u32).to_le_bytes());
+    wav.extend(samples);
+    std::fs::write(scratch.0.join("sine.wav"), wav).unwrap();
+    let sfz = scratch.0.join("sine.sfz");
+    std::fs::write(
+        &sfz,
+        "<region> sample=sine.wav key=60 loop_mode=loop_continuous\n",
+    )
+    .unwrap();
+    let saved = Saved::new(vec![SavedPart {
+        part: 0,
+        path: sfz,
+        channel: 0,
+        output: 0,
+        gain: 1.0,
+        pan: 0.0,
+        solo: false,
+        mute: false,
+        scripts: Vec::new(),
+        delays: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
+    }]);
+    let (params, mut dsp) = activate(&saved.write());
+    let peak = |audio: &[f32]| audio.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    block(&params, &mut dsp, &[note(true, 60)]);
+    assert!(
+        peak(&block(&params, &mut dsp, &[])) > 0.01,
+        "the note plays"
+    );
+    // The next render panics: that block is silent, the host is not unwound
+    // into, and the fault is flagged for the player.
+    params.shared.inject_panic.store(true, Ordering::Release);
+    let silent = block(&params, &mut dsp, &[]);
+    assert_eq!(peak(&silent), 0.0, "a panicking render is silence");
+    assert!(params.shared.fault.load(Ordering::Acquire));
+    // The tick tells the player once.
+    Tick.run(&params);
+    assert!(!params.shared.fault.load(Ordering::Acquire));
+    // And the note plays on in the next block.
+    let mut later = 0.0f32;
+    for _ in 0..4 {
+        later = later.max(peak(&block(&params, &mut dsp, &[])));
+    }
+    assert!(later > 0.01, "the render recovers after the fault");
+}
+
+/// A panel control the player moved takes a host macro, and the host's
+/// automation of that macro then moves the control: its script gets it.
+#[test]
+fn a_host_macro_learns_a_touched_control_and_drives_it() {
+    let Some(path) = library("Una Corda Library/Instruments/Una Corda Felt.nki") else {
+        return;
+    };
+    let saved = Saved::new(vec![SavedPart {
+        part: 0,
+        path,
+        channel: 0,
+        output: 0,
+        gain: 1.0,
+        pan: 0.0,
+        solo: false,
+        mute: false,
+        scripts: Vec::new(),
+        delays: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        preset: None,
+        modified: false,
+    }]);
+    let (params, mut dsp) = activate(&saved.write());
+    settle(&params, &mut dsp);
+    // A shown knob or slider of a persistent integer control, its range.
+    let found = {
+        let guard = crate::lock(&params.shared.rack);
+        let rack = guard.as_ref().unwrap();
+        let part = rack.parts()[0].as_ref().unwrap();
+        let view = part.view.as_ref().unwrap();
+        let vars = &part.script.vars[usize::from(view.slot)];
+        view.tree().widgets.iter().find_map(|w| {
+            let (min, max) = crate::macros::range(w)?;
+            let knob = matches!(
+                w.kind,
+                contra_ui_model::Kind::Knob { .. } | contra_ui_model::Kind::Slider { .. }
+            );
+            let var = vars
+                .vars
+                .iter()
+                .find(|v| v.control == w.source_id && v.len == 1 && !v.real && !v.text)?;
+            (knob && max - min >= 4.0 && !w.hidden)
+                .then(|| (w.clone(), var.name.to_string(), min, max))
+        })
+    };
+    let (widget, var, min, max) = found.expect("a persistent knob on Una Corda's panel");
+    // The player's touch: the first macro takes it.
+    let (id, _) =
+        crate::macros::touch(&params, 0, "Una Corda", &widget, min).expect("a free macro");
+    assert_eq!(id, crate::macros::FIRST);
+    // The host reads its name: the part's, then the control's.
+    let shown = params.parameter_presentation(id);
+    assert!(shown.is_some_and(|s| s.name.starts_with("Una Corda: ")));
+    assert!(params.macro_renamed(id) && !params.macro_renamed(id));
+    // The host automates Macro 1 to three quarters of the control's range.
+    let to = (min + 0.75 * (max - min)).round();
+    let m = crate::macros::read(&params.macros.read().unwrap())[0]
+        .clone()
+        .unwrap();
+    crate::macros::param(&params, 0)
+        .unwrap()
+        .set_value(m.normalized(to));
+    settle(&params, &mut dsp);
+    settle(&params, &mut dsp);
+    params.capture();
+    let state = Saved::read(&params.saved.read().unwrap());
+    let values: Vec<&String> = state.parts[0].scripts.iter().flatten().collect();
+    assert!(
+        values.iter().any(|v| **v == format!("{var} {to}")),
+        "Macro 1 → {to} did not reach {var}: {values:?}"
+    );
+}
+
+/// One 64-frame block with `events`: part 0's left channel.
+fn block_64(params: &ContraParams, dsp: &mut Dsp, events: &[moose::prelude::Event]) -> Vec<f32> {
+    block_64_exact(params, dsp, events, &[])
+}
+
+/// [`block_64`] with host-native events too.
+fn block_64_exact(
+    params: &ContraParams,
+    dsp: &mut Dsp,
+    events: &[moose::prelude::Event],
+    exact: &[ExactEvent],
+) -> Vec<f32> {
+    const FRAMES: usize = 64;
+    let mut list = EventList::with_capacity(16);
+    for &e in events {
+        list.push(e);
+    }
+    for &e in exact {
+        list.try_push_exact(e).unwrap();
+    }
+    let mut channels = vec![vec![0.0f32; FRAMES]; 2 * crate::OUTPUTS];
+    {
+        let mut outs: Vec<&mut [f32]> = channels.iter_mut().map(Vec::as_mut_slice).collect();
+        let mut buffer = AudioBuffer::from_slices_checked(&[], &mut outs, FRAMES);
+        let transport = TransportInfo::default();
+        let mut out_events = EventList::with_capacity(16);
+        let mut cx = ProcessContext::new(&transport, RATE, FRAMES, &mut out_events);
+        <Contra as PluginLogic>::process(dsp, params, &mut buffer, &list, &mut cx);
+    }
+    channels.swap_remove(0)
+}
+
+/// Installs a part in the rack whose one zone plays a constant level on
+/// every key, run by KSP `source`; the store its sample lives in, and the
+/// last message the script's init sent.
+fn dc_part(params: &ContraParams, source: &str) -> (contra_stream::Store, String) {
+    use std::sync::Arc;
+
+    use contra_engine::{Engine, Plan, Region, Zone};
+    use contra_host::rack::{Mix, Part};
+    use contra_stream::{BlobKey, Encoding, MemSource, SampleFmt, Store, StoreConfig};
+
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let fmt = SampleFmt {
+        encoding: Encoding::F32,
+        channels: 1,
+    };
+    let frames = 48_000;
+    let key = BlobKey {
+        file: "dc".into(),
+        offset: 0,
+        fmt,
+    };
+    let bytes = (0..frames).flat_map(|_| 0.5f32.to_le_bytes()).collect();
+    let sample = (store.load(
+        &key,
+        Arc::new(MemSource::new(fmt, bytes)),
+        frames,
+        std::slice::from_ref(&(0..frames)),
+    ))
+    .unwrap();
+    let region = Region {
+        mix: None,
+        table: None,
+        sample,
+        start: 0,
+        end: frames,
+        loops: Default::default(),
+        reverse: false,
+    };
+    let mut zone = Zone::new(region, 60, 48_000);
+    zone.keys = 0..=127;
+    let mut plan = Plan::new(vec![zone], 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    let script = contra_ksp::compile(source, &[]).unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let engine = Engine::new(Arc::new(plan), store.client(), 48_000);
+    let message = engine.last_message().to_owned();
+    let part = Part {
+        path: None,
+        source: None,
+        recall: contra_engine::Recall::Restart,
+        name: "dc".into(),
+        diagnostics: vec![],
+        faces: vec![],
+        mix: Mix::DEFAULT,
+        solo: false,
+        mute: false,
+        script: Default::default(),
+        plan: None,
+        delays: None,
+        view: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        modified: false,
+        named: Default::default(),
+        sounds: Default::default(),
+    };
+    let mut guard = crate::lock(&params.shared.rack);
+    guard.as_mut().unwrap().install(0, Box::new(engine), part);
+    (store, message)
+}
+
+/// The first frame of `out` that sounds.
+fn first_sound(out: &[f32]) -> Option<usize> {
+    out.iter().position(|x| *x != 0.0)
+}
+
+#[test]
+fn a_host_macro_move_inside_a_block_lands_on_its_frame() {
+    use contra_host::rack::{Control, MacroTarget, Scale};
+
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    // A script that plays the zone when its knob moves.
+    let (_store, k) = dc_part(
+        &params,
+        "on init
+            declare ui_knob $k (0, 100, 1)
+            message(get_ui_id($k))
+        end on
+        on ui_control ($k)
+            play_note(60, 100, 0, -1)
+        end on",
+    );
+    let target = MacroTarget {
+        part: 0,
+        slot: 0,
+        control: Control::Integer(k.parse().unwrap()),
+        scale: Scale::Range {
+            min: 0.0,
+            max: 100.0,
+        },
+    };
+    crate::lock(&params.shared.rack)
+        .as_mut()
+        .unwrap()
+        .set_macro(0, Some(target));
+    assert!(block_64(&params, &mut dsp, &[]).iter().all(|x| *x == 0.0));
+    // The host moves Macro 1 at frame 37 of the next block.
+    let change = EventBody::ParamChange {
+        id: crate::macros::FIRST,
+        value: 0.5,
+    };
+    let out = block_64(&params, &mut dsp, &[moose::prelude::Event::new(37, change)]);
+    let first = first_sound(&out);
+    assert!(
+        first.is_some_and(|f| f >= 37),
+        "sound before the move's frame, or none: first non-zero frame {first:?}"
+    );
+}
+
+#[test]
+fn the_host_transport_starting_inside_a_block_reaches_the_script_at_its_frame() {
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    // The script plays when the song starts at bar 3 at 120 bpm.
+    let (_store, _) = dc_part(
+        &params,
+        "on init
+            set_listener($NI_SIGNAL_TRANSP_START, 1)
+        end on
+        on listener
+            if ($NI_SIGNAL_TYPE = $NI_SIGNAL_TRANSP_START and $NI_SONG_POSITION = 960 * 8 and $DURATION_QUARTER = 500000)
+                play_note(60, 100, 0, -1)
+            end if
+        end on",
+    );
+    assert!(block_64(&params, &mut dsp, &[]).iter().all(|x| *x == 0.0));
+    let start = EventBody::Transport(TransportInfo {
+        playing: true,
+        tempo: 120.0,
+        position_beats: 8.0,
+        time_sig_num: 4,
+        time_sig_den: 4,
+        ..TransportInfo::default()
+    });
+    let out = block_64(&params, &mut dsp, &[moose::prelude::Event::new(37, start)]);
+    let first = first_sound(&out);
+    assert!(
+        first.is_some_and(|f| f >= 37),
+        "the start sounded before its frame, or never: first non-zero frame {first:?}"
+    );
+}
+
+#[test]
+fn a_clap_pressure_expression_reaches_the_scripts_poly_at_at_its_frame() {
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    // The script plays a second note when key 60's pressure passes 100.
+    let (_store, _) = dc_part(
+        &params,
+        "on poly_at
+            if ($POLY_AT_NUM = 60 and %POLY_AT[60] > 100)
+                play_note(72, 100, 0, -1)
+            end if
+        end on",
+    );
+    block_64(&params, &mut dsp, &[note(true, 60)]);
+    let held = block_64(&params, &mut dsp, &[]);
+    // The host presses key 60's note harder at frame 37 (CLAP pressure).
+    let press = ExactEvent::new(
+        37,
+        ExactEventBody::NoteExpression {
+            expression_id: 6,
+            address: ExactNoteAddress::from_raw_signed(0, 0, 60, -1),
+            value: 0.9,
+        },
+    );
+    let out = block_64_exact(&params, &mut dsp, &[], &[press]);
+    let level = held[63];
+    assert!(level > 0.1, "the held note does not sound: {level}");
+    assert!(
+        out[..37].iter().all(|x| (x - level).abs() < 1e-4),
+        "the second note sounded before the pressure's frame"
+    );
+    assert!(
+        out[40..].iter().all(|x| *x > level + 0.1),
+        "the pressure did not reach on poly_at at its frame: {:?}",
+        &out[36..44]
+    );
+}
+
+/// The host saves the project, closes the plug-in and opens the project in
+/// a new one: parameter values and persisted fields, as a host keeps them.
+fn reopen(params: &ContraParams) -> (ContraParams, Dsp) {
+    params.capture();
+    let (ids, values) = params.collect_values();
+    let persist = params.serialize_persist();
+    let again = ContraParams::new();
+    let pairs: Vec<(u32, f64)> = ids.into_iter().zip(values).collect();
+    again.restore_state(&pairs, &persist);
+    again.restore();
+    let mut dsp = Dsp::default();
+    <Contra as PluginLogic>::reset(&mut dsp, &again, &AudioConfig::new(RATE, BLOCK));
+    again.shared.shown.store(true, Ordering::Release);
+    Tick.run(&again);
+    (again, dsp)
+}
+
+#[test]
+fn a_project_with_a_kontakt_and_a_uvi_part_reopens_as_it_was_saved() {
+    let Some(kontakt) = library("Una Corda Library/Instruments/Una Corda Felt.nki") else {
+        return;
+    };
+    let uvi = Path::new("/data/main/Libraries/UVI")
+        .join("VWinds - Clarinets/VWinds-BbClarinet.ufs/Presets/Bb Clarinet.uvip");
+    if !uvi.ancestors().any(Path::is_file) {
+        eprintln!("skipped: no {}", uvi.display());
+        return;
+    }
+    let part = |part: usize, path: PathBuf, preset: Option<PathBuf>| SavedPart {
+        part,
+        path,
+        channel: 0,
+        output: 0,
+        gain: 1.0,
+        pan: 0.0,
+        solo: false,
+        mute: false,
+        scripts: Vec::new(),
+        delays: None,
+        slot_types: Vec::new(),
+        slot_responses: Vec::new(),
+        preset,
+        modified: false,
+    };
+    let saved = Saved::new(vec![part(0, kontakt, None), part(1, uvi, None)]);
+    let (params, mut dsp) = activate(&saved.write());
+    settle(&params, &mut dsp);
+    // On each part the player turns a panel knob, and a macro learns it.
+    let mut moved = Vec::new();
+    for n in 0..2 {
+        let mut guard = crate::lock(&params.shared.rack);
+        let rack = guard.as_mut().unwrap();
+        let p = rack.parts()[n].as_ref().unwrap();
+        let title = p.name.clone();
+        let view = p
+            .view
+            .as_ref()
+            .unwrap_or_else(|| panic!("part {n}: no panel"));
+        let found = view.tree().widgets.iter().enumerate().find_map(|(i, w)| {
+            let knob = matches!(
+                w.kind,
+                contra_ui_model::Kind::Knob { .. } | contra_ui_model::Kind::Slider { .. }
+            );
+            let (min, max) = crate::macros::range(w)?;
+            (knob && !w.hidden && max > min).then(|| (i, w.clone(), min + 0.75 * (max - min)))
+        });
+        let (widget, w, to) = found.unwrap_or_else(|| panic!("part {n}: no knob"));
+        rack.control(n, widget, None, to, Default::default());
+        moved.push(w.name.clone());
+        crate::macros::touch(&params, n, &title, &w, to).expect("a free macro");
+    }
+    settle(&params, &mut dsp);
+    settle(&params, &mut dsp);
+    params.capture();
+    let state = params.saved.read().unwrap().clone();
+    let macros = params.macros.read().unwrap().clone();
+    assert_eq!(macros.lines().count(), 2, "{macros}");
+    let names: Vec<_> = (0..2)
+        .map(|n| {
+            params
+                .parameter_presentation(crate::macros::id(n))
+                .map(|p| p.name)
+        })
+        .collect();
+    assert!(
+        names.iter().all(Option::is_some),
+        "unnamed macros: {names:?}"
+    );
+
+    let (again, mut again_dsp) = reopen(&params);
+    settle(&again, &mut again_dsp);
+    settle(&again, &mut again_dsp);
+    again.capture();
+    assert_eq!(*again.macros.read().unwrap(), macros, "the macros changed");
+    let names_again: Vec<_> = (0..2)
+        .map(|n| {
+            again
+                .parameter_presentation(crate::macros::id(n))
+                .map(|p| p.name)
+        })
+        .collect();
+    assert_eq!(names_again, names, "the macro names changed");
+    let (was, now) = (
+        Saved::read(&state),
+        Saved::read(&again.saved.read().unwrap()),
+    );
+    assert_eq!(now.parts.len(), 2, "a part did not come back");
+    for (a, name) in was.parts.iter().zip(&moved) {
+        let entries = a.scripts.iter().flatten();
+        let has =
+            |e: &&String| e.starts_with(&format!("{name}=")) || e.starts_with(&format!("{name} "));
+        assert!(
+            entries.clone().any(|e| has(&e)),
+            "part {}: {name} not saved",
+            a.part
+        );
+    }
+    for (a, b) in was.parts.iter().zip(&now.parts) {
+        assert_eq!(a.path, b.path);
+        assert_eq!(a.preset, b.preset, "part {}: its preset changed", a.part);
+        assert_eq!(
+            a.scripts, b.scripts,
+            "part {}: its script values changed",
+            a.part
+        );
+    }
 }

@@ -1,11 +1,27 @@
 //! A compiled KSP script as the engine's [`ScriptPlan`].
 
 use contra_engine::{Callbacks, Controls, EnginePar, EnginePars, LookPars, ScriptPlan, Text, ir};
+use contra_face::LOOK;
 use contra_ksp::ControlKind;
 use contra_ksp::{CallbackKind, Cells, FIRST_UI_ID, SYMBOL_BASE, Script};
 
 /// Whether the engine or the UI tree understands catalog name `name`
 /// (every other one is an opaque symbol nothing acts on), for coverage
+/// Names the engine reads without a table: list ids, the modifier keys a
+/// click held, a text line added through a parameter, and the log kinds
+/// `disable_logging` takes (CONTRA shows no script log).
+const CARRIED: [&str; 9] = [
+    "$CONTROL_PAR_NUM_ITEMS",
+    "$CONTROL_PAR_SELECTED_ITEM_IDX",
+    "$CONTROL_PAR_KEY_SHIFT",
+    "$CONTROL_PAR_KEY_ALT",
+    "$CONTROL_PAR_KEY_CONTROL",
+    "$CONTROL_PAR_TEXTLINE",
+    "$NI_LOG_MESSAGE",
+    "$NI_LOG_WARNING",
+    "$NI_LOG_WATCHING",
+];
+
 /// reports.
 #[must_use]
 pub fn understood(name: &str) -> bool {
@@ -14,7 +30,7 @@ pub fn understood(name: &str) -> bool {
         || engine_par(&contra_format_kontakt::engine_pars(), name).is_some()
         || crate::ui::mapped(&upper)
         || LOOK.contains(&upper.as_str())
-        || ["$CONTROL_PAR_NUM_ITEMS", "$CONTROL_PAR_SELECTED_ITEM_IDX"].contains(&upper.as_str())
+        || CARRIED.contains(&upper.as_str())
 }
 
 /// What `name` drives, and its text law: a knob row is
@@ -48,10 +64,7 @@ const COROUTINES: usize = 64;
 /// for coverage reports.
 #[must_use]
 pub fn runs(kind: CallbackKind) -> bool {
-    !matches!(
-        kind,
-        CallbackKind::PolyAt | CallbackKind::UiUpdate | CallbackKind::Rpn | CallbackKind::Nrpn
-    )
+    !matches!(kind, CallbackKind::Rpn | CallbackKind::Nrpn)
 }
 
 /// The script's arrays, by first cell, for the array files it names.
@@ -86,10 +99,12 @@ pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> Sc
             note: entry(CallbackKind::Note),
             release: entry(CallbackKind::Release),
             controller: entry(CallbackKind::Controller),
+            poly_at: entry(CallbackKind::PolyAt),
             persistence_changed: entry(CallbackKind::PersistenceChanged),
             listener: entry(CallbackKind::Listener),
             pgs_changed: entry(CallbackKind::PgsChanged),
             ui_controls: entry(CallbackKind::UiControls),
+            ui_update: entry(CallbackKind::UiUpdate),
             async_complete: entry(CallbackKind::AsyncComplete),
             ui_control: (0u32..)
                 .zip(&script.controls)
@@ -98,10 +113,14 @@ pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> Sc
                     (id, script.callback(CallbackKind::UiControl, Some(n)))
                 })
                 .collect(),
+            widget: None,
         },
         coroutines: COROUTINES,
+        foreign: None,
         files: None,
         arrays: arrays(script),
+        hears_own_releases: true,
+        held_release_ends_children: true,
         links: Vec::new(),
         controls: controls(script),
         engine_pars: EnginePars {
@@ -111,9 +130,29 @@ pub fn plan(script: &Script, saved: &[String], data: &[(String, Vec<u8>)]) -> Sc
                 .iter()
                 .map(|f| f.and_then(|(_, r)| r.cloned()))
                 .collect(),
+            owners: (script.symbols.iter())
+                .map(|n| contra_format_kontakt::owner(n).and_then(contra_ksp::constant))
+                .collect(),
         },
+        view: crate::perf_view::find(data).map(|(name, _)| name.into()),
         reverb_laws: contra_format_kontakt::reverb_laws(),
         reverb_networks: contra_format_kontakt::reverb_networks().into(),
+        lfo_units: contra_format_kontakt::lfo_units(),
+        warp_modes: (contra_format_kontakt::warp_modes().into_iter())
+            .map(|m| {
+                m.map(|(shape, shaper)| {
+                    let w = contra_prepare::warp(ir::Warp {
+                        shape,
+                        shaper,
+                        amount: 0.0,
+                    });
+                    (w.shape, w.shaper)
+                })
+            })
+            .collect(),
+        mod_kinds: (contra_format_kontakt::mod_kinds().into_iter())
+            .map(|k| k.map(contra_prepare::mod_kind))
+            .collect(),
         knobs: pars
             .iter()
             .filter_map(|p| match &p.drives {
@@ -279,9 +318,15 @@ fn controls(script: &Script) -> Controls {
     // The first control on a cell wins, as the scan it replaces found it.
     by_cell.sort_unstable();
     by_cell.dedup_by_key(|&mut (c, _)| c);
+    let mut menus: Vec<u32> = (script.controls.iter())
+        .filter(|c| c.kind == ControlKind::Menu)
+        .map(|c| c.variable)
+        .collect();
+    menus.sort_unstable();
     Controls {
         first: FIRST_UI_ID,
         by_cell,
+        menus,
         value_par,
         num_items_par: symbol(script, "$CONTROL_PAR_NUM_ITEMS"),
         selected_item_par: symbol(script, "$CONTROL_PAR_SELECTED_ITEM_IDX"),
@@ -296,28 +341,6 @@ fn controls(script: &Script) -> Controls {
         .map(|name| symbol(script, name)),
     }
 }
-
-/// The parameters the UI-look builtins set, after the script's own symbols:
-/// a script that names one shares its id; `move_control`'s grid and the
-/// table's shown steps have no constant, so always get their own.
-pub(crate) const LOOK: [&str; 16] = [
-    "$CONTROL_PAR_TEXT",
-    "$CONTROL_PAR_LABEL",
-    "$CONTROL_PAR_HELP",
-    "$CONTROL_PAR_UNIT",
-    "$CONTROL_PAR_DEFAULT_VALUE",
-    "$CONTROL_PAR_POS_X",
-    "$CONTROL_PAR_POS_Y",
-    "$CONTROL_PAR_HIDE",
-    "grid_x",
-    "grid_y",
-    "table_steps_shown",
-    "level_meter",
-    "level_meter_group",
-    "level_meter_generic",
-    "$CONTROL_PAR_PICTURE",
-    "$CONTROL_PAR_PICTURE_STATE",
-];
 
 /// The id the look parameter `name` is stored under.
 pub(crate) fn look_par(script: &Script, name: &str) -> i32 {
@@ -350,6 +373,12 @@ fn look(script: &Script) -> LookPars {
         meter_generic: par("level_meter_generic"),
         picture: par("$CONTROL_PAR_PICTURE"),
         picture_state: par("$CONTROL_PAR_PICTURE_STATE"),
+        textline: symbol(script, "$CONTROL_PAR_TEXTLINE"),
+        wf_zone: par("$CONTROL_PAR_WT_ZONE"),
+        wf_flags: par("wf_flags"),
+        wf_cursor: par("wf_cursor"),
+        wf_prop_cursor: par("$UI_WF_PROP_PLAY_CURSOR"),
+        wf_prop_flags: par("$UI_WF_PROP_FLAGS"),
         wallpaper: id("$INST_WALLPAPER_ID"),
         icon: id("$INST_ICON_ID"),
     }
@@ -364,6 +393,68 @@ fn symbol(script: &Script, name: &str) -> i32 {
         .position(|s| s.eq_ignore_ascii_case(name))
         .and_then(|n| i32::try_from(n).ok())
         .map_or(i32::MIN, |n| SYMBOL_BASE + n)
+}
+
+/// The engine's view of a UVI (Lua) script: its own machine runs it, so the
+/// bytecode program stays empty.
+#[must_use]
+pub fn lua_plan(compiled: contra_lua::Compiled) -> ScriptPlan {
+    let defined = compiled.callbacks;
+    let entry = |on: bool, n: u32| on.then_some(n);
+    ScriptPlan {
+        program: contra_engine::Program::default(),
+        callbacks: Callbacks {
+            init: entry(defined.init, contra_lua::Callbacks::INIT),
+            note: entry(defined.note, contra_lua::Callbacks::NOTE),
+            release: entry(defined.release, contra_lua::Callbacks::RELEASE),
+            controller: entry(defined.controller, contra_lua::Callbacks::CONTROLLER),
+            poly_at: None,
+            persistence_changed: None,
+            listener: None,
+            pgs_changed: None,
+            ui_controls: None,
+            ui_update: None,
+            async_complete: None,
+            ui_control: Vec::new(),
+            widget: Some(contra_lua::Callbacks::WIDGET),
+        },
+        coroutines: COROUTINES,
+        controls: Controls::default(),
+        engine_pars: EnginePars::default(),
+        view: None,
+        // No reverb parameter ids are bound, so these are never read.
+        reverb_laws: ir::ReverbControls::from_fn(|_| contra_engine::ir::Law::Linear {
+            lo: 0.0,
+            hi: 1.0,
+        }),
+        reverb_networks: Vec::new(),
+        lfo_units: Vec::new(),
+        warp_modes: Vec::new(),
+        mod_kinds: Vec::new(),
+        knobs: Vec::new(),
+        data: Vec::new(),
+        text_data: Vec::new(),
+        source_folder: None,
+        library_folder: None,
+        factory_folder: None,
+        restore: Vec::new(),
+        restore_texts: Vec::new(),
+        foreign: Some(std::sync::Arc::new(compiled)),
+        files: None,
+        arrays: Vec::new(),
+        // A UVI script never sees the notes it plays. In UVIWorkstation's
+        // built-in Lua (0x1425676a0) `releaseVoice` and a `playNote` duration
+        // post a NoteOff with `postEvent`, which only appends to the
+        // manager's outgoing events (0x141397330 → 0x1413889b0), and a
+        // script without `onRelease` forwards each NoteOff by `postEvent`
+        // (`_onRelease`): fed back, every pass-through script would loop. A
+        // host note-off still reaches it. (Augmented Orchestra's arpeggiator
+        // releases the held key's notes from `onRelease`.)
+        hears_own_releases: false,
+        // A held-back NoteOff keeps the posted note (`_onRelease` posts it).
+        held_release_ends_children: false,
+        links: Vec::new(),
+    }
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ fn nka(path: &str) -> Option<&Path> {
 }
 
 /// Where a save of `path` goes under `saves`.
-fn saved(saves: Option<&Path>, path: &Path) -> Option<PathBuf> {
+pub(super) fn saved(saves: Option<&Path>, path: &Path) -> Option<PathBuf> {
     let parts = path.components().filter_map(|c| match c {
         Component::Normal(part) => Some(part),
         _ => None,
@@ -63,7 +63,7 @@ fn read(saves: Option<&Path>, path: &str) -> Option<Vec<u8>> {
 /// The bytes of a regular file no larger than any resource a script loads
 /// ([`contra_format_kontakt::RESOURCE_LIMIT`]); nothing for a larger file,
 /// a device or a pipe, so a script cannot make the host read without end.
-fn bounded(path: &Path) -> Option<Vec<u8>> {
+pub(super) fn bounded(path: &Path) -> Option<Vec<u8>> {
     const LIMIT: u64 = contra_format_kontakt::RESOURCE_LIMIT;
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
@@ -108,11 +108,27 @@ impl Rack {
             }
         }
         while let Some((part, generation, request)) = self.channels.files.recv() {
-            let live = self.parts.get(part).and_then(Option::as_ref);
-            if live.is_none_or(|p| p.script.generation != generation) {
+            let live = self.parts.get_mut(part).and_then(Option::as_mut);
+            let Some(p) = live.filter(|p| p.script.generation == generation) else {
+                continue;
+            };
+            // No path: the player picks the file in the editor first.
+            if request.path.as_str().is_empty() {
+                let names =
+                    super::picks::names(self.saves.as_deref(), p.source.as_deref(), &request);
+                self.picks.push_back(super::picks::Parked {
+                    part,
+                    generation,
+                    request,
+                    names,
+                });
                 continue;
             }
             let reply = Box::new(answer(self.saves.as_deref(), request));
+            // Only a load that read its file names a preset.
+            if reply.loaded.is_some() {
+                p.named.loaded(request.path.as_str());
+            }
             self.send(Command::File {
                 part,
                 generation,
@@ -123,7 +139,7 @@ impl Rack {
 }
 
 /// A load's values, filled from the file, or a save's reserved room.
-fn answer(saves: Option<&Path>, request: FileRequest) -> FileReply {
+pub(super) fn answer(saves: Option<&Path>, request: FileRequest) -> FileReply {
     let len = request.len as usize;
     let text = request.kind == ArrayKind::Text;
     let mut reply = FileReply {

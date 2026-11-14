@@ -57,7 +57,7 @@ impl Prepared {
             (Some((_, _, r)), _) => racks::convolver(r),
             (None, Some(_)) => Dsp::None,
             // Routed, so a script's later knob writes retune it.
-            (None, None) => racks::processor(request.effect, true, rate, &Responses(&[], &[])),
+            (None, None) => racks::processor(request.effect, rate, &Responses(&[], &[])),
         };
         Self {
             request,
@@ -309,6 +309,27 @@ impl Engine {
         saved.map(|s| s.2)
     }
 
+    /// `get_engine_par($ENGINE_PAR_EFFECT_TYPE)`: the type last loaded into
+    /// the slot, else the one it was saved with, else for an empty slot
+    /// the type that loads nothing. `None` for an effect of no known type.
+    pub(crate) fn effect_type(&mut self, group: i32, slot: i32, generic: i32) -> Option<i32> {
+        let at = crate::knobs::rack_at(group, generic)?;
+        let types = &self.plan.slot_shapes.types;
+        if let Some(ty) = self.loaded_type(at, slot) {
+            return types.get(usize::from(ty)).map(|t| t.kind);
+        }
+        let saved = (self.plan.slot_shapes.saved_types.iter())
+            .find(|s| s.0 == at && i32::from(s.1) == slot)
+            .map(|s| s.2);
+        let none = (types.iter())
+            .find(|t| !t.subtype && t.effect.is_none())
+            .map(|t| t.kind);
+        match self.slot_mut(group, slot, generic)? {
+            Some(_) => saved,
+            None => none,
+        }
+    }
+
     fn mark_loaded(&mut self, at: ir::RackAt, slot: u8, ty: u16) {
         // A load replaces the unit a shape switch changed.
         if let Some(n) = crate::knobs::shape_slot(&self.plan, at, i32::from(slot))
@@ -320,6 +341,14 @@ impl Engine {
         loaded.retain(|&(a, s, _)| (a, s) != (at, slot));
         if loaded.len() < loaded.capacity() {
             loaded.push((at, slot, ty));
+        }
+        // Its knobs start where the new unit's are.
+        let knobs = &mut self.behaviour.knobs;
+        knobs.retain(|&(a, s, _)| (a, s) != (at, slot));
+        if let Some(model) = self.plan.knob_model(at, slot, Some(ty))
+            && knobs.len() < knobs.capacity()
+        {
+            knobs.push((at, slot, contra_behaviour::positions(model)));
         }
     }
 

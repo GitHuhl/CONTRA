@@ -32,12 +32,25 @@ struct Counter {
 }
 
 /// The round-robin values one note-on read, kept so its release triggers
-/// pick the same step as its attack.
+/// pick the same step as its attack; also the note's random modulation value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RrDraw {
     global: u32,
     key: u32,
     random: u32,
+}
+
+impl RrDraw {
+    /// The note's random modulation value, 0..=1: the draw through the
+    /// splitmix64 finalizer, so it does not follow the round-robin choice
+    /// and the generator's sequence stays as it was.
+    #[must_use]
+    pub fn unit(self) -> f32 {
+        let mut z = u64::from(self.random).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+    }
 }
 
 pub struct Behaviour {
@@ -50,6 +63,9 @@ pub struct Behaviour {
     cc_set: [u128; 16],
     /// Pitch bend per channel, −1..=1.
     bend: [f32; 16],
+    /// Channel pressure per channel, 0..=127: an MPE member channel's is
+    /// its one note's.
+    pressure: [u8; 16],
     /// The channel the latest note, controller or bend came on: what routes
     /// no note owns read (the engine plays every channel).
     pub channel: u8,
@@ -67,20 +83,29 @@ pub struct Behaviour {
     pub shapes: Vec<Option<u16>>,
     /// Slots and the [`ir::SlotShapes::types`] entry each was last loaded with.
     pub loaded: Vec<(contra_ir::RackAt, u8, u16)>,
+    /// Each slot with a [`contra_ir::KnobModel`] and its knobs' positions
+    /// as last set: the saved slots', then those of types a script loaded.
+    pub knobs: Vec<(contra_ir::RackAt, u8, Positions)>,
+}
+
+/// A [`contra_ir::KnobModel`]'s live positions.
+pub type Positions = [f32; contra_ir::KnobModel::MAX];
+
+/// `model`'s saved positions, as live ones.
+#[must_use]
+pub fn positions(model: &contra_ir::KnobModel) -> Positions {
+    let mut out = [0.0; contra_ir::KnobModel::MAX];
+    out.iter_mut().zip(&model.saved).for_each(|(o, s)| *o = *s);
+    out
 }
 
 impl Behaviour {
     pub fn new(plan: &Plan) -> Self {
-        let mut groups: Vec<(u32, Counter)> = Vec::new();
-        for zone in &plan.zones {
-            let cycles = zone
-                .start
-                .iter()
-                .any(|(_, a)| matches!(a, Atom::RoundRobin(_)));
-            if cycles && !groups.iter().any(|(g, _)| *g == zone.group) {
-                groups.push((zone.group, Counter::default()));
-            }
-        }
+        // A counter for every group: `set_zone_par` may move a cycling zone
+        // into a group that had none.
+        let count = (plan.zones.iter().map(|z| z.group + 1).max().unwrap_or(0))
+            .max(u32::try_from(plan.groups.len()).unwrap_or(u32::MAX));
+        let groups: Vec<(u32, Counter)> = (0..count).map(|g| (g, Counter::default())).collect();
         // Every controller reads 0 until a message sets it, as in a fresh
         // Kontakt 8 (measured: %CC 1, 2, 7, 10, 11, 21, 64, 100 all 0); a
         // source that starts elsewhere says so (`Source::ControllerFrom`).
@@ -91,6 +116,7 @@ impl Behaviour {
             cc,
             cc_set: [0; 16],
             bend: [0.0; 16],
+            pressure: [0; 16],
             channel: 0,
             global: Counter::default(),
             keys: [Counter::default(); 128],
@@ -99,7 +125,24 @@ impl Behaviour {
             rls_reset: [0; 128],
             shapes: vec![None; plan.slot_shapes.slots.len()],
             loaded: Vec::with_capacity(LOADED.max(plan.loaded.len())),
+            knobs: Vec::with_capacity(LOADED + plan.slot_models.len() + plan.loaded.len()),
         };
+        // Every modelled slot starts at its model's saved positions: the
+        // type a recalled project loaded there, else the slot's own.
+        let slots = (plan.slot_models.iter().map(|m| (m.0, m.1)))
+            .chain(plan.loaded.iter().map(|l| (l.0, l.1)));
+        for (at, slot) in slots {
+            let ty = plan
+                .loaded
+                .iter()
+                .find(|l| (l.0, l.1) == (at, slot))
+                .map(|l| l.2);
+            if !behaviour.knobs.iter().any(|k| (k.0, k.1) == (at, slot))
+                && let Some(model) = plan.knob_model(at, slot, ty)
+            {
+                behaviour.knobs.push((at, slot, positions(model)));
+            }
+        }
         behaviour.loaded.extend_from_slice(&plan.loaded);
         if let Some(key) = plan.default_keyswitch {
             behaviour.press(plan, key);
@@ -168,6 +211,19 @@ impl Behaviour {
             .get(usize::from(channel & 15))
             .copied()
             .unwrap_or(0.0)
+    }
+
+    /// Channel pressure on `channel`, 0..=1.
+    #[must_use]
+    pub fn pressure(&self, channel: u8) -> f32 {
+        let v = self.pressure.get(usize::from(channel & 15)).copied();
+        f32::from(v.unwrap_or(0)) / 127.0
+    }
+
+    pub fn set_pressure(&mut self, channel: u8, value: u8) {
+        if let Some(v) = self.pressure.get_mut(usize::from(channel & 15)) {
+            *v = value;
+        }
     }
 
     pub fn set_bend(&mut self, channel: u8, value: f32) {
@@ -279,5 +335,43 @@ impl Behaviour {
             Control::Key => key,
             Control::Cc(n) => self.cc(channel, n),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RrDraw;
+
+    /// The random modulation sources' per-note value covers 0..1 evenly and
+    /// does not follow the round-robin draw it is derived from.
+    #[test]
+    fn note_random_spans_the_unit_range() {
+        let units: Vec<f32> = (0..4096u32)
+            .map(|i| {
+                RrDraw {
+                    random: i.wrapping_mul(0x9E37_79B9),
+                    ..RrDraw::default()
+                }
+                .unit()
+            })
+            .collect();
+        assert!(units.iter().all(|u| (0.0..1.0).contains(u)));
+        let mean = units.iter().sum::<f32>() / units.len() as f32;
+        assert!((mean - 0.5).abs() < 0.02, "mean {mean}");
+        for quarter in 0..4 {
+            let lo = quarter as f32 / 4.0;
+            let n = units
+                .iter()
+                .filter(|u| (lo..lo + 0.25).contains(*u))
+                .count();
+            assert!((900..1150).contains(&n), "quarter {quarter}: {n}");
+        }
+        let low_rr = |i: u32| i.wrapping_mul(0x9E37_79B9).is_multiple_of(2);
+        let even = (0..4096u32)
+            .filter(|&i| low_rr(i))
+            .map(|i| units[i as usize])
+            .sum::<f32>()
+            / 2048.0;
+        assert!((even - 0.5).abs() < 0.03, "even-step mean {even}");
     }
 }

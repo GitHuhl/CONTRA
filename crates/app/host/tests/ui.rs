@@ -150,6 +150,58 @@ fn a_performance_view_gives_its_controls_type_place_and_parent() {
     );
 }
 
+/// A performance-requesting slot whose page cannot be built must not end the
+/// search for the page to show.
+///
+/// Slot 0 asks for the performance view and the model rejects its tree (its
+/// label's bitmap font is the same picture as the wallpaper, so one asset is
+/// asked for as an image and as a font); slot 1 asks for nothing; slot 2 asks
+/// and builds. `View::of` must open slot 2. The `find(..).and_then(..)` this
+/// replaced stopped at slot 0's failed construction and returned `None`, so the
+/// editor opened nothing while a valid performance view sat two slots on.
+#[test]
+fn a_performing_slot_that_cannot_build_does_not_end_the_search() {
+    let broken = "on init
+            make_perfview
+            declare ui_label $a (1, 1)
+            set_control_par(get_ui_id($a), $CONTROL_PAR_FONT_TYPE, get_font_id(\"bg\"))
+            set_control_par_str($INST_WALLPAPER_ID, $CONTROL_PAR_PICTURE, \"bg\")
+        end on";
+    let admin = "on init
+            declare ui_knob $x (0, 100, 1)
+        end on";
+    let asks = "on init
+            make_perfview
+            declare ui_knob $y (0, 100, 1)
+        end on";
+    let scripts: Vec<_> = [broken, admin, asks]
+        .iter()
+        .map(|source| contra_ksp::compile(source, &[]).unwrap())
+        .collect();
+    let store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![], 16);
+    plan.scripts = scripts
+        .iter()
+        .map(|s| contra_host::script::plan(s, &[], &[]))
+        .collect();
+    let engine = Engine::new(Arc::new(plan), store.client(), 48_000);
+    let faces: Vec<Option<Face>> = scripts.iter().map(|s| Some(Face::of(s, &[]))).collect();
+
+    // The fixture's point: slot 0 is preferred *and* cannot build, so the
+    // selection has to walk past it rather than stop.
+    assert!(
+        interface(faces[0].as_ref().unwrap(), 0, &engine, &|_| None).is_err(),
+        "slot 0 must be the slot whose tree is rejected"
+    );
+
+    let view = contra_host::view::View::of(&faces, &[None, None, None], &engine, None)
+        .expect("a performance view two slots on");
+    assert_eq!(
+        view.slot, 2,
+        "the search ended at a slot that could not build, or opened an admin page"
+    );
+}
+
 #[test]
 fn an_idle_ui_rebuilds_nothing_and_a_moved_knob_rebuilds_what_it_touched() {
     let store = Store::new(StoreConfig::DEFAULT).unwrap();
@@ -397,4 +449,34 @@ fn script_key_colours_reach_the_keybed() {
         end on",
     );
     assert_eq!(ui.key_pressed, Some(vec![40]));
+}
+
+/// What the user libraries' scripts show beyond controls: a waveform
+/// display's zone and play cursor (Areia Pads), a text line added to a
+/// label (ANALOG STRINGS), a custom id read back (Conflux) and the status
+/// `message` (Areia, Dolce, CHORUS).
+#[test]
+fn waveform_text_lines_custom_ids_and_messages_reach_the_tree() {
+    let ui = tree(
+        "on init
+            make_perfview
+            declare ui_waveform $wave (5, 4)
+            attach_zone($wave, 7, $UI_WAVEFORM_USE_TABLE)
+            set_ui_wf_property($wave, $UI_WF_PROP_PLAY_CURSOR, 0, 250000)
+            declare ui_label $list (1, 4)
+            set_text($list, \"1 Cutoff\")
+            set_control_par_str(get_ui_id($list), $CONTROL_PAR_TEXTLINE, \"2 Drive\")
+            declare ui_menu $fx
+            set_control_par(get_ui_id($fx), $CONTROL_PAR_CUSTOM_ID, 12)
+            declare ui_label $echo (1, 1)
+            set_text($echo, get_control_par(get_ui_id($fx), $CONTROL_PAR_CUSTOM_ID))
+            message(\"Loading done\")
+        end on",
+    );
+    let wave = widget(&ui, "$wave").waveform.as_ref().unwrap();
+    assert_eq!((wave.zone, wave.cursor_us), (7, 250_000));
+    assert_ne!(wave.flags, 0);
+    assert_eq!(widget(&ui, "$list").text, "1 Cutoff\n2 Drive");
+    assert_eq!(widget(&ui, "$echo").text, "12");
+    assert_eq!(ui.message, "Loading done");
 }

@@ -7,13 +7,18 @@
 
 mod browser;
 mod controls;
+mod find;
 mod mapping;
 mod mixer;
 mod part;
+mod pick;
+mod preset;
+pub use preset::{PresetEdit, USER};
 mod rack;
 mod report;
 mod settings;
 mod sound;
+mod tidy;
 
 pub use sound::{Envelope, Filter, Lower, Param, Pass, Sound};
 
@@ -22,7 +27,7 @@ use mui::prelude::*;
 
 use crate::Pictures;
 use crate::keyboard::{self, Keys, note_name};
-use crate::kit::{self, Icon, button, icon_button, rule, section, sheet, strip, tab, vrule};
+use crate::kit::{self, Icon, button, icon_button, rule, section, strip, tab, vrule};
 use crate::theme::{CONTROL, SIDEBAR, SPACE, TEXT, TIGHT, quick, secondary};
 
 /// Everything the editor shows. The host fills the data; `view` is the
@@ -48,10 +53,15 @@ pub struct App {
     pub build: String,
     /// The folders the browser scans.
     pub folders: Vec<String>,
+    /// Kontakt's user snapshot folder, and whether it is there: `None`
+    /// while none is set (the path is then empty).
+    pub snapshot_folder: (String, Option<bool>),
     /// The editor's width in points, as the host frames it: a library's
     /// view fits what the rack has of it. 0 while unknown.
     pub width: f64,
     pub view: View,
+    /// A file a part's script asks the player to pick, to save or open.
+    pub pick: Option<FilePick>,
     /// The libraries' cover pictures; the host gives a store whose worker
     /// reads [`Library::art`] and replaces it when the list changes.
     pub covers: Option<Pictures>,
@@ -60,6 +70,8 @@ pub struct App {
     /// A load the host has been asked for and not finished.
     // ponytail: one load shown at a time; a list if loads queue up.
     pub loading: Option<Loading>,
+    /// Latest loader counters, independent of the rack lock.
+    pub load_progress: contra_protocol::LoadSnapshot,
 }
 
 /// Where a load lands: a new part, or part `n` it replaces.
@@ -73,12 +85,24 @@ pub enum Loading {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Library {
     pub name: String,
+    pub format: Format,
     /// Its instruments by path inside the library: `Folder/Name`.
     pub presets: Vec<String>,
+    /// Which of `presets` (sorted) are presets of an instrument, recalled
+    /// into the focused part on a double-click: snapshots, the player's own.
+    pub recalls: Vec<usize>,
     pub starred: bool,
     /// Pictures that may be its cover, best first, as the host's cover
     /// store reads them; the first that decodes is shown.
     pub art: Vec<String>,
+}
+
+/// Which family of libraries the browser lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Format {
+    #[default]
+    Kontakt,
+    Uvi,
 }
 
 /// One loaded instrument.
@@ -86,6 +110,10 @@ pub struct Library {
 pub struct Part {
     pub name: String,
     pub library: String,
+    /// The preset it plays, as an index into its library's presets.
+    pub preset: Option<usize>,
+    /// Changed since the preset loaded: the header marks it.
+    pub modified: bool,
     /// MIDI channel 1..=16, or 0 for every channel.
     pub channel: u8,
     /// Stereo output 1..=16, or 0 to let the host pick.
@@ -194,6 +222,8 @@ impl FaceLook {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
     pub cpu: f64,
+    /// The slowest recent block, in percent of its real time.
+    pub peak: f64,
     pub voices: u32,
     /// The whole process; 0 where the host cannot read it.
     pub ram_mb: u32,
@@ -229,6 +259,7 @@ pub struct View {
     pub browser_hidden: bool,
     /// The library list's share of the browser's height; 0 is the default.
     pub split: f64,
+    pub format: Format,
     pub shelf: Shelf,
     /// Libraries listed Z to A.
     pub descending: bool,
@@ -236,9 +267,21 @@ pub struct View {
     /// The library whose presets the browser lists, and their search.
     pub library: Option<usize>,
     pub preset_search: String,
+    /// Each library's preset last picked, as (library, preset): opening the
+    /// library again shows it, scrolled into view once (`reveal`).
+    pub last: Vec<(usize, usize)>,
+    pub reveal: bool,
     /// Preset folders folded shut.
     pub folded: Vec<String>,
     pub sheet: Option<Sheet>,
+    /// The name typed in a preset sheet.
+    pub preset_name: String,
+    /// The name still waits to be selected, once its field is on screen.
+    pub select_name: bool,
+    /// The name typed in a file pick, and the pick it is for (a new one
+    /// starts empty).
+    pub pick_name: String,
+    pub picking: Option<FilePick>,
     /// The id of the open popup menu.
     pub menu: Option<String>,
     pub mixer_wide: bool,
@@ -284,8 +327,17 @@ pub struct View {
     pub face_look: FaceLook,
 }
 
-/// The editor sizes on offer.
-pub const SCALES: [f64; 4] = [1., 1.25, 1.5, 2.];
+impl View {
+    /// Escape: closes the open menu, else the open sheet. A plugin window
+    /// hands unclaimed keys to its host, so the host's editor calls this
+    /// itself rather than waiting for the key in the frame's input.
+    pub fn dismiss(&mut self) -> bool {
+        self.menu.take().is_some() || self.sheet.take().is_some()
+    }
+}
+
+/// The editor sizes on offer, in percent of its design size.
+pub const SCALES: [u32; 4] = [100, 125, 150, 200];
 
 /// A library's view sizes on offer: as wide as the rack (0, the default),
 /// or a fixed scale that scrolls when it is wider.
@@ -296,14 +348,33 @@ pub const FACE_SCALES: [f64; 4] = [0., 1., 1.5, 2.];
 pub enum Sheet {
     Settings,
     About,
+    /// Name what a part plays as a user preset.
+    SavePreset(usize),
+    /// Name the user preset a part plays anew.
+    RenamePreset(usize),
+    /// Confirm deleting the user preset a part plays.
+    DeletePreset(usize),
+}
+
+/// A file a part's script asks for: to save under a name, or to open one
+/// of `names`, those saved for its instrument.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilePick {
+    pub part: usize,
+    pub save: bool,
+    pub names: Vec<String>,
 }
 
 /// What the user asked for this frame, for the host to carry out.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    /// A browser preset to play, in a new part unless it is a preset of an
+    /// instrument and `into` names the focused part (Kontakt's browser
+    /// replaces the selected slot's snapshot).
     Load {
         library: usize,
         preset: usize,
+        into: Option<usize>,
     },
     /// A browser preset dropped on a part: it plays that instead.
     Replace {
@@ -320,6 +391,11 @@ pub enum Action {
     Step {
         part: usize,
         by: i32,
+    },
+    /// The player's own preset of a part, saved, renamed or deleted.
+    Preset {
+        part: usize,
+        edit: PresetEdit,
     },
     Volume(usize, f64),
     Pan(usize, f64),
@@ -368,6 +444,8 @@ pub enum Action {
     },
     Duplicate(usize),
     Remove(usize),
+    /// The answer to [`App::pick`]: a name, or none (cancelled).
+    Picked(Option<String>),
     Master(f64),
     Note(u8, bool),
     Pitch(f64),
@@ -376,6 +454,8 @@ pub enum Action {
     MidiThru(bool),
     Star(usize, bool),
     AddFolder,
+    /// Choose Kontakt's user snapshot folder.
+    ChooseSnapshotFolder,
     /// New parts take the next free MIDI channel; their own output pair.
     NewParts {
         next_channel: bool,
@@ -383,11 +463,14 @@ pub enum Action {
     },
     /// Stop scanning the browser's folder `n`.
     RemoveFolder(usize),
-    Scale(f64),
+    /// Draw the editor at this percent of its design size.
+    Scale(u32),
     CopyDiagnostics,
     ExportReport,
     LogFolder,
     Refresh,
+    /// Use the folder a report line offered for missing samples.
+    Relink(String),
 }
 
 /// The editor for `app`, and what the user did.
@@ -414,8 +497,10 @@ pub fn view(ui: &mut Ui, app: &mut App) -> Response<Vec<Action>> {
         middle.push(vrule());
     }
     let mut main = vec![main(ui, app, &mut out).grow(1).min_w(0).min_h(0)];
-    if let Some(s) = app.view.sheet {
-        main.push(sheet_view(ui, app, s, &mut out).centered());
+    if let Some(pick) = app.pick.clone() {
+        main.push(pick::sheet(ui, app, pick, &mut out).centered());
+    } else if let Some(s) = app.view.sheet {
+        main.push(settings::sheet(ui, app, s, &mut out).centered());
     }
     middle.push(stack(main).grow(1).min_w(0).min_h(0));
     // v2's two tones: the frame around the work (header, browser, tab
@@ -435,9 +520,8 @@ pub fn view(ui: &mut Ui, app: &mut App) -> Response<Vec<Action>> {
     Response { el, changed: out }
 }
 
-/// The line under the header, lit while a load is under way (v2's
-/// `src/ui/header.rs` `loading_bar`, without its sweep: a sweep needs a
-/// frame every display refresh for as long as the load runs).
+/// The line under the header, lit while a load is under way; the load's
+/// row in the rack shows how far it is.
 fn loading_bar(app: &App) -> El {
     if app.loading.is_none() {
         return rule();
@@ -501,6 +585,12 @@ fn header(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
             format!("{:.0}%", s.cpu),
             "100%",
             "The audio thread's time spent rendering".into()
+        ),
+        stat(
+            "Peak",
+            format!("{:.0}%", s.peak),
+            "100%",
+            "The slowest block of the last half second, in percent of its real time: past 100% the host hears a dropout".into()
         ),
         stat(
             "Voices",
@@ -606,29 +696,6 @@ fn header(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         .shrink(0)
 }
 
-fn sheet_view(ui: &mut Ui, app: &mut App, which: Sheet, out: &mut Vec<Action>) -> El {
-    let (title, content) = match which {
-        Sheet::Settings => ("Settings", settings::view(ui, app, out)),
-        Sheet::About => (
-            "About",
-            col![
-                title("CONTRA"),
-                body(app.build.clone()).id("about-build"),
-                caption(
-                    "A free sampler that plays Kontakt libraries as they were written."
-                )
-                .fill(secondary()),
-            ]
-            .gap(SPACE),
-        ),
-    };
-    let r = sheet(ui, "sheet", title, content);
-    if r.changed {
-        app.view.sheet = None;
-    }
-    r.el
-}
-
 fn keys(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     let v = &mut app.view;
     let down = icon_button(ui, "octave-down", Icon::Left, "Octave down", false);
@@ -651,16 +718,20 @@ fn keys(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     let label = caption(format!("{} – {}", note_name(range.0), note_name(range.1)))
         .tip("Every part · the keys play channel 1 or Omni · click a part to focus it")
         .id("keys-range");
+    let focused = browser::focused(&app.parts).and_then(|n| app.parts.get(n));
+    // Its script's last `message`, where Kontakt's status bar shows it.
+    let message = (focused.and_then(|p| p.face.as_ref()))
+        .map(|f| f.tree.message.as_str())
+        .filter(|m| !m.is_empty())
+        .map(|m| caption(m).fill(secondary()).lines(1).grow(1).w(0.).tip(m));
     let bar = strip(vec![
         section("Keyboard"),
         label,
-        spacer(),
+        message.unwrap_or_else(spacer),
         down.el,
         up.el,
         fold.el,
     ]);
-    // The focused part: the first one open, else the first.
-    let focused = app.parts.iter().find(|p| p.open).or(app.parts.first());
     let script: Vec<_> = focused
         .and_then(|p| p.face.as_ref())
         .map(|f| (f.tree.keybed.iter()).map(|&(n, c)| (n, crate::view::color(c))))

@@ -5,24 +5,35 @@
 //! so no lock is reachable from audio.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
-use contra_engine::{EffectRequest, Engine, Prepared, ir};
+use contra_engine::{EffectRequest, Engine, Prepared};
 
 use crate::persist::Capture;
+use crate::view::Interfaces;
 pub(crate) use files::DiskFiles;
 pub use files::user_saves;
-pub use contra_engine::{Event, HostNote, HostPattern, NoteExpression, Plan};
+pub use contra_engine::{Event, HostNote, HostPattern, NoteExpression, Plan, RenderMode, ir};
 use contra_protocol::{MAX_PARTS, MeterCells, Meters, Ring, StatCells, Stats};
 pub use contra_stream::{Store, StoreConfig};
 use contra_ui_model::UiModifiers;
+pub use picks::Pick;
 
 mod audio;
+mod command;
 mod files;
 mod hold;
+mod macros;
+mod named;
+mod native;
+mod picks;
 mod recall;
+mod requests;
+mod trim;
 pub use audio::RackAudio;
+pub use command::Command;
 pub use hold::{HOLD_STEPS, Hold};
+pub use macros::{Control, MACROS, MacroTarget, STEPS, Scale};
 
 /// A part's attack delays as auto-align measured them, by velocity range
 /// in rising order: its top velocity, then how late a first note and a
@@ -56,91 +67,13 @@ impl Mix {
     };
 }
 
-/// What the control thread asks of the audio thread.
-pub enum Command {
-    /// Put `engine` in `part`, retiring the one there.
-    Install {
-        part: usize,
-        engine: Box<Engine>,
-        mix: Mix,
-        /// Which load it is: effect units built for another never go in.
-        generation: u64,
-    },
-    /// Put the effect unit a script asked for into `part`'s slot, if the
-    /// part is still the load that asked; the box comes back holding what
-    /// it replaced, so audio frees nothing.
-    Effect {
-        part: usize,
-        generation: u64,
-        unit: Box<Option<Prepared>>,
-    },
-    Remove(usize),
-    Mix(usize, Mix),
-    /// Linear master gain.
-    Master(f32),
-    /// Tempo in quarter notes per minute.
-    Tempo(f32),
-    /// End every note on every part at once.
-    Panic,
-    /// Play `Event` on every part at the next block (the editor's keyboard
-    /// and wheels).
-    Play(Event),
-    /// How long each note into `part` waits: auto-align.
-    Hold(usize, Hold),
-    /// Read a part's persistent script cells and send them back.
-    Capture(Box<Capture>),
-    /// Recall saved values (by script slot) into `part`'s running scripts,
-    /// if the part is still that load; the box comes back to be freed.
-    Recall {
-        part: usize,
-        generation: u64,
-        saved: Box<[contra_engine::Saved]>,
-    },
-    /// Answer a part's file request ([`files`]), if the part is still
-    /// that load; the box comes back.
-    File {
-        part: usize,
-        generation: u64,
-        reply: Box<contra_engine::files::FileReply>,
-    },
-    /// Copy what a part's interface reads of its script and send it back.
-    Look(Box<crate::view::LookFrame>),
-    /// The user moved control `id` of script `slot` to `value`, holding
-    /// `keys` at the click.
-    Control {
-        part: usize,
-        slot: u8,
-        id: i32,
-        /// The cell of a table set, 0 for any other control.
-        cell: u32,
-        value: i64,
-        keys: UiModifiers,
-    },
-    /// The user typed `text` into text edit `id` of `part`'s script `slot`,
-    /// whose variable's text lives in `cell`.
-    ControlText {
-        part: usize,
-        slot: u8,
-        id: i32,
-        cell: u32,
-        text: Box<contra_engine::Text>,
-    },
-    /// The user edited a group's sound (the Sound tab).
-    Sound {
-        part: usize,
-        group: usize,
-        envelope: contra_engine::Ahdsr,
-        insert: Option<(usize, ir::Effect)>,
-    },
-}
-
 /// The channels between [`Rack`] and [`RackAudio`].
 pub struct Channels {
     pub commands: Ring<Command>,
     pub retired: Ring<Box<Engine>>,
     pub captured: Ring<Box<Capture>>,
-    /// Saved values recalled into a part, to free on the control side.
-    pub recalled: Ring<Box<[contra_engine::Saved]>>,
+    /// Parts' engines lent for a recall ([`Command::Recall`]).
+    pub recalled: Ring<Box<command::Recalling>>,
     /// Effect types the parts' scripts asked for: (part, its load, request).
     pub requests: Ring<(usize, u64, EffectRequest)>,
     /// Array files the parts' scripts asked for: (part, its load, request).
@@ -148,8 +81,14 @@ pub struct Channels {
     /// Answered file requests, by part and load: a save's values to write,
     /// the rest to free.
     pub filed: Ring<(usize, u64, Box<contra_engine::files::FileReply>)>,
+    /// Zone edits scripts made, and plans swapped out to free here.
+    pub zones: requests::ZoneRings,
+    /// Purged groups scripts asked to load: (part, its load, request).
+    pub unpurges: Ring<(usize, u64, contra_engine::Unpurge)>,
     /// Effect units swapped out, to free on the control side.
     pub units: Ring<Box<Option<Prepared>>>,
+    /// Sound edits' emptied boxes ([`Command::Sound`]), to free here.
+    pub sounds: Ring<Box<Option<(usize, ir::Effect)>>>,
     /// Typed texts the audio side wrote ([`Command::ControlText`]), to free here.
     pub typed: Ring<Box<contra_engine::Text>>,
     /// Interface reads filled on the audio side ([`Command::Look`]).
@@ -190,6 +129,11 @@ pub struct Part {
     /// Library responses its scripts loaded into convolutions after
     /// `on init`, as (rack, slot, name); put back after the types.
     pub slot_responses: Vec<(ir::RackAt, u8, String)>,
+    /// The player changed one of its library's controls since its preset
+    /// loaded: what plays is no longer the preset as saved.
+    pub modified: bool,
+    /// What its script named lately ([`Rack::take_named`]).
+    pub named: named::Named,
 }
 
 /// What the rack keeps to save a part's scripts.
@@ -203,6 +147,8 @@ pub struct ScriptState {
     pub slots: Vec<usize>,
     generation: u64,
     latest: Option<Box<Capture>>,
+    /// The capture before `latest`, sent again: its room is reused.
+    spare: Option<Box<Capture>>,
     asked: bool,
 }
 
@@ -247,6 +193,29 @@ pub struct Rack {
     generation: u64,
     /// Where scripts' array saves go ([`files`]); none writes nothing.
     saves: Option<PathBuf>,
+    /// Script file requests waiting for the player to pick ([`picks`]).
+    picks: std::collections::VecDeque<picks::Parked>,
+    /// Whether anyone looks at the parts' interfaces.
+    interfaces: Interfaces,
+    /// Snapshot recalls whose plans are being made ([`native`]).
+    native: Vec<native::Native>,
+    /// The instruments the player has, by the catalog generation they are
+    /// of: a snapshot kept apart from its library binds to one by name.
+    known: (u64, Vec<PathBuf>),
+    /// Library folders the player moved ([`crate::relink`]), and the folders
+    /// to look for them in.
+    moved: Vec<(PathBuf, PathBuf)>,
+    roots: Vec<PathBuf>,
+    /// Folders found for missing samples, waiting for a yes.
+    offers: Vec<crate::relink::Offer>,
+    /// What loading said, for the report ([`Rack::take_notices`]).
+    notices: Vec<String>,
+    /// Purged groups whose heads are being read off the control thread:
+    /// each is sent back when its reads are in.
+    woken: (
+        mpsc::Sender<requests::Woken>,
+        mpsc::Receiver<requests::Woken>,
+    ),
 }
 
 impl Rack {
@@ -261,6 +230,9 @@ impl Rack {
             // An engine queues at most 16 at once.
             requests: Ring::new(16 * MAX_PARTS),
             units: Ring::new(16 * MAX_PARTS),
+            sounds: Ring::new(256),
+            zones: requests::ZoneRings::new(MAX_PARTS),
+            unpurges: Ring::new(16 * MAX_PARTS),
             files: Ring::new(16 * MAX_PARTS),
             filed: Ring::new(16 * MAX_PARTS),
             looks: Ring::new(2 * MAX_PARTS),
@@ -275,8 +247,17 @@ impl Rack {
             store,
             parts: (0..MAX_PARTS).map(|_| None).collect(),
             saves: None,
+            picks: std::collections::VecDeque::new(),
             pending: std::collections::VecDeque::new(),
+            interfaces: Interfaces::Shown,
             generation: 0,
+            native: Vec::new(),
+            known: (0, Vec::new()),
+            moved: Vec::new(),
+            roots: Vec::new(),
+            offers: Vec::new(),
+            notices: Vec::new(),
+            woken: mpsc::channel(),
         };
         (rack, audio)
     }
@@ -319,14 +300,39 @@ impl Rack {
     /// When the file is not an instrument this can read, or `part` is past
     /// the rack.
     pub fn load(&mut self, part: usize, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(progress) = self.store.progress() {
+            progress.begin();
+        }
         // A preset of the instrument the part plays recalls into it,
         // without reading the instrument.
-        if let Some(preset) = crate::instrument::preset(path)
-            && self.recall(part, &preset, Some(path))
-        {
-            return Ok(());
+        if let Some(done) = self.load_preset(part, path) {
+            return done;
         }
-        self.load_ir(part, crate::instrument::read(path)?, Some(path.to_owned()))
+        let instrument = crate::instrument::read_saved(path, &[], &self.known.1)?;
+        self.load_ir(part, instrument, Some(path.to_owned()))
+    }
+
+    /// Takes the instruments of `browser`'s catalog as the ones a snapshot
+    /// may bind to ([`crate::instrument::preset`]), when it changed.
+    pub fn know(&mut self, browser: &crate::browser::Browser) {
+        if self.known.0 != browser.generation {
+            self.known = (browser.generation, browser.instruments());
+        }
+        self.moved.clone_from(&browser.prefs.moved);
+        contra_format::set_moved(&self.moved);
+        self.roots = browser.prefs.roots.iter().map(|r| r.path.clone()).collect();
+    }
+
+    /// What loads said since the last call, in plain text.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
+
+    /// The folder offered by report line `line`, taken: the part it is for,
+    /// its instrument, and the old and new folders.
+    pub fn take_offer(&mut self, line: &str) -> Option<crate::relink::Offer> {
+        let n = self.offers.iter().position(|o| o.line == line)?;
+        Some(self.offers.remove(n))
     }
 
     /// [`Rack::load`], with each instrument script's saved values replaced
@@ -344,7 +350,10 @@ impl Rack {
         slot_types: &[(ir::RackAt, u8, u16)],
         slot_responses: &[(ir::RackAt, u8, String)],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut instrument = crate::instrument::read(path)?;
+        if let Some(progress) = self.store.progress() {
+            progress.begin();
+        }
+        let mut instrument = crate::instrument::read_saved(path, scripts, &self.known.1)?;
         for (script, saved) in instrument.scripts.iter_mut().zip(scripts) {
             script.saved.clone_from(saved);
         }
@@ -390,26 +399,69 @@ impl Rack {
         if part >= MAX_PARTS {
             return Err(format!("part {part} is past the rack's {MAX_PARTS}").into());
         }
+        let mut instrument = instrument;
+        crate::relink::apply(&self.moved, &mut instrument);
+        // The files its scripts saved come back as the bank's own.
+        let own = picks::script_files(self.saves.as_deref(), instrument.source_path.as_deref());
+        for s in (instrument.scripts.iter_mut()).filter(|s| s.dialect == ir::Dialect::Lua) {
+            s.data.extend(own.iter().cloned());
+        }
         let saved = instrument.scripts.iter().map(|s| s.saved.clone()).collect();
         let source = instrument.source_path.clone();
         let slots = instrument.scripts.iter().map(|s| s.slot).collect();
+        let waves = crate::ui::Waves::of(&instrument);
         let mut loaded = crate::instrument::build(instrument, self.rate, &mut self.store);
+        // The translated program is gone: its pages go back to the system
+        // instead of staying resident as the allocator's free lists.
+        trim::release_freed_memory();
+        // A store set to defer heads read them here, behind the part.
+        if let Some(heads) = self.store.take_heads() {
+            let lanes = std::thread::available_parallelism().map_or(4, |n| n.get() * 3);
+            // A failed spawn leaves the heads to stream on demand.
+            let _ = std::thread::Builder::new()
+                .name("contra-heads".into())
+                .spawn(move || heads.load(lanes));
+        }
+        if let Some(progress) = self.store.progress() {
+            progress.stage(contra_protocol::LoadStage::Interface);
+        }
         let saves = self.saves.clone();
         for s in loaded.plan.scripts.iter_mut().filter(|s| s.files.is_some()) {
             s.files = Some(Arc::new(DiskFiles {
                 saves: saves.clone(),
             }));
         }
-        let slot_types: Vec<_> = (slot_types.iter().copied())
-            .filter(|&(at, slot, ty)| loaded.plan.load_type(at, slot, ty))
-            .collect();
-        let slot_responses: Vec<_> = (slot_responses.iter())
-            .filter(|(at, slot, name)| loaded.plan.load_response(*at, *slot, name, self.rate))
-            .cloned()
-            .collect();
+        self.offers.retain(|o| o.part != part);
+        for (summary, first) in crate::relink::missing(&loaded.diagnostics) {
+            self.notices
+                .push(format!("part {} ({}): {summary}", part + 1, loaded.name));
+            if let Some((from, to)) = crate::relink::find(&self.roots, &first) {
+                let line = format!(
+                    "part {} ({}): found at {}, use it?",
+                    part + 1,
+                    loaded.name,
+                    to.display()
+                );
+                self.notices.push(line.clone());
+                let path = path.clone().unwrap_or_default();
+                self.offers.push(crate::relink::Offer {
+                    line,
+                    part,
+                    path,
+                    from,
+                    to,
+                });
+            }
+        }
+        let (slot_types, slot_responses) =
+            recall::put_slots(&mut loaded.plan, slot_types, slot_responses, self.rate);
         let plan = Arc::new(loaded.plan);
-        let engine = Engine::new(Arc::clone(&plan), self.store.client(), self.rate);
-        let view = crate::view::View::of(&loaded.faces, &engine, path.as_deref());
+        let mut engine = Engine::new(plan, self.store.client(), self.rate);
+        requests::init_tables(&mut engine, &self.store.client());
+        // Its library's resources are found near the instrument file.
+        let near = source.as_deref().or(path.as_deref());
+        let view = crate::view::View::of(&loaded.faces, &loaded.pages, &engine, near)
+            .map(|view| view.with_waves(waves));
         let sounds = crate::sound::Sounds::new(self.rate, engine.group_sounds());
         let part_info = Part {
             source,
@@ -418,7 +470,10 @@ impl Rack {
             sounds,
             slot_types,
             slot_responses,
-            plan: Some(plan),
+            modified: false,
+            named: named::Named::default(),
+            // With the zone edits its `on init` made.
+            plan: Some(Arc::clone(engine.plan())),
             delays: None,
             path,
             name: loaded.name,
@@ -502,13 +557,38 @@ impl Rack {
         value: f64,
         keys: UiModifiers,
     ) {
-        let Some(Some(p)) = self.parts.get(part) else {
+        let Some(Some(p)) = self.parts.get_mut(part) else {
             return;
         };
-        let Some(view) = p.view.as_ref() else {
+        let Some(view) = p.view.as_mut() else {
             return;
         };
-        if let Some((slot, id, value)) = view.control(widget, value) {
+        p.named.touch();
+        if let Some(set) = view.tap(widget, value) {
+            let vars = &p.script.vars;
+            p.modified |= set.iter().any(|&(slot, id, _)| saves(vars, slot, id));
+            for (slot, id, value) in set {
+                let cell = 0;
+                self.send(Command::Control {
+                    part,
+                    slot,
+                    id,
+                    cell,
+                    value,
+                    keys,
+                });
+            }
+        } else if let Some((slot, n)) = view.widget(widget) {
+            p.modified = true;
+            self.send(Command::Widget {
+                part,
+                slot,
+                n,
+                value,
+                cell,
+            });
+        } else if let Some((slot, id, value)) = view.control(widget, value) {
+            p.modified |= saves(&p.script.vars, slot, id);
             self.send(Command::Control {
                 part,
                 slot,
@@ -523,9 +603,11 @@ impl Rack {
     /// The user typed `text` into text edit `widget` of `part`'s interface:
     /// its variable reads it, then its callbacks run.
     pub fn control_text(&mut self, part: usize, widget: usize, text: &str) {
-        let Some(Some(p)) = self.parts.get(part) else {
+        let Some(Some(p)) = self.parts.get_mut(part) else {
             return;
         };
+        p.modified = true;
+        p.named.touch();
         let Some(view) = p.view.as_ref() else {
             return;
         };
@@ -568,22 +650,9 @@ impl Rack {
                 part,
                 group,
                 envelope,
-                insert,
+                insert: Box::new(insert),
             });
         }
-    }
-
-    /// Records `part`'s measured attack delay (auto-align), saved with it.
-    pub fn set_delays(&mut self, part: usize, delays: Delays) {
-        if let Some(Some(p)) = self.parts.get_mut(part) {
-            p.delays = Some(delays);
-        }
-    }
-
-    /// Holds each note into `part` by its `hold` from the next block on,
-    /// so it sounds in time with a later part (auto-align).
-    pub fn set_hold(&mut self, part: usize, hold: Hold) {
-        self.send(Command::Hold(part, hold));
     }
 
     pub fn set_master(&mut self, gain: f32) {
@@ -622,86 +691,96 @@ impl Rack {
         self.saves = Some(root);
     }
 
+    /// Whether the next ticks keep the parts' interfaces current.
+    pub fn show_interfaces(&mut self, interfaces: Interfaces) {
+        self.interfaces = interfaces;
+    }
+
     /// Frees what the audio thread let go of and resends refused commands.
     /// Call it from the control thread now and then.
     pub fn tick(&mut self) {
-        while self.channels.retired.recv().is_some() {}
-        while self.channels.units.recv().is_some() {}
-        while self.channels.typed.recv().is_some() {}
-        while self.channels.recalled.recv().is_some() {}
-        self.files();
-        // Effect types scripts loaded: built here, off the audio thread.
-        while let Some((part, generation, request)) = self.channels.requests.recv() {
-            let Some(Some(p)) = self.parts.get_mut(part) else {
-                continue;
-            };
-            if p.script.generation != generation {
-                continue;
-            }
-            let here = (request.at, request.slot);
-            let (asked, ty) = (request.response.is_some(), request.ty);
-            let unit = Prepared::new(request, p.plan.as_deref(), self.rate);
-            // A response that fails to decode leaves the slot playing what it
-            // had, so the save keeps what it had too.
-            if let Some(name) = unit.response_name() {
-                p.slot_responses.retain(|&(at, slot, _)| (at, slot) != here);
-                p.slot_responses.push((here.0, here.1, name.to_owned()));
-            } else if let Some(ty) = ty.filter(|_| !asked) {
-                // None: the slot's own effect built again (a reverb's
-                // network), which saves no type.
-                p.slot_types.retain(|&(at, slot, _)| (at, slot) != here);
-                p.slot_types.push((here.0, here.1, ty));
-                p.slot_responses.retain(|&(at, slot, _)| (at, slot) != here);
-            }
-            let unit = Box::new(Some(unit));
-            self.send(Command::Effect {
-                part,
-                generation,
-                unit,
-            });
+        let mut dropped = false;
+        while self.channels.retired.recv().is_some() {
+            dropped = true;
         }
+        if dropped {
+            trim::release_freed_memory();
+        }
+        while self.channels.units.recv().is_some() {}
+        while self.channels.sounds.recv().is_some() {}
+        while self.channels.typed.recv().is_some() {}
+        while let Some(recalling) = self.channels.recalled.recv() {
+            self.recalled(*recalling);
+        }
+        self.files();
+        // Effect types and zone edits scripts asked for, built here.
+        self.native_ready();
+        self.script_requests();
         // The interfaces catch up with what their scripts changed, and ask
         // again: the editor shows each at most one tick late.
         while let Some(frame) = self.channels.looks.recv() {
-            if let Some(Some(p)) = self.parts.get_mut(frame.part)
-                && p.script.generation == frame.generation
-                && let Some(view) = p.view.as_mut()
-            {
+            let Some(Some(p)) = self.parts.get_mut(frame.part) else {
+                continue;
+            };
+            let Some(view) = p.view.as_mut() else {
+                continue;
+            };
+            if p.script.generation == frame.generation {
                 view.refresh(&p.faces, p.path.as_deref(), frame);
+                p.named.look(view.tree());
+            } else if view.frame.is_none() {
+                // A recall kept this view and moved its generation on: the
+                // frame goes back unread, or the view could never ask again.
+                view.frame = Some(frame);
             }
         }
-        let looks: Vec<_> = (self.parts.iter_mut().enumerate())
-            .filter_map(|(n, p)| {
-                let p = p.as_mut()?;
-                let mut frame = p.view.as_mut()?.frame.take()?;
-                (frame.part, frame.generation) = (n, p.script.generation);
-                Some(frame)
-            })
-            .collect();
-        for frame in looks {
+        let looked = match self.interfaces {
+            Interfaces::Shown => self.parts.len(),
+            Interfaces::Hidden => 0,
+        };
+        for n in 0..looked {
+            let Some(Some(p)) = self.parts.get_mut(n) else {
+                continue;
+            };
+            let Some(mut frame) = p.view.as_mut().and_then(|v| v.frame.take()) else {
+                continue;
+            };
+            (frame.part, frame.generation) = (n, p.script.generation);
             self.send(Command::Look(frame));
         }
-        while let Some(c) = self.channels.captured.recv() {
+        while let Some(mut c) = self.channels.captured.recv() {
             if let Some(Some(p)) = self.parts.get_mut(c.part)
                 && p.script.generation == c.generation
             {
+                let files = c.take_files();
+                let source = p.source.as_deref();
+                let failed = picks::write_script_files(self.saves.as_deref(), source, files);
+                p.diagnostics
+                    .extend(failed.into_iter().map(|detail| ir::Diagnostic {
+                        impact: ir::Impact::Cosmetic,
+                        feature: "preset".into(),
+                        detail,
+                    }));
                 p.script.asked = false;
-                p.script.latest = Some(c);
+                crate::persist::landed(c, &mut p.script.latest, &mut p.script.spare);
             }
         }
         // Ask again for every part with persistent values: what a save
         // writes is at most one tick old.
-        let ask: Vec<_> = (self.parts.iter_mut().enumerate())
-            .filter_map(|(n, p)| {
-                let s = &mut p.as_mut()?.script;
-                if s.asked || s.vars.iter().all(|v| v.vars.is_empty()) {
-                    return None;
-                }
-                s.asked = true;
-                Some(Capture::new(n, s.generation, &s.vars))
-            })
-            .collect();
-        for c in ask {
+        for n in 0..self.parts.len() {
+            let Some(Some(p)) = self.parts.get_mut(n) else {
+                continue;
+            };
+            let s = &mut p.script;
+            let nothing =
+                |v: &crate::persist::Vars| v.vars.is_empty() && v.widgets.is_empty() && !v.state;
+            if s.asked || s.vars.iter().all(nothing) {
+                continue;
+            }
+            s.asked = true;
+            let spare = s.spare.take().filter(|c| c.generation == s.generation);
+            let mut c = spare.unwrap_or_else(|| Capture::new(n, s.generation, &s.vars));
+            c.after(s.latest.as_deref());
             self.send(Command::Capture(c));
         }
         while let Some(c) = self.pending.pop_front() {
@@ -753,6 +832,12 @@ impl Rack {
         }
     }
 
+    /// What host macro `n` moves on the audio side at its frame; None
+    /// leaves it to the control tick.
+    pub fn set_macro(&mut self, n: usize, target: Option<MacroTarget>) {
+        self.send(Command::Macro { n, target });
+    }
+
     fn send(&mut self, command: Command) {
         if !self.pending.is_empty() {
             self.pending.push_back(command);
@@ -761,5 +846,41 @@ impl Rack {
         if let Err(c) = self.channels.commands.send(command) {
             self.pending.push_back(c);
         }
+    }
+}
+
+/// A preset of the part saves control `id` of script `slot`: its value is
+/// persistent, and not the instrument's alone (a page tab, a view's
+/// settings), so moving it changes what plays as that preset.
+fn saves(vars: &[crate::persist::Vars], slot: u8, id: i32) -> bool {
+    let of = vars.get(usize::from(slot)).map(|v| v.vars.as_slice());
+    of.unwrap_or_default()
+        .iter()
+        .any(|v| v.control == Some(id) && !v.instrument)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::persist::{Var, Vars};
+
+    #[test]
+    fn only_a_control_a_snapshot_saves_marks_the_preset_changed() {
+        let var = |control, instrument| Var {
+            name: "$x".into(),
+            real: false,
+            text: false,
+            base: 0,
+            len: 1,
+            control: Some(control),
+            instrument,
+        };
+        let vars = [Vars {
+            vars: vec![var(1, false), var(2, true)],
+            ..Vars::default()
+        }];
+        assert!(super::saves(&vars, 0, 1));
+        assert!(!super::saves(&vars, 0, 2), "a page tab");
+        assert!(!super::saves(&vars, 0, 3), "not persistent");
+        assert!(!super::saves(&vars, 1, 1), "no such script");
     }
 }

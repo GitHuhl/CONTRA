@@ -20,10 +20,18 @@ use std::sync::{Arc, mpsc};
 use contra_ui_model::{AssetRef, ImageMeta, Orientation};
 
 mod cache;
+mod canvas;
 mod discovery;
+mod metrics;
 mod outline;
+mod squash;
 pub mod stock;
+mod vector;
+pub use canvas::canvas;
+pub use metrics::em_per_height;
 use mui::prelude::{Font, Image};
+pub use mui::scene::Vector;
+pub use squash::{MIN_SQUASH, line_width, squashed};
 
 /// Reads a library-relative path; `None` when there is no such file.
 pub type Read = dyn Fn(&str) -> Option<Vec<u8>> + Send;
@@ -36,12 +44,20 @@ struct Job {
     scale: f32,
     /// A picture font: decoded at its own pixels, its glyphs cut by marker.
     font: bool,
-    outline: bool,
+    whole: Option<Whole>,
+}
+
+/// A file read and parsed whole, once.
+#[derive(Clone, Copy)]
+enum Whole {
+    Outline,
+    Vector,
 }
 
 enum Done {
     Image(AssetRef, u32, f32, bool, Option<Arc<Image>>),
     Outline(AssetRef, Option<Font>),
+    Vector(AssetRef, Option<Arc<Vector>>),
 }
 
 /// A picture font's 256 glyphs, in Windows-1252 order.
@@ -67,6 +83,7 @@ pub struct Pictures {
     last: HashMap<AssetRef, Arc<Image>>,
     fonts: HashMap<AssetRef, Option<Glyphs>>,
     outlines: HashMap<AssetRef, Option<Font>>,
+    vectors: HashMap<AssetRef, Option<Arc<Vector>>>,
     pending: usize,
     /// The scale the frames in `ready` decoded at.
     scale: f32,
@@ -91,13 +108,21 @@ impl Pictures {
             let mut decoded = HashMap::<u64, Option<Arc<Image>>>::new();
             let mut scale = 1.;
             for job in inbox {
-                if job.outline {
+                if let Some(whole) = job.whole {
                     let bytes = match job.path.as_str() {
                         "@stock/raldo" => stock::outline(),
                         _ => read(&job.path),
                     };
-                    let font = bytes.and_then(|bytes| Font::new(bytes).ok());
-                    if outbox.send(Done::Outline(job.asset, font)).is_err() {
+                    let done = match whole {
+                        Whole::Outline => {
+                            Done::Outline(job.asset, bytes.and_then(|b| Font::new(b).ok()))
+                        }
+                        Whole::Vector => Done::Vector(
+                            job.asset,
+                            bytes.and_then(|b| vector::vector(&b)).map(Arc::new),
+                        ),
+                    };
+                    if outbox.send(done).is_err() {
                         break;
                     }
                     ARRIVED.store(true, Ordering::Release);
@@ -107,17 +132,28 @@ impl Pictures {
                     decoded.clear();
                     scale = job.scale;
                 }
+                // Decoded at its own pixels, `got` of them a picture pixel,
+                // then resampled to the device unless it is a picture font.
+                let finish = |(image, got): (Image, f32)| {
+                    if job.font {
+                        return Some(Arc::new(image));
+                    }
+                    let image = look(&image).unwrap_or(image);
+                    at(image, job.scale / got).map(Arc::new)
+                };
                 let image = if job.path.starts_with("@stock/") {
-                    stock::frame(&job.path, job.meta, job.frame).and_then(|image| {
-                        if job.font {
-                            Some(Arc::new(image))
-                        } else {
-                            let image = look(&image).unwrap_or(image);
-                            at_integer(image, job.scale).map(Arc::new)
-                        }
-                    })
+                    stock::frame(&job.path, job.meta, job.frame).and_then(|i| finish((i, 1.)))
                 } else {
-                    read(&job.path).and_then(|bytes| {
+                    // Above 1x, the library's double-size variant when it
+                    // ships one (`name@2x.png`).
+                    let double = (job.scale > 1. && !job.font)
+                        .then(|| doubled(&job.path).and_then(|p| read(&p)))
+                        .flatten();
+                    let (bytes, density) = match double {
+                        Some(bytes) => (Some(bytes), 2.),
+                        None => (read(&job.path), 1.),
+                    };
+                    bytes.and_then(|bytes| {
                         let mut h = std::hash::DefaultHasher::new();
                         bytes.hash(&mut h);
                         let axis = job.meta.axis == Orientation::Vertical;
@@ -125,12 +161,9 @@ impl Pictures {
                         decoded
                             .entry(h.finish())
                             .or_insert_with(|| {
-                                let image = decode(&bytes, job.meta, job.frame)?;
-                                if job.font {
-                                    return Some(Arc::new(image));
-                                }
-                                let image = look(&image).unwrap_or(image);
-                                at_integer(image, job.scale).map(Arc::new)
+                                let want = if job.font { 1. } else { job.scale / density };
+                                let (image, got) = decode(&bytes, job.meta, job.frame, want)?;
+                                finish((image, got * density))
                             })
                             .clone()
                     })
@@ -153,6 +186,7 @@ impl Pictures {
             last: HashMap::new(),
             fonts: HashMap::new(),
             outlines: HashMap::new(),
+            vectors: HashMap::new(),
             pending: 0,
             scale: 1.,
         }
@@ -190,7 +224,7 @@ impl Pictures {
                     meta,
                     scale,
                     font: false,
-                    outline: false,
+                    whole: None,
                 };
                 if self.jobs.send(job).is_ok() {
                     self.pending += 1;
@@ -211,6 +245,11 @@ impl Pictures {
                 Done::Outline(asset, font) => {
                     arrived |= font.is_some();
                     self.outlines.insert(asset, font);
+                    continue;
+                }
+                Done::Vector(asset, vector) => {
+                    arrived |= vector.is_some();
+                    self.vectors.insert(asset, vector);
                     continue;
                 }
             };
@@ -246,7 +285,7 @@ impl Pictures {
             meta: ImageMeta::default(),
             scale: 1.,
             font: true,
-            outline: false,
+            whole: None,
         };
         if self.jobs.send(job).is_ok() {
             self.pending += 1;
@@ -267,7 +306,33 @@ impl Pictures {
             meta: ImageMeta::default(),
             scale: 1.,
             font: false,
-            outline: true,
+            whole: Some(Whole::Outline),
+        };
+        if self.jobs.send(job).is_ok() {
+            self.pending += 1;
+        }
+        None
+    }
+
+    /// The SVG `asset` at `path` as vector paths, parsed on the worker;
+    /// `None` until then, and for any other file or an SVG paths cannot
+    /// say, which [`Pictures::frame`] draws as pixels.
+    pub fn vector(&mut self, asset: AssetRef, path: &str) -> Option<Arc<Vector>> {
+        if !path.to_ascii_lowercase().ends_with(".svg") {
+            return None;
+        }
+        if let Some(vector) = self.vectors.get(&asset) {
+            return vector.clone();
+        }
+        self.vectors.insert(asset, None);
+        let job = Job {
+            asset,
+            frame: 0,
+            path: path.to_owned(),
+            meta: ImageMeta::default(),
+            scale: 1.,
+            font: false,
+            whole: Some(Whole::Vector),
         };
         if self.jobs.send(job).is_ok() {
             self.pending += 1;
@@ -349,11 +414,20 @@ pub fn glyph(c: char) -> usize {
 /// Above this a PNG is not a UI picture (v2's bound).
 const LIMIT: usize = 32 << 20;
 
-/// Frame `n` of a PNG strip of `meta.frames` along `meta.axis`, as RGBA8.
-/// A vertical strip stops decoding at the frame's last row.
-fn decode(bytes: &[u8], meta: ImageMeta, n: u32) -> Option<Image> {
+/// Frame `n` of a PNG strip of `meta.frames` along `meta.axis`, as RGBA8,
+/// with how many of its pixels make a file pixel: 1, but an SVG is drawn as
+/// vectors at `scale`. A vertical strip stops decoding at the frame's last
+/// row.
+fn decode(bytes: &[u8], meta: ImageMeta, n: u32, scale: f32) -> Option<(Image, f32)> {
     if bytes.starts_with(&[0xff, 0xd8]) {
-        return jpeg(bytes);
+        return jpeg(bytes).map(|i| (i, 1.));
+    }
+    if bytes.get(..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return webp(bytes).map(|i| (i, 1.));
+    }
+    let head = bytes.get(..bytes.len().min(256)).unwrap_or_default();
+    if head.windows(4).any(|w| w == b"<svg") {
+        return svg(bytes, scale).map(|i| (i, scale));
     }
     let mut decoder =
         png::Decoder::new_with_limits(Cursor::new(bytes), png::Limits { bytes: LIMIT });
@@ -417,7 +491,13 @@ fn decode(bytes: &[u8], meta: ImageMeta, n: u32) -> Option<Image> {
             }
         }
     }
-    Image::rgba(fw as u32, fh as u32, out)
+    Image::rgba(fw as u32, fh as u32, out).map(|i| (i, 1.))
+}
+
+/// `path` with `@2x` before its extension.
+fn doubled(path: &str) -> Option<String> {
+    let (stem, ext) = path.rsplit_once('.')?;
+    (!stem.ends_with("@2x") && !ext.contains('/')).then(|| format!("{stem}@2x.{ext}"))
 }
 
 /// `scale` up to the next quarter, between a quarter and four.
@@ -430,8 +510,9 @@ fn quarter(scale: f64) -> f32 {
     }
 }
 
-/// `image` at `scale`, unchanged at 1.
-fn at(image: Image, scale: f32) -> Option<Image> {
+/// `image` at `scale` through [`resample`], unchanged at 1: never
+/// nearest-neighbour, which turns a fractional scale into uneven blocks.
+pub fn at(image: Image, scale: f32) -> Option<Image> {
     if scale == 1. {
         return Some(image);
     }
@@ -439,28 +520,15 @@ fn at(image: Image, scale: f32) -> Option<Image> {
     resample(&image, size(image.width), size(image.height))
 }
 
-/// Integer-enlarge pictures without interpolating; the painter downsamples
-/// them to the destination. Shrinking uses Catmull-Rom resampling.
-pub fn at_integer(image: Image, scale: f32) -> Option<Image> {
-    if scale <= 1. {
-        return at(image, scale);
+/// The `size` pixels of `img` from `at`.
+pub fn crop(img: &Image, (x, y): (u32, u32), (w, h): (u32, u32)) -> Option<Arc<Image>> {
+    let stride = img.width as usize * 4;
+    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    for row in y as usize..(y + h) as usize {
+        let at = row * stride + x as usize * 4;
+        rgba.extend_from_slice(img.rgba.get(at..at + w as usize * 4)?);
     }
-    let factor = scale.ceil() as u32;
-    let (w, h) = (
-        image.width.checked_mul(factor)?,
-        image.height.checked_mul(factor)?,
-    );
-    let pixels = image.rgba.as_chunks::<4>().0;
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
-    for y in 0..h {
-        let sy = u64::from(y) * u64::from(image.height) / u64::from(h);
-        for x in 0..w {
-            let sx = u64::from(x) * u64::from(image.width) / u64::from(w);
-            let index = usize::try_from(sy * u64::from(image.width) + sx).ok()?;
-            out.extend_from_slice(pixels.get(index)?);
-        }
-    }
-    Image::rgba(w, h, out)
+    Image::rgba(w, h, rgba).map(Arc::new)
 }
 
 /// `img` at `w` × `h` through a Catmull-Rom filter, widened when it
@@ -571,9 +639,64 @@ fn jpeg(bytes: &[u8]) -> Option<Image> {
     Image::rgba(w, h, decoder.decode().ok()?)
 }
 
+/// A WebP (Kontakt 8 `native_ui` artwork), as RGBA8.
+fn webp(bytes: &[u8]) -> Option<Image> {
+    let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+    let (w, h) = decoder.dimensions();
+    let size = decoder.output_buffer_size()?;
+    if size > LIMIT {
+        return None;
+    }
+    let mut px = vec![0; size];
+    decoder.read_image(&mut px).ok()?;
+    if !decoder.has_alpha() {
+        px = px
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
+            .collect();
+    }
+    Image::rgba(w, h, px)
+}
+
+/// Rasters an SVG as vectors at `scale` device pixels a picture pixel:
+/// Kontakt 8 `native_ui` icons are vector art.
+fn svg(bytes: &[u8], scale: f32) -> Option<Image> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let (w, h) = (
+        (size.width() * scale).ceil() as u32,
+        (size.height() * scale).ceil() as u32,
+    );
+    if (w as usize) * (h as usize) * 4 > LIMIT {
+        return None;
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
+    let scale = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, scale, &mut pixmap.as_mut());
+    let px: Vec<u8> = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    Image::rgba(pixmap.width(), pixmap.height(), px)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_svg_rasters_as_vectors_at_its_device_scale() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2" fill="#ff0000"/></svg>"##;
+        let image = decode(svg, ImageMeta::default(), 0, 1.5).map(|(i, k)| (i.width, i.height, k));
+        assert_eq!(image, Some((6, 3, 1.5)));
+    }
 
     /// A picture font cut at its red markers: 256 glyphs of their own
     /// widths, the marker row dropped; characters map by Windows-1252.
@@ -635,7 +758,7 @@ mod tests {
     #[test]
     fn a_jpeg_decodes_whole_as_a_still() {
         let bytes = include_bytes!("../tests/fixtures/cover.jpg");
-        let image = decode(bytes, ImageMeta::default(), 0);
+        let image = decode(bytes, ImageMeta::default(), 0, 1.).map(|(i, _)| i);
         let image = image
             .as_ref()
             .map(|i| (i.width, i.height, i.rgba.get(..4).map(<[u8]>::to_vec)));
@@ -678,7 +801,7 @@ mod tests {
             frames: 2,
             ..ImageMeta::default()
         };
-        let down = decode(&bytes, meta, 1);
+        let down = decode(&bytes, meta, 1, 1.).map(|(i, _)| i);
         assert_eq!(down.as_ref().map(|i| (i.width, i.height)), Some((2, 2)));
         assert_eq!(
             down.and_then(|i| i.rgba.get(..4).map(<[u8]>::to_vec)),
@@ -689,7 +812,7 @@ mod tests {
             ..meta
         };
         assert_eq!(
-            decode(&bytes, across, 1).map(|i| (i.width, i.height)),
+            decode(&bytes, across, 1, 1.).map(|(i, _)| (i.width, i.height)),
             Some((1, 4))
         );
     }
@@ -734,16 +857,27 @@ mod tests {
     }
 
     #[test]
-    fn picture_upscaling_preserves_source_pixels() {
-        let source = Image::rgba(2, 1, vec![255, 255, 255, 255, 0, 0, 0, 0]);
-        let scaled = source.and_then(|image| at_integer(image, 1.5));
-        assert_eq!(
-            scaled.map(|image| image.rgba.to_vec()),
-            Some(vec![
-                255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255,
-                255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
-            ])
-        );
+    fn above_1x_the_double_size_variant_is_drawn() {
+        let one = png(1, 1, &[255, 0, 0, 255]);
+        let two = png(2, 2, &[0, 255, 0, 255].repeat(4));
+        let mut pictures = Pictures::new(Box::new(move |p| match p {
+            "k.png" => Some(one.clone()),
+            "k@2x.png" => Some(two.clone()),
+            _ => None,
+        }));
+        let mut at = |scale| {
+            for _ in 0..1000 {
+                pictures.poll();
+                let image = pictures.frame(AssetRef(0), "k.png", ImageMeta::default(), 0, scale);
+                if let Some(i) = image.filter(|i| f64::from(i.width) == scale.ceil()) {
+                    return i.rgba.get(..4).map(<[u8]>::to_vec);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            None
+        };
+        assert_eq!(at(2.), Some(vec![0, 255, 0, 255]));
+        assert_eq!(at(1.), Some(vec![255, 0, 0, 255]));
     }
 
     #[test]

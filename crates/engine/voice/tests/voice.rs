@@ -3,7 +3,7 @@ use std::sync::Arc;
 use contra_stream::{
     BlobKey, Encoding, MemSource, PAGE_FRAMES, SampleFmt, Store, StoreConfig, StreamClient,
 };
-use contra_voice::{Ahdsr, FadeTarget, KeyUp, Loop, Region, Voice, VoiceStart};
+use contra_voice::{Ahdsr, FadeTarget, KeyUp, Loop, Region, Scratch, Voice, VoiceStart};
 
 const FMT: SampleFmt = SampleFmt {
     encoding: Encoding::F32,
@@ -32,13 +32,14 @@ fn ramp_region(store: &mut Store, frames: u64, pinned: u64) -> std::io::Result<R
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     })
 }
 
 fn start(region: Region, step: f64, envelope: Ahdsr) -> VoiceStart {
     VoiceStart {
+        speed: 1.0,
         region,
         step,
         gain: [[1.0, 0.0], [0.0, 1.0]],
@@ -51,7 +52,7 @@ fn start(region: Region, step: f64, envelope: Ahdsr) -> VoiceStart {
 fn render(voice: &mut Voice, client: &StreamClient, frames: usize) -> Vec<f32> {
     let mut out = vec![[0.0; 2]; frames];
     for (i, block) in out.chunks_mut(128).enumerate() {
-        voice.render(client, (i * 128) as u64, block);
+        voice.render(&mut Scratch::allocate(), client, (i * 128) as u64, block);
     }
     out.iter().map(|f| f[0]).collect()
 }
@@ -103,7 +104,7 @@ fn a_page_not_in_memory_is_silent_and_the_cursor_keeps_time() {
         Ahdsr::GATE,
     ));
     let mut out = vec![[0.0; 2]; 2 * PAGE_FRAMES as usize];
-    voice.render(&client, 0, &mut out);
+    voice.render(&mut Scratch::allocate(), &client, 0, &mut out);
     assert_eq!(out[10][0], 10.0 / 65_536.0);
     assert!(voice.missing_frames() > 0);
     // Late audio never shifts the timeline: the cursor is exactly where the clock is.
@@ -120,7 +121,8 @@ fn a_loop_sustains_past_the_sample_end() {
         end: 600,
         crossfade: 0,
         ..Loop::default()
-    }];
+    }]
+    .into();
     let mut voice = Voice::allocate();
     voice.start(start(region, 1.0, Ahdsr::GATE));
     let out = render(&mut voice, &client, 5000);
@@ -141,7 +143,8 @@ fn a_loop_crossfade_blends_the_tail_into_the_audio_before_the_start() {
         end: 600,
         crossfade: 40,
         ..Loop::default()
-    }];
+    }]
+    .into();
     let mut voice = Voice::allocate();
     voice.start(start(region, 1.0, Ahdsr::GATE));
     let out = render(&mut voice, &client, 800);
@@ -180,7 +183,8 @@ fn release_ends_the_voice() {
         end: 1000,
         crossfade: 0,
         ..Loop::default()
-    }];
+    }]
+    .into();
     let mut voice = Voice::allocate();
     voice.start(start(
         region,
@@ -200,7 +204,7 @@ fn release_ends_the_voice() {
 fn looped_output(store: &mut Store, loops: Vec<Loop>, frames: usize) -> std::io::Result<Vec<f32>> {
     let client = store.client();
     let mut region = ramp_region(store, 1000, 1000)?;
-    region.loops = loops;
+    region.loops = loops.into();
     let mut voice = Voice::allocate();
     voice.start(start(region, 1.0, Ahdsr::GATE));
     Ok(render(&mut voice, &client, frames))
@@ -309,7 +313,8 @@ fn an_until_release_loop_repeats_until_release_then_plays_on() {
         end: 200,
         until_release: true,
         ..Loop::default()
-    }];
+    }]
+    .into();
     let mut voice = Voice::allocate();
     voice.start(start(
         region,
@@ -321,9 +326,9 @@ fn an_until_release_loop_repeats_until_release_then_plays_on() {
         },
     ));
     let mut out = vec![[0.0; 2]; 1400];
-    voice.render(&client, 0, &mut out[..500]);
+    voice.render(&mut Scratch::allocate(), &client, 0, &mut out[..500]);
     voice.release();
-    voice.render(&client, 500, &mut out[500..]);
+    voice.render(&mut Scratch::allocate(), &client, 500, &mut out[500..]);
     let out: Vec<f32> = out.iter().map(|f| f[0]).collect();
     // Values are checked to 0.2%: the release fade scales them slightly.
     let near = |got: f32, want: f32| assert!((got - want).abs() <= want * 0.002, "{got} vs {want}");
@@ -375,6 +380,11 @@ fn a_table_plays_its_cycle_at_the_step_and_morphs_by_position() {
         let read = Read {
             position,
             phase: 0.0,
+            phase_random: 0.0,
+            gain: 1.0,
+            inharmonic: contra_voice::Inharmonic::OFF,
+            modosc: contra_voice::ModOsc::OFF,
+            rate: 48_000.0,
             warps: [Warp::OFF; 2],
         };
         let region = Region {
@@ -383,7 +393,7 @@ fn a_table_plays_its_cycle_at_the_step_and_morphs_by_position() {
             sample: Arc::clone(&sample),
             start: 0,
             end: frames,
-            loops: vec![],
+            loops: Default::default(),
             reverse: false,
         };
         let mut voice = Voice::allocate();
@@ -415,11 +425,11 @@ fn trace_peak_is_isolated_from_existing_mix_and_resets_each_render() {
         Ahdsr::GATE,
     ));
     let mut block = [[1.0; 2]; 128];
-    voice.render(&client, 0, &mut block);
+    voice.render(&mut Scratch::allocate(), &client, 0, &mut block);
     let expected = 127.0 / 65_536.0;
     assert!((voice.last_peak() - expected).abs() < 1e-7);
     let mut next = [[0.0; 2]; 128];
-    voice.render(&client, 128, &mut next);
+    voice.render(&mut Scratch::allocate(), &client, 128, &mut next);
     assert!((voice.last_peak() - 255.0 / 65_536.0).abs() < 1e-7);
 }
 
@@ -431,10 +441,10 @@ fn offline_render_waits_for_the_interpolation_page_at_the_preload_boundary() {
     let mut region = ramp_region(&mut store, 4096, 1024).unwrap();
     region.start = 896;
     let mut voice = Voice::allocate();
-    voice.set_offline_wait(true);
+    voice.set_render_mode(contra_voice::RenderMode::Offline);
     voice.start(start(region, 1.0, Ahdsr::GATE));
     let mut out = [[0.0; 2]; 128];
-    voice.render(&client, 0, &mut out);
+    voice.render(&mut Scratch::allocate(), &client, 0, &mut out);
     assert_eq!(voice.offline_wait_timeouts(), 0);
     assert_eq!(voice.missing_frames(), 0);
     for (n, frame) in out.iter().enumerate() {
@@ -467,14 +477,14 @@ fn offline_wait_reports_a_failed_page_as_missing() {
         sample,
         start: 0,
         end: 4096,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     };
     let mut voice = Voice::allocate();
-    voice.set_offline_wait(true);
+    voice.set_render_mode(contra_voice::RenderMode::Offline);
     voice.start(start(region, 1.0, Ahdsr::GATE));
     let mut out = [[0.0; 2]; 128];
-    voice.render(&client, 0, &mut out);
+    voice.render(&mut Scratch::allocate(), &client, 0, &mut out);
     assert!(voice.missing_frames() > 0);
     assert!(client.stats().read_errors > 0);
 }
@@ -493,4 +503,34 @@ fn a_released_voice_that_is_stolen_keeps_its_release_time() {
     );
     assert!(voice.is_ending() && !voice.is_released());
     assert_eq!(voice.released_at(), Some(10));
+}
+
+/// A stretching voice plays the sample at its pitch (a ramp keeps its slope
+/// from the first frame) while its length follows the speed.
+#[test]
+fn a_stretching_voice_keeps_its_pitch_and_takes_its_speeds_time() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let client = store.client();
+    for (speed, ends) in [(2.0, 4096), (0.5, 16_384)] {
+        let mut voice = Voice::allocate();
+        let mut s = start(
+            ramp_region(&mut store, 8192, 8192).unwrap(),
+            1.0,
+            Ahdsr::GATE,
+        );
+        s.speed = speed;
+        voice.start(s);
+        let out = render(&mut voice, &client, ends - 512);
+        assert_eq!(
+            out[1],
+            1.0 / 65_536.0,
+            "speed {speed}: the start plays as recorded"
+        );
+        assert!(
+            voice.is_active(),
+            "speed {speed}: still playing before its end"
+        );
+        render(&mut voice, &client, 1024);
+        assert!(!voice.is_active(), "speed {speed}: ended on time");
+    }
 }

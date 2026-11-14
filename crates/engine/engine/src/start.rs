@@ -10,7 +10,7 @@ impl Engine {
         attack: bool,
         accept: impl Fn(Trigger) -> bool,
     ) {
-        let Some(n) = self.notes.get(note).copied() else {
+        let Some(mut n) = self.notes.get(note).copied() else {
             return;
         };
         let plan = self.plan.clone();
@@ -24,7 +24,27 @@ impl Engine {
         let step = if attack { Step::Advance } else { Step::Reuse };
         let since = self.behaviour.rls_reset.get(key).map_or(n.at.0, |&r| r);
         let held_seconds = self.now.0.saturating_sub(since) as f32 / self.rate as f32;
-        for (index, zone) in plan.zones.iter().enumerate() {
+        // Every route reads the counter through the note, shaped or not.
+        n.held = held_seconds;
+        if let Some(live) = self.notes.get_mut(note) {
+            live.held = held_seconds;
+        }
+        // A key's zones are a few of thousands: walk the key's list, or the
+        // packed key ranges when the plan's zones moved, never every zone.
+        let index_of = Arc::clone(&self.zone_index);
+        let listed = index_of.listed(n.key);
+        let count = listed.map_or(plan.zones.len(), <[u32]>::len);
+        for at in 0..count {
+            let index = match listed.and_then(|l| l.get(at)) {
+                Some(&zone) => zone as usize,
+                None => at,
+            };
+            if listed.is_none() && !index_of.holds(index, n.key) {
+                continue;
+            }
+            let Some(zone) = plan.zones.get(index) else {
+                continue;
+            };
             let selected = accept(zone.trigger)
                 && self.masks.allows(note.slot(), zone.group)
                 && self
@@ -52,7 +72,6 @@ impl Engine {
             }
             let factor = if zone.trigger == Trigger::Release {
                 crate::ir::common::DB_GAIN.eval_unclamped(-zone.release_decay_db * held_seconds)
-                    * self.release_counter(zone, held_seconds)
             } else {
                 1.0
             };
@@ -63,7 +82,7 @@ impl Engine {
             let mut region = zone.region.clone();
             if !region.reverse {
                 let script = u64::from(n.offset) * u64::from(zone.sample_rate) / 1_000_000;
-                let frames = self.start_offset(zone, &n, held_seconds);
+                let frames = self.start_offset(zone, &n);
                 region.start = region
                     .start
                     .saturating_add(script)
@@ -76,19 +95,33 @@ impl Engine {
             {
                 region.shift_loops(start, length);
             }
-            if let Some(mix) = self.voice_mix(zone, &n, self.age(self.now, None)) {
+            // Read first: the onset targets below see the stretched envelopes.
+            let stretch = self.stretches(zone, &n);
+            let onset = modulators::Age {
+                stretch,
+                ..self.age(self.now, None)
+            };
+            if let Some(mix) = self.voice_mix(zone, &n, onset) {
                 region.mix = Some(mix);
             }
+            if let (Some(read), Some(table)) =
+                (self.voice_read(zone, &n, onset), region.table.as_mut())
+            {
+                table.read = read;
+            }
             let pan = self.group_pan(zone);
-            let (gain, lag) = self.voice_gain(zone, &n, factor, self.age(self.now, None), pan);
-            let (step, bend) = self.step(zone, &n, self.age(self.now, None));
+            let (gain, lag) = self.voice_gain(zone, &n, factor, onset, pan);
+            let (step, bend) = self.step(zone, &n, onset);
             let start = VoiceStart {
                 region,
                 step: voice_gain::bent(self.plan.route_pitch, step, bend.instant + bend.semitones),
                 gain,
                 lag,
-                envelope: self.envelope(zone, &n, held_seconds),
+                envelope: self.envelope(zone, &n),
                 fade: n.fade.filter(|_| attack),
+                speed: (self.groups.get(zone.group as usize))
+                    .and_then(|g| g.speed)
+                    .map_or(1.0, f64::from),
             };
             let now = self.now;
             let Some(i) = self.free_slot() else {
@@ -119,12 +152,6 @@ impl Engine {
                         )
                 }) {
                     let source = plan::route_source(m.kind).and_then(|s| match (m.kind, s) {
-                        (
-                            ir::ModKind::SampleStart { .. }
-                            | ir::ModKind::Attack { .. }
-                            | ir::ModKind::Release { .. },
-                            ir::Source::HeldTime { span_ms },
-                        ) => Some(plan::held_time(span_ms, held_seconds)),
                         (
                             ir::ModKind::LfoPhase { .. } | ir::ModKind::LfoRate { .. },
                             ir::Source::Lfo(_),
@@ -168,13 +195,14 @@ impl Engine {
             slot.pan = [pan; 2];
             slot.warp = [0.0; modulators::WARPS];
             slot.chaos = [modulators::CHAOS_START; modulators::WARPS];
+            slot.stretch = stretch;
             #[cfg(feature = "trace")]
             slot.pending_trace_cc.set(0);
             #[cfg(feature = "trace")]
             if let Some(trace) = &self.trace {
                 trace.routes.begin_onset(index);
             }
-            self.start_rack(i, zone, &n, self.age(now, None));
+            self.start_rack(i, zone, &n, onset);
             #[cfg(feature = "trace")]
             if let Some(trace) = &self.trace {
                 trace.routes.finish_onset(Some(i));

@@ -5,7 +5,7 @@
 use contra_ui::app::{
     self, Action, App, Envelope, Face, Library, Param, Part, PartTab, Sound,
 };
-use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
+use mui::prelude::{Buttons, Input, Key, KeyPress, Mods, Point, PointerInput, Size, Ui};
 
 fn frame(ui: &mut Ui, app: &mut App, input: Input) -> (Vec<Action>, bool) {
     let r = app::view(ui, app);
@@ -69,6 +69,7 @@ fn clicks_drive_the_editor_and_idle_costs_no_frames() {
         libraries: vec![Library {
             name: "Areia".into(),
             presets: vec!["Violins".into()],
+            recalls: Vec::new(),
             starred: false,
             art: Vec::new(),
         }],
@@ -84,7 +85,8 @@ fn clicks_drive_the_editor_and_idle_costs_no_frames() {
         clicks(&mut ui, &mut app, "preset-0", 2),
         vec![Action::Load {
             library: 0,
-            preset: 0
+            preset: 0,
+            into: None
         }]
     );
     app.parts.push(Part {
@@ -371,6 +373,7 @@ fn a_preset_dragged_onto_a_part_replaces_it_and_onto_free_space_adds_one() {
         libraries: vec![Library {
             name: "Areia".into(),
             presets: vec!["Violins".into(), "Violas".into()],
+            recalls: Vec::new(),
             starred: false,
             art: Vec::new(),
         }],
@@ -396,7 +399,8 @@ fn a_preset_dragged_onto_a_part_replaces_it_and_onto_free_space_adds_one() {
     assert!(
         onto_rack.contains(&Action::Load {
             library: 0,
-            preset: 1
+            preset: 1,
+            into: None
         }),
         "{onto_rack:?}"
     );
@@ -437,4 +441,104 @@ fn the_browser_split_drags_and_keeps_its_share() {
         "held to v2's bound: {}",
         app.view.split
     );
+}
+
+/// With a part playing, a double-click names it as the part to play in;
+/// the host plays only a preset of an instrument there (the plugin test).
+#[test]
+fn a_double_click_names_the_focused_part() {
+    let mut ui = contra_ui::ui();
+    let mut app = App {
+        libraries: vec![Library {
+            name: "Strings".into(),
+            format: Format::Kontakt,
+            presets: vec!["Snapshots/Airy".into(), "Strings".into()],
+            recalls: vec![0],
+            starred: false,
+            art: Vec::new(),
+        }],
+        parts: vec![Part {
+            name: "Strings".into(),
+            library: "Strings".into(),
+            ..Part::default()
+        }],
+        ..App::default()
+    };
+    settle(&mut ui, &mut app);
+    click(&mut ui, &mut app, "library-0");
+    let load = |preset, into| Action::Load {
+        library: 0,
+        preset,
+        into,
+    };
+    click(&mut ui, &mut app, "preset-0");
+    assert_eq!(
+        clicks(&mut ui, &mut app, "preset-0", 2),
+        vec![load(0, Some(0))]
+    );
+    click(&mut ui, &mut app, "preset-1");
+    assert_eq!(
+        clicks(&mut ui, &mut app, "preset-1", 2),
+        vec![load(1, Some(0))]
+    );
+}
+
+/// One key, then frames until the editor settles.
+fn key(ui: &mut Ui, app: &mut App, key: Key) -> Vec<Action> {
+    let mods = Mods::default();
+    let keys = vec![KeyPress { key, mods }];
+    let (mut out, _) = frame(
+        ui,
+        app,
+        Input {
+            keys,
+            ..Default::default()
+        },
+    );
+    out.extend(settle(ui, app));
+    out
+}
+
+/// The browser by keys alone: Down from the search into the presets, Down
+/// along them, Enter loads; typing on a row searches, Escape clears it.
+#[test]
+fn the_presets_walk_and_load_by_keys() {
+    let mut ui = contra_ui::ui();
+    let presets = ["Strings Legato", "Strings Pizzicato", "Strings Staccato"];
+    let mut app = App {
+        libraries: vec![Library {
+            name: "Strings".into(),
+            format: Format::Kontakt,
+            presets: presets.iter().map(|p| format!("Instruments/{p}")).collect(),
+            recalls: Vec::new(),
+            starred: false,
+            art: Vec::new(),
+        }],
+        ..App::default()
+    };
+    settle(&mut ui, &mut app);
+    click(&mut ui, &mut app, "library-0");
+    ui.focus("preset-search");
+    key(&mut ui, &mut app, Key::Down);
+    key(&mut ui, &mut app, Key::Down);
+    assert_eq!(app.view.picked, Some((0, 1)));
+    let load = Action::Load {
+        library: 0,
+        preset: 1,
+        into: None,
+    };
+    assert_eq!(key(&mut ui, &mut app, Key::Enter), vec![load]);
+    let text = "stac".to_owned();
+    let (_, _) = frame(
+        &mut ui,
+        &mut app,
+        Input {
+            text,
+            ..Default::default()
+        },
+    );
+    settle(&mut ui, &mut app);
+    assert_eq!(app.view.preset_search, "stac");
+    key(&mut ui, &mut app, Key::Escape);
+    assert_eq!(app.view.preset_search, "");
 }

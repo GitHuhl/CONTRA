@@ -20,6 +20,19 @@ impl Engine {
         self.script()?.engine_pars.get(id)
     }
 
+    /// A send level addressed to the send chain (generic 0) on the instrument
+    /// moves its insert chain's Send Levels slot: send effects have no send
+    /// levels of their own (a library's reverb amount knob raises its tail
+    /// 10 dB this way; tools/oracle/controls.py, 2026-11-12).
+    pub(crate) fn send_generic(&self, par: i32, group: i32, generic: i32) -> i32 {
+        let send = matches!(self.engine_par(par), Some(EnginePar::SendLevel(_)));
+        if send && group < 0 && generic == 0 {
+            1
+        } else {
+            generic
+        }
+    }
+
     /// Group `group`, if the instrument has it.
     pub(crate) fn group_mut(&mut self, group: i32) -> Option<&mut Group> {
         self.groups.get_mut(usize::try_from(group).ok()?)
@@ -30,6 +43,15 @@ impl Engine {
     /// 0, its text "" and a set there is dropped.
     pub(crate) fn absent(&mut self, par: i32, group: i32, slot: i32, generic: i32) -> bool {
         use Holder as H;
+        // A parameter of one effect type, on a slot holding another type.
+        let owner = self.script().and_then(|s| s.engine_pars.owner(par));
+        if let Some(owner) = owner
+            && self
+                .effect_type(group, slot, generic)
+                .is_some_and(|ty| ty != owner)
+        {
+            return true;
+        }
         let found = self.engine_par(par).zip(self.script());
         match found.map(|(p, s)| (p, s.holder(p))) {
             Some(_) if usize::try_from(group).is_ok_and(|g| g >= self.groups.len()) => true,
@@ -70,7 +92,9 @@ impl Engine {
             // A group's slot: `<generic>` is for instrument effects only (KSP manual).
             (Ok(g), _) => &mut self.groups.get_mut(g)?.inserts[..],
             // `$NI_INSERT_BUS` 1, `$NI_SEND_BUS` 0 (one rack per slot), `$NI_MAIN_BUS` 2.
-            (Err(_), 1) => &mut self.rack.slots[..],
+            // Kontakt takes generic -1 as the insert rack too (Una Corda's
+            // transient and stereo knobs; measured, controls.py 2026-11-12).
+            (Err(_), 1 | -1) => &mut self.rack.slots[..],
             (Err(_), 0) => {
                 let send = self.sends.get_mut(usize::try_from(slot).ok()?)?;
                 return send.slots.first_mut();
@@ -106,6 +130,60 @@ impl Engine {
             self.refresh_all(None);
         }
         set
+    }
+
+    /// [`contra_vm::Action::EffectBypass`]: bypasses (`on`) or plays slot
+    /// `slot` of group `index`'s inserts (`at` 0), bus `index`'s rack (1) or
+    /// the instrument's inserts (2).
+    pub(crate) fn set_effect_bypass(&mut self, at: i32, index: i32, slot: i32, on: bool) {
+        if let Some(e) = self.placed_effect(at, index, slot)
+            && e.bypass != on
+        {
+            e.bypass = on;
+            self.refresh_all(None);
+        }
+    }
+
+    /// [`contra_vm::Action::EffectGain`]: a gain effect's linear level.
+    pub(crate) fn set_effect_gain(&mut self, at: i32, index: i32, slot: i32, gain: f32) {
+        if let Some(ir::Effect {
+            kind: ir::EffectKind::Gain(g),
+            ..
+        }) = self.placed_effect(at, index, slot)
+        {
+            *g = gain.max(0.0);
+        }
+    }
+
+    /// [`contra_vm::Action::EffectField`]: one control of a placed effect.
+    pub(crate) fn set_effect_field(
+        &mut self,
+        at: i32,
+        index: i32,
+        slot: i32,
+        code: i32,
+        value: f32,
+    ) {
+        let Some(param) = u16::try_from(code)
+            .ok()
+            .and_then(ir::EffectParam::from_code)
+        else {
+            return;
+        };
+        if let Some(e) = self.placed_effect(at, index, slot)
+            && param.set(e, value)
+        {
+            self.refresh_all(None);
+        }
+    }
+
+    fn placed_effect(&mut self, at: i32, index: i32, slot: i32) -> Option<&mut ir::Effect> {
+        let (group, generic) = match at {
+            0 => (index, -1),
+            1 => (-1, (BUS_OFFSET - 1).saturating_add(index)),
+            _ => (-1, 1),
+        };
+        self.effect_mut(group, slot, generic)
     }
 
     /// A group's level, or the instrument's (group -1, generic -1). Buses
@@ -209,6 +287,7 @@ impl Engine {
         slot: i32,
         generic: i32,
     ) -> Option<i32> {
+        let generic = self.send_generic(par, group, generic);
         if self.absent(par, group, slot, generic) {
             return Some(0);
         }
@@ -221,6 +300,9 @@ impl Engine {
         }
         if par == EnginePar::EffectSubtype {
             return self.subtype(group, slot, generic);
+        }
+        if par == EnginePar::EffectType {
+            return self.effect_type(group, slot, generic);
         }
         if let EnginePar::Reverb(which) = par {
             let ir::EffectKind::Reverb(reverb) = self.effect_mut(group, slot, generic)?.kind else {
@@ -247,6 +329,25 @@ impl Engine {
             return Some(which.get(&level).round().clamp(0.0, 1e6) as i32);
         }
         let g = self.groups.get(usize::try_from(group).ok()?)?;
+        if let EnginePar::Wavetable(v) = par {
+            let mut read = g.wavetable?;
+            let x = *crate::voice_gain::table_value(&mut read, v)?;
+            return Some((f64::from(x) * 1e6).round() as i32);
+        }
+        if par == EnginePar::InharmonicOn {
+            return Some(i32::from(g.wavetable?.inharmonic.on));
+        }
+        if par == EnginePar::ModOscKind {
+            let kind = g.wavetable?.modosc.kind;
+            let kinds = &self.script()?.mod_kinds;
+            return i32::try_from(kinds.iter().position(|k| *k == Some(kind))?).ok();
+        }
+        if let EnginePar::WarpMode(n) = par {
+            let w = g.wavetable?.warps.get(usize::from(n)).copied()?;
+            let modes = &self.script()?.warp_modes;
+            let mode = modes.iter().position(|m| *m == Some((w.shape, w.shaper)))?;
+            return i32::try_from(mode).ok();
+        }
         if let (Some((i, stage)), Some(e)) = (stage_point(par), routed_envelope(g, slot)) {
             // Measured (probes/flex_stage_writes.lua): an envelope without
             // stages (a flex) reads 0.
@@ -263,15 +364,41 @@ impl Engine {
         }
         let ms = |frames: u32| f64::from(frames) * 1000.0 / f64::from(self.rate);
         let e = &g.envelope;
-        let route = || g.mods.iter().find(|m| addressed(m, slot, generic));
+        // A carried route's depth, else the saved one of a route not carried.
+        let route = || {
+            let carried = g.mods.iter().find(|m| addressed(m, slot, generic));
+            carried.and_then(|m| signed(&m.kind)).or_else(|| {
+                let r = g.routes.iter().find(|r| i32::from(r.slot) == slot)?;
+                r.depths.get(usize::try_from(generic.max(0)).ok()?).copied()
+            })
+        };
+        // A switch, read as set: 1 restarts with each voice (measured).
+        if par == EnginePar::LfoRetrigger {
+            return Some(i32::from(g.lfo(slot)?.clock == ir::Clock::Voice));
+        }
+        if par == EnginePar::LfoUnit {
+            let rate = g.lfo(slot)?.rate;
+            let units = &self.script()?.lfo_units;
+            let same = |u: &Option<ir::Rate>| match (u, rate) {
+                (Some(ir::Rate::Hz(_)), ir::Rate::Hz(_)) => true,
+                (Some(ir::Rate::Steps { beats: a, .. }), ir::Rate::Steps { beats: b, .. }) => {
+                    (a - b).abs() < 1e-4
+                }
+                _ => false,
+            };
+            return units
+                .iter()
+                .position(same)
+                .and_then(|n| i32::try_from(n).ok());
+        }
         let x = match par {
             EnginePar::ModBypass => {
                 let m = g.mods.iter().find(|m| i32::from(m.slot) == slot)?;
                 return Some(i32::from(m.bypass));
             }
             EnginePar::ReleaseTrigger => return Some(i32::from(g.release_trigger)),
-            EnginePar::RouteIntensity => setting(&SQUARE, f64::from(signed(&route()?.kind)?.abs())),
-            EnginePar::RouteDepth => setting(&SIGNED_CUBE, f64::from(signed(&route()?.kind)?)),
+            EnginePar::RouteIntensity => setting(&SQUARE, f64::from(route()?.abs())),
+            EnginePar::RouteDepth => setting(&SIGNED_CUBE, f64::from(route()?)),
             EnginePar::LfoFade => stage_setting(&STAGE_10S, f64::from(g.lfo(slot)?.fade_ms)),
             EnginePar::Attack => stage_setting(&STAGE_15S, ms(e.attack)),
             EnginePar::Hold => stage_setting(&STAGE_15S, ms(e.hold)),
@@ -285,24 +412,43 @@ impl Engine {
     }
 
     /// Sets the amount of every route named with `#key` to `micros`
-    /// millionths ([`contra_vm::Action::RouteAmount`]).
+    /// millionths ([`contra_vm::Action::RouteAmount`]). The voices follow
+    /// once the callback returns or waits ([`Self::refresh_moved_routes`]):
+    /// W Strings sets 6,984 in one `changed`.
     pub(crate) fn set_route_amount(&mut self, key: i32, micros: i32) {
         let v = micros as f32 / 1e6;
-        let mut any = false;
+        // The groups it moved: a route names one keygroup's group as a rule.
+        let (mut one, mut many) = (None, false);
         for (g, m) in self.route_names.of(key) {
             let Some(m) = self.groups.get_mut(g).and_then(|g| g.mods.get_mut(m)) else {
                 continue;
             };
-            any |= match &mut m.kind {
+            let set = match &mut m.kind {
                 ir::ModKind::Pitch { semitones, .. } => {
                     *semitones = v;
                     true
                 }
                 kind => depth(kind).map(|d| *d = v).is_some(),
             };
+            if set {
+                many |= one.is_some_and(|o| o != g);
+                one = Some(g);
+            }
         }
-        if any {
-            self.refresh_all(None);
+        if let Some(g) = one {
+            self.routes_moved = Some(match self.routes_moved {
+                Some((first, others)) => (first, others || many || first != g),
+                None => (g, many),
+            });
+        }
+    }
+
+    /// Refreshes the voices of the groups whose route amounts moved.
+    pub(crate) fn refresh_moved_routes(&mut self) {
+        match self.routes_moved.take() {
+            Some((_, true)) => self.refresh_all(None),
+            Some((g, false)) => self.refresh_voices(None, |_, zone| zone.group as usize == g),
+            None => {}
         }
     }
 
@@ -316,6 +462,7 @@ impl Engine {
         slot: i32,
         generic: i32,
     ) -> bool {
+        let generic = self.send_generic(par, group, generic);
         if self.absent(par, group, slot, generic) {
             return false;
         }
@@ -336,6 +483,27 @@ impl Engine {
             return true;
         }
         let x = f64::from(value.clamp(0, 1_000_000)) / 1e6;
+        let unit = (par == EnginePar::LfoUnit)
+            .then(|| self.lfo_unit(value))
+            .flatten();
+        let mode = matches!(par, EnginePar::WarpMode(_))
+            .then(|| {
+                self.script()?
+                    .warp_modes
+                    .get(usize::try_from(value).ok()?)
+                    .copied()
+                    .flatten()
+            })
+            .flatten();
+        let kind = (par == EnginePar::ModOscKind)
+            .then(|| {
+                self.script()?
+                    .mod_kinds
+                    .get(usize::try_from(value).ok()?)
+                    .copied()
+                    .flatten()
+            })
+            .flatten();
         let Some(g) = self.group_mut(group) else {
             return false;
         };
@@ -350,21 +518,82 @@ impl Engine {
             }
             // Measured (probes/mod_par_laws.lua): the knob's depth is x²
             // and the route keeps its sign; the bipolar one writes (2x − 1)³.
-            EnginePar::RouteIntensity => g.mod_mut(slot, generic).is_some_and(|m| {
-                let sign = signed(&m.kind).unwrap_or(1.0).signum();
-                set_signed(&mut m.kind, sign * SQUARE.eval_f64(x) as f32)
+            // A route not carried keeps the depth a script writes. A carried
+            // kind the engine cannot write (an amplitude envelope) keeps it
+            // too, so reads agree, but the write is reported as unhandled.
+            EnginePar::RouteIntensity => {
+                let saved = uncarried(g, slot, generic).map(|d| {
+                    *d = d.signum() * SQUARE.eval_f64(x) as f32;
+                });
+                match g.mod_mut(slot, generic) {
+                    Some(m) => {
+                        let sign = signed(&m.kind).unwrap_or(1.0).signum();
+                        set_signed(&mut m.kind, sign * SQUARE.eval_f64(x) as f32)
+                    }
+                    None => saved.is_some(),
+                }
+            }
+            EnginePar::RouteDepth => {
+                let saved =
+                    uncarried(g, slot, generic).map(|d| *d = SIGNED_CUBE.eval_f64(x) as f32);
+                match g.mod_mut(slot, generic) {
+                    Some(m) => set_signed(&mut m.kind, SIGNED_CUBE.eval_f64(x) as f32),
+                    None => saved.is_some(),
+                }
+            }
+            // Any value from 1 up restarts it with each voice (Kontakt
+            // 8.13.1 reads 0, 1, 1, 1 after 0, 1, 500000, 1000000).
+            EnginePar::LfoRetrigger => g.lfo_mut(slot).is_some_and(|l| {
+                l.clock = if value >= 1 {
+                    ir::Clock::Voice
+                } else {
+                    ir::Clock::Free
+                };
+                true
             }),
-            EnginePar::RouteDepth => g
-                .mod_mut(slot, generic)
-                .is_some_and(|m| set_signed(&mut m.kind, SIGNED_CUBE.eval_f64(x) as f32)),
+            EnginePar::Wavetable(v) => g
+                .wavetable
+                .as_mut()
+                .and_then(|r| crate::voice_gain::table_value(r, v))
+                .map(|r| *r = x as f32)
+                .is_some(),
+            EnginePar::InharmonicOn => g
+                .wavetable
+                .as_mut()
+                .map(|t| t.inharmonic.on = value != 0)
+                .is_some(),
+            EnginePar::ModOscKind => g
+                .wavetable
+                .as_mut()
+                .zip(kind)
+                .map(|(t, k)| t.modosc.kind = k)
+                .is_some(),
+            EnginePar::WarpMode(n) => g
+                .wavetable
+                .as_mut()
+                .and_then(|t| t.warps.get_mut(usize::from(n)))
+                .zip(mode)
+                .map(|(w, (shape, shaper))| {
+                    w.shape = shape;
+                    w.shaper = shaper;
+                })
+                .is_some(),
+            EnginePar::LfoUnit => match (unit, g.lfo_mut(slot)) {
+                (Some(unit), Some(l)) => {
+                    l.rate = in_unit(l.rate, unit);
+                    true
+                }
+                _ => false,
+            },
             EnginePar::LfoFade => g.lfo_mut(slot).is_some_and(|l| {
                 l.fade_ms = STAGE_10S.eval_f64(x) as f32;
                 true
             }),
             _ => return self.set_envelope(par, x, group, slot),
         };
-        if set {
-            self.refresh_all(None);
+        // A route or LFO belongs to its group: only that group's voices read it.
+        if set && let Ok(g) = u32::try_from(group) {
+            self.refresh_voices(None, |_, zone| zone.group == g);
         }
         set
     }
@@ -471,11 +700,44 @@ impl Engine {
 
     /// Re-reads gain (and pitch, unless `cc` moved) of every sounding note.
     pub(crate) fn refresh_all(&mut self, cc: Option<u8>) {
-        let mut hits = std::mem::take(&mut self.hits);
-        self.notes.select(&mut hits, |_| true);
-        for &note in &hits {
-            self.refresh_note(note, cc);
+        self.refresh_voices(cc, |_, _| true);
+    }
+}
+
+/// The saved depth of `group`'s route at `slot`, target `target`, when the
+/// engine does not carry it.
+fn uncarried(g: &mut Group, slot: i32, target: i32) -> Option<&mut f32> {
+    let r = g.routes.iter_mut().find(|r| i32::from(r.slot) == slot)?;
+    r.depths.get_mut(usize::try_from(target.max(0)).ok()?)
+}
+
+impl Engine {
+    /// The rate kind unit value `value` picks, from the script's table.
+    fn lfo_unit(&self, value: i32) -> Option<ir::Rate> {
+        let units = &self.script()?.lfo_units;
+        units.get(usize::try_from(value).ok()?).copied().flatten()
+    }
+}
+
+/// `rate` moved to `unit`'s kind: free Hz keeps its Hz, a note value keeps
+/// its count; between kinds the period carries over at 120 BPM.
+// ponytail: the period converts at a fixed 120 BPM, not the host tempo; the
+// script sets the rate right after its unit, so the guess is not heard.
+fn in_unit(rate: ir::Rate, unit: ir::Rate) -> ir::Rate {
+    let seconds = match rate {
+        ir::Rate::Hz(hz) => 1.0 / hz.max(1e-3),
+        ir::Rate::Beats(beats) => beats * 0.5,
+        ir::Rate::Steps { beats, count } => beats * count * 0.5,
+    };
+    match (unit, rate) {
+        (ir::Rate::Hz(_), ir::Rate::Hz(_)) => rate,
+        (ir::Rate::Hz(_), _) => ir::Rate::Hz(1.0 / seconds),
+        (ir::Rate::Steps { beats, .. }, ir::Rate::Steps { count, .. }) => {
+            ir::Rate::Steps { beats, count }
         }
-        self.hits = hits;
+        (ir::Rate::Steps { beats, .. } | ir::Rate::Beats(beats), _) => ir::Rate::Steps {
+            beats,
+            count: (seconds / (beats * 0.5)).round().max(1.0),
+        },
     }
 }

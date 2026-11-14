@@ -12,6 +12,31 @@ pub const CONTROLLER_VOLUME_POWER: u8 = 1;
 /// Normalized voice source used by a volume route.
 pub const VOICE_VOLUME_POWER: u8 = 3;
 
+/// A time-stretching source's speed at knob 0, 0.05 .. 1 (Kontakt 8; v2
+/// tools/kontakt-oracle/tm_sweep.py, the stored speed after an init write).
+pub const STRETCH_SPEED: [f32; 21] = [
+    0., 0.115_737, 0.264_114, 0.431_853, 0.599_645, 0.748_098, 0.863_389, 0.940_286, 0.981_979,
+    0.997_732, 1., 1.002_273, 1.018_304, 1.062_935, 1.154_73, 1.321_269, 1.609_518, 2.107_464,
+    2.992_968, 4.653_069, 8.0,
+];
+
+/// A wavetable's inharmonic stretch `s` at the knob's ends (0 and 1),
+/// geometric between: partial n sits at f·(1 + (n − 1)·s), s = 2^(2a − 1).
+/// Measured on an oracle probe (a saw at Inharm 0, ¼, ½, ¾, 0.9, 1) within
+/// 0.05 %.
+pub const INHARMONIC_RANGE: (f32, f32) = (0.5, 2.0);
+
+/// A wavetable mod oscillator's tune at the knob's ends, as a ratio to the
+/// note: `$ENGINE_PAR_WT_MOD_TUNE` is linear −36..+36 semitones over its
+/// raw 0..1e6 (raw 569444 measured at +5 st on an oracle probe).
+pub const MOD_TUNE_RANGE: (f32, f32) = (0.125, 8.0);
+
+/// The carrier's frequency swing at mod amount 1 in the FM types, Hz:
+/// measured at amount ¼ on an oracle probe (sine carrier and modulator,
+/// FM1 β 1.35 at +5 st), 2000·A·m Hz; FM2's swing of the modulator is
+/// twice it.
+pub const MOD_FM_HZ: f32 = 2000.0;
+
 /// Controller source taper in a volume route.
 pub const CONTROLLER_VOLUME: Law = Law::Power {
     lo: 0.0,

@@ -257,3 +257,159 @@ fn the_polynomial_sine_matches_libm() {
         assert!(err < 1e-7, "{cycles}: {err}");
     }
 }
+
+/// What a skipped stretch of silence leaves: idling `frames` lands the LFO,
+/// the head's glide and the write point where processing silence would,
+/// so the next note plays within -120 dB of an unskipped run.
+#[test]
+fn an_idled_chorus_plays_on_in_step_with_one_that_ran() {
+    let mut s = echo();
+    (s.ms, s.depth_ms, s.lfo_hz, s.phase, s.second_head) = (12.0, 4.0, 0.7, 0.25, true);
+    s.feedback = diagonal(0.2);
+    let (mut ran, mut idled) = (ModDelay::new(s, RATE, 12.0), ModDelay::new(s, RATE, 12.0));
+    for d in [&mut ran, &mut idled] {
+        let mut io = impulse(RATE as usize);
+        d.process(&mut io);
+        // A new time while silent: the head glides there unheard.
+        d.set(Settings { ms: 7.0, ..s });
+    }
+    let quiet = 30_011;
+    let mut silence = vec![[0.0; 2]; quiet];
+    ran.process(&mut silence);
+    let tail = silence.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(tail < 1e-7, "only silence is ever skipped: {tail}");
+    idled.idle(quiet);
+    let (mut a, mut b) = (impulse(RATE as usize / 2), impulse(RATE as usize / 2));
+    ran.process(&mut a);
+    idled.process(&mut b);
+    let worst = (a.iter().flatten().zip(b.iter().flatten()))
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst < 1e-6, "{worst}");
+}
+
+/// Two modulated delays (one a flanger with a steep cut, one a chorus with
+/// two heads, damping and a shelf) and both phasers on 2 s of noise, a
+/// setting changed and a stretch idled on the way.
+fn reference_render() -> Vec<[f32; 2]> {
+    let chorus = Settings {
+        ms: 7.0,
+        depth_ms: 3.0,
+        second_head: true,
+        feedback: [[0.2, 0.1], [0.1, 0.2]],
+        damping_hz: 6_000.0,
+        low_cut_hz: 80.0,
+        high_shelf: Some(Shelf {
+            hz: 3_000.0,
+            gain_db: -6.0,
+            slope: 1.0,
+        }),
+        spread_ms: 1.5,
+        lfo_hz: 1.3,
+        phase: 0.3,
+        ..echo()
+    };
+    let flanger = Settings {
+        ms: 2.5,
+        depth_ms: 1.8,
+        feedback: diagonal(0.6),
+        low_cut_hz: 120.0,
+        steep_low_cut: true,
+        lfo_hz: 0.7,
+        phase: 0.4,
+        ..echo()
+    };
+    let phaser = |triangle| PhaserSettings {
+        stages: 6,
+        triangle,
+        hz: 600.0,
+        spread_hz: 400.0,
+        exponent: 1.5,
+        feedback: 0.4,
+        lfo_hz: 0.9,
+        phase: 0.25,
+    };
+    // ANALOG's echo: a long line, unmodulated.
+    let long = Settings {
+        ms: 250.0,
+        feedback: [[0.3, 0.15], [0.15, 0.3]],
+        damping_hz: 5_000.0,
+        low_cut_hz: 100.0,
+        ..echo()
+    };
+    let mut delays = [
+        ModDelay::new(chorus, RATE, 50.0),
+        ModDelay::new(flanger, RATE, 50.0),
+        ModDelay::new(long, RATE, 300.0),
+    ];
+    let mut phasers = [
+        Phaser::new(phaser(false), RATE),
+        Phaser::new(phaser(true), RATE),
+    ];
+    let mut seed = 0x9e37_79b9_u32;
+    let mut noise = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+    };
+    let frames = 2 * RATE as usize;
+    let mut out = Vec::with_capacity(5 * frames);
+    for k in 0..frames / 512 {
+        let input: Vec<[f32; 2]> = (0..512).map(|_| [noise(), noise()]).collect();
+        if k == 60 {
+            delays[0].set(Settings {
+                ms: 11.0,
+                lfo_hz: 2.1,
+                ..chorus
+            });
+        }
+        for d in &mut delays {
+            let mut io = input.clone();
+            if (100..110).contains(&k) {
+                d.idle(io.len());
+                io.fill([0.0; 2]);
+            } else {
+                d.process(&mut io);
+            }
+            out.extend(io);
+        }
+        for p in &mut phasers {
+            let mut io = input.clone();
+            p.process(&mut io);
+            out.extend(io);
+        }
+    }
+    out
+}
+
+/// FNV-1a over the output's bits.
+fn bits_hash(x: &[[f32; 2]]) -> u64 {
+    x.iter().flatten().fold(0xcbf2_9ce4_8422_2325, |h, v| {
+        (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Speed-ups keep the sound bit for bit.
+#[test]
+fn the_reference_render_is_unchanged() {
+    assert_eq!(
+        bits_hash(&reference_render()),
+        9_431_784_985_003_804_209,
+        "render changed"
+    );
+}
+
+/// Nanoseconds per frame of each effect in the reference (release, `--ignored`).
+#[test]
+#[ignore = "timing"]
+fn delay_speed() {
+    let started = std::time::Instant::now();
+    let runs = 5;
+    for _ in 0..runs {
+        std::hint::black_box(reference_render());
+    }
+    let ns = started.elapsed().as_nanos() as f64 / f64::from(runs) / f64::from(10 * RATE);
+    eprintln!(
+        "delay: {ns:.1} ns per effect frame, {:.1} us per 512-frame block",
+        ns * 0.512
+    );
+}

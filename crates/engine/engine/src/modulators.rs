@@ -8,9 +8,66 @@ use contra_time::SampleTime;
 use crate::ledger::Note;
 use crate::voice_gain::{self, GROUP_PAN_TAU_MS};
 use crate::{Engine, MAX_SPAN};
+use std::cell::Cell;
+
+/// Source values read more than once while one voice refreshes (per route,
+/// and again for the next refresh's ramp). Live only between [`Memo::begin`]
+/// and [`Memo::end`]: no event or script write lands inside one voice's
+/// refresh, so a repeat read at the same age is the same value.
+#[derive(Default)]
+pub(crate) struct Memo {
+    live: Cell<bool>,
+    lfo: [Slot; WARPS],
+    envelope: [Slot; WARPS],
+}
+
+/// A source's value remembered at one age; `None` inside is "no value".
+type Aged = Option<(u64, Option<f32>)>;
+
+/// Up to two ages (now, and the next refresh) per source.
+#[derive(Default)]
+struct Slot([Cell<Aged>; 2]);
+
+impl Memo {
+    pub(crate) fn begin(&self) {
+        for s in self.lfo.iter().chain(&self.envelope) {
+            for c in &s.0 {
+                c.set(None);
+            }
+        }
+        self.live.set(true);
+    }
+
+    pub(crate) fn end(&self) {
+        self.live.set(false);
+    }
+
+    pub(crate) fn lfo(&self, n: u8, age: Age, f: impl FnOnce() -> Option<f32>) -> Option<f32> {
+        self.read(self.lfo.get(usize::from(n)), age, f)
+    }
+
+    pub(crate) fn envelope(&self, n: u8, age: Age, f: impl FnOnce() -> Option<f32>) -> Option<f32> {
+        self.read(self.envelope.get(usize::from(n)), age, f)
+    }
+
+    fn read(&self, slot: Option<&Slot>, age: Age, f: impl FnOnce() -> Option<f32>) -> Option<f32> {
+        let Some(slot) = slot.filter(|_| self.live.get()) else {
+            return f();
+        };
+        let key = u64::from(age.held.to_bits()) << 32 | u64::from(age.now.to_bits());
+        if let Some((_, v)) = slot.0.iter().filter_map(Cell::get).find(|&(k, _)| k == key) {
+            return v;
+        }
+        let v = f();
+        if let Some(c) = slot.0.iter().find(|c| c.get().is_none()) {
+            c.set(Some((key, v)));
+        }
+        v
+    }
+}
 
 pub(crate) use contra_plan::modulation::{
-    Age, CHAOS_START, Chaos, WARPS, chaos_step, envelope, lfo,
+    Age, CHAOS_START, Chaos, WARPS, chaos_step, lfo, smoothed_shared, stretched,
 };
 
 impl Engine {
@@ -23,6 +80,7 @@ impl Engine {
             now: seconds(self.now),
             warp: [0.0; WARPS],
             chaos: [0.0; WARPS],
+            stretch: [1.0; WARPS],
         }
     }
 
@@ -58,12 +116,14 @@ impl Engine {
             {
                 trace.routes.begin_mask(i, slot.zone, pending);
             }
+            self.memo.begin();
             let rate = self.rate;
             let span = (MAX_SPAN - self.now.0 % MAX_SPAN) as f32 / rate as f32;
             let chaos = self.chaos(zone, slot.chaos, span);
             let age = Age {
                 warp: slot.warp,
                 chaos: chaos.map(|c| c[3]),
+                stretch: slot.stretch,
                 ..self.age(slot.started, slot.voice.released_at().map(SampleTime))
             };
             let warp = self.warp(zone, &n, age, span);
@@ -71,9 +131,11 @@ impl Engine {
             let pan = voice_gain::glide(slot.pan[0], to, GROUP_PAN_TAU_MS, MAX_SPAN as f32, rate);
             let (gain, lag) = self.voice_gain(zone, &n, slot.factor, age, pan);
             let mix = self.voice_mix(zone, &n, age);
+            let read = self.voice_read(zone, &n, age);
             let (step, bend) = self.step(zone, &n, age);
             let law = self.plan.route_pitch;
             self.retune_rack(i, zone, &n, age);
+            self.memo.end();
             #[cfg(feature = "trace")]
             if let Some(trace) = &self.trace {
                 trace.routes.end();
@@ -83,6 +145,9 @@ impl Engine {
                 slot.voice.set_lag(lag);
                 if let Some(mix) = mix {
                     slot.voice.set_mix(mix);
+                }
+                if let Some(read) = read {
+                    slot.voice.set_read(read);
                 }
                 let at = voice_gain::glide(
                     slot.bend[0],
@@ -112,7 +177,15 @@ impl Engine {
         };
         // Per LFO: Hz added, and its range once a route reaches it.
         let mut added = [(0.0, None); WARPS];
+        // Places each synced LFO's rate has moved along the note ladder.
+        let mut shifted = [0.0f32; WARPS];
         for m in g.mods.iter().filter(|m| !m.bypass) {
+            if let ir::ModKind::LfoDivision { source, lfo, depth } = m.kind
+                && let Some(places) = shifted.get_mut(usize::from(lfo))
+            {
+                let input = self.source(zone, source, note, age);
+                *places += input.unwrap_or(0.0) * depth * 29.0;
+            }
             if let ir::ModKind::LfoHz {
                 source,
                 lfo,
@@ -129,9 +202,22 @@ impl Engine {
                 *range = Some([lo, hi.max(lo)]);
             }
         }
-        for ((w, (hz, range)), lfo) in warp.iter_mut().zip(added).zip(&g.lfos) {
+        for (((w, (hz, range)), lfo), places) in
+            warp.iter_mut().zip(added).zip(&g.lfos).zip(shifted)
+        {
             if let (Some([lo, hi]), ir::Rate::Hz(f)) = (range, lfo.rate) {
                 *w = (*w + ((f + hz).clamp(lo, hi) - f) * span).rem_euclid(1.0);
+            }
+            if places != 0.0
+                && let ir::Rate::Beats(b) = lfo.rate
+            {
+                let moved = ir::Lfo {
+                    rate: ir::Rate::Beats(ir::ladder_beats(b, places)),
+                    ..*lfo
+                };
+                let extra = contra_plan::modulation::hz(&moved, self.tempo)
+                    - contra_plan::modulation::hz(lfo, self.tempo);
+                *w = (*w + extra * span).rem_euclid(1.0);
             }
         }
         warp
@@ -160,6 +246,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use contra_plan::modulation::envelope;
 
     #[test]
     fn a_lorenz_lfo_wanders_both_lobes_within_its_scale() {

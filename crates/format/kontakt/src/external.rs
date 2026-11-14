@@ -3,7 +3,7 @@
 
 use contra_format::Notes;
 use contra_ir as ir;
-use ni_file::kontakt::objects::{ExternalModArray32, Group, ModSource, ShaperCurve};
+use ni_file::kontakt::objects::{ExternalModArray32, Group, ModSource, ModTarget, ShaperCurve};
 
 use crate::laws;
 
@@ -30,6 +30,7 @@ pub(crate) fn external(
                 slot: slot(n),
                 name: p.name.clone(),
                 names: p.targets.iter().map(|t| t.name.clone()).collect(),
+                depths: p.targets.iter().map(|t| t.signed_intensity()).collect(),
             });
             // The loader reads a source only for category 1 (FUN_140d09620,
             // +0x538); an unassigned slot has nothing to modulate with.
@@ -48,11 +49,18 @@ pub(crate) fn external(
                     None => ir::Source::Controller(cc),
                 }),
                 ModSource::PitchBend => Some(ir::Source::PitchBend),
+                // Kontakt's aftertouch sources: a note's own pressure, or
+                // its channel's (MPE: the same).
+                ModSource::PolyAftertouch | ModSource::MonoAftertouch => Some(ir::Source::Pressure),
                 ModSource::KeyPosition => Some(ir::Source::Key),
                 ModSource::Constant => Some(ir::Source::Constant),
                 // KSP set_event_par_arr(id, $EVENT_PAR_MOD_VALUE_ID, v, index).
                 ModSource::Script(index) => u16::try_from(index).ok().map(ir::Source::Script),
                 ModSource::ReleaseTriggerCounter => Some(release_counter),
+                // "A random value between 0 and 1 (-1 and 1) for each received
+                // note" (Kontakt manual, external sources).
+                ModSource::RandomUnipolar => Some(ir::Source::Random { bipolar: false }),
+                ModSource::RandomBipolar => Some(ir::Source::Random { bipolar: true }),
                 _ => None,
             };
             for (target, t) in p.targets.iter().enumerate() {
@@ -64,7 +72,9 @@ pub(crate) fn external(
                 let raw = source;
                 let source = match (raw, t.shaper.as_ref().filter(|s| s.enabled)) {
                     (Some(s), Some(shaper)) => {
-                        let result = shaped(&mut out.shapers, s, &shaper.curve);
+                        let bipolar = [ir::Source::PitchBend, ir::Source::Random { bipolar: true }];
+                        let signed = bipolar.contains(&s) && signed_route(&t.param);
+                        let result = shaped(&mut out.shapers, s, &shaper.curve, signed);
                         contra_law::record(|| contra_law::Application {
                             id: contra_law::LawId("kontakt.mod_shaper.v1"),
                             location: format!(
@@ -90,6 +100,10 @@ pub(crate) fn external(
                         curve: laws::volume(raw.unwrap_or(source)),
                         tau_ms: laws::route_tau_ms(t.lag_ms),
                     }),
+                    (Some(source), "pan", None) => Some(ir::ModKind::Pan {
+                        source,
+                        amount: t.signed_intensity(),
+                    }),
                     (Some(source), "pitch", None) => Some(ir::ModKind::Pitch {
                         source,
                         semitones: laws::PITCH_SEMITONES,
@@ -105,6 +119,15 @@ pub(crate) fn external(
                         Some(ir::ModKind::LoopShift {
                             source,
                             length: param == "loopLength",
+                            depth: t.signed_intensity(),
+                        })
+                    }
+                    (Some(source), param, None)
+                        if let Some(value) = crate::wavetable::target(param) =>
+                    {
+                        Some(ir::ModKind::Wavetable {
+                            source,
+                            value,
                             depth: t.signed_intensity(),
                         })
                     }
@@ -160,6 +183,7 @@ pub(crate) fn external(
                                 source,
                                 intensity,
                                 floor_ms,
+                                envelope: None,
                             }
                         } else {
                             ir::ModKind::Release {
@@ -167,6 +191,22 @@ pub(crate) fn external(
                                 intensity,
                                 floor_ms,
                             }
+                        })
+                    }
+                    // Another AHDSR runs as a breakpoint source: the same
+                    // target (ahdsr_attack) and law compiler stretch its
+                    // attack segment.
+                    (Some(source), "ahdsr_attack", Some(at)) => {
+                        timed_slots.iter().find_map(|&(n, of)| match of {
+                            ir::Source::Envelope(e) if n == usize::from(at) => {
+                                Some(ir::ModKind::Attack {
+                                    source,
+                                    intensity: t.signed_intensity(),
+                                    floor_ms: laws::time_floor_ms(&p.unknown_source_data),
+                                    envelope: Some(e),
+                                })
+                            }
+                            _ => None,
                         })
                     }
                     // The target table (FUN_140a6d410) names it 0xb4; the law
@@ -186,45 +226,17 @@ pub(crate) fn external(
                             _ => None,
                         })
                     }
-                    // Target 0x1a is in the additive family (FUN_140873040):
-                    // the knob moves by `signal·intensity`.
-                    (Some(source), "frequency", Some(at))
+                    (Some(source), param @ ("frequency" | "intensity"), Some(at))
                         if !matches!(source, ir::Source::HeldTime { .. }) =>
                     {
-                        timed_slots.iter().find_map(|&(n, of)| match of {
-                            ir::Source::Lfo(lfo) if n == usize::from(at) => {
-                                let result = laws::lfo_rate(source, lfo, t.signed_intensity());
-                                contra_law::record(|| contra_law::Application {
-                                    id: contra_law::LawId("kontakt.lfo_rate_route.v1"),
-                                    location: format!(
-                                        "groups/{group_index}/routes/{n}/targets/{target}"
-                                    ),
-                                    input: format!(
-                                        "source={source:?}, lfo={lfo}, intensity={:?}",
-                                        t.signed_intensity()
-                                    ),
-                                    output: format!("{result:?}"),
-                                });
-                                Some(result)
-                            }
-                            _ => None,
-                        })
-                    }
-                    // Target 0x19 compiles (FUN_140873040, 0x144f1daa0) to
-                    // `$in * (1.0 - (1.0 - $signal) * $intensity)`; flag 4
-                    // picks a screen form (0x144f1daf0) no library uses yet.
-                    (Some(source), "intensity", Some(at))
-                        if t.unknown_flags & 4 == 0
-                            && !matches!(source, ir::Source::HeldTime { .. }) =>
-                    {
-                        timed_slots
-                            .iter()
-                            .find(|&&(n, _)| n == usize::from(at))
-                            .map(|&(_, of)| ir::ModKind::Intensity {
-                                source,
-                                of,
-                                depth: t.signed_intensity(),
-                            })
+                        let result = modulator_route(source, param, at, t, timed_slots);
+                        contra_law::record(|| contra_law::Application {
+                            id: contra_law::LawId("kontakt.modulator_route.v1"),
+                            location: format!("groups/{group_index}/routes/{n}/targets/{target}"),
+                            input: format!("source={source:?}, param={param}, slot={at}"),
+                            output: format!("{result:?}"),
+                        });
+                        result
                     }
                     (Some(source), param, Some(insert)) => {
                         crate::drive::route(source, insert, param, t.signed_intensity())
@@ -275,11 +287,48 @@ pub(crate) fn external(
     Ok(())
 }
 
-/// `source` through a modulation shaper, sampled at 128 even steps.
+/// A route to another modulator's knob, by the target's law whatever modulates it (FUN_140873040):
+/// an LFO's `frequency` (0x1a) moves by `signal·intensity`; `intensity` (0x19) scales by
+/// `1 − (1 − signal)·intensity` (0x144f1daa0; flag 4, a screen form, is unused).
+pub(crate) fn modulator_route(
+    source: ir::Source,
+    param: &str,
+    at: u8,
+    t: &ModTarget,
+    timed_slots: &[(usize, ir::Source)],
+) -> Option<ir::ModKind> {
+    let (_, of) = timed_slots.iter().find(|&&(n, _)| n == usize::from(at))?;
+    match (param, *of) {
+        ("frequency", ir::Source::Lfo(lfo)) => {
+            Some(laws::lfo_rate(source, lfo, t.signed_intensity()))
+        }
+        ("intensity", of) if t.unknown_flags & 4 == 0 => Some(ir::ModKind::Intensity {
+            source,
+            of,
+            depth: t.signed_intensity(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a Kontakt target reads its source signed (-1..=1): every target
+/// but the gains and times the engine reads on 0..=1.
+fn signed_route(param: &str) -> bool {
+    !matches!(
+        param,
+        "volume" | "ahdsr_attack" | "ahdsr_release" | "intensity" | "filterQ"
+    )
+}
+
+/// `source` through a modulation shaper, sampled at 128 even steps. Kontakt
+/// draws every shaper on 0..=1; a bipolar source's shaper keeps its source's
+/// polarity (centre 0.5 = rest), so on a `signed` route the table becomes
+/// `2y - 1`, the domain the IR reads it in.
 fn shaped(
     shapers: &mut Vec<ir::Transfer>,
     source: ir::Source,
     curve: &ShaperCurve,
+    signed: bool,
 ) -> Option<ir::Source> {
     let n = u8::try_from(shapers.len()).ok()?;
     let law = match curve {
@@ -294,10 +343,13 @@ fn shaped(
         table: (0..128)
             .map(|k| {
                 let x = k as f32 / 127.0;
-                law.as_ref()
-                    .map_or_else(|| curve.evaluate(x), |law| law.eval(x))
+                let y = law
+                    .as_ref()
+                    .map_or_else(|| curve.evaluate(x), |law| law.eval(x));
+                if signed { 2.0 * y - 1.0 } else { y }
             })
             .collect(),
+        smooth_s: 0.0,
     });
     Some(ir::Source::Shaped(n))
 }
@@ -325,9 +377,42 @@ mod tests {
                 point(0.667_322_8, b, 0.0),
             ]);
             let mut shapers = Vec::new();
-            shaped(&mut shapers, ir::Source::Controller(1), &curve).unwrap();
+            shaped(&mut shapers, ir::Source::Controller(1), &curve, false).unwrap();
             let actual = shapers[0].apply(64.0 / 127.0);
             assert!((actual - native).abs() < 0.035, "{actual} vs {native}");
         }
+    }
+
+    #[test]
+    fn a_shaped_pitch_bend_stays_bipolar_on_a_signed_route() {
+        let flat = ShaperCurve::Breakpoints(vec![
+            Breakpoint {
+                x: 0.0,
+                y: 0.5,
+                curve: 0.0,
+            },
+            Breakpoint {
+                x: 1.0,
+                y: 0.5,
+                curve: 0.0,
+            },
+        ]);
+        let mut shapers = Vec::new();
+        shaped(
+            &mut shapers,
+            ir::Source::PitchBend,
+            &flat,
+            signed_route("playPos"),
+        )
+        .unwrap();
+        shaped(
+            &mut shapers,
+            ir::Source::PitchBend,
+            &flat,
+            signed_route("volume"),
+        )
+        .unwrap();
+        assert!(shapers[0].apply(0.5).abs() < 1e-6, "{:?}", shapers[0].table);
+        assert!((shapers[1].apply(0.5) - 0.5).abs() < 1e-6);
     }
 }

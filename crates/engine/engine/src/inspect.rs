@@ -21,7 +21,12 @@ impl Engine {
 
     /// EQ chains on summed voices, and the zones each feeds.
     pub fn eq_chains(&self) -> (usize, usize) {
-        let zones = self.zone_chain.iter().flatten().count();
+        let chained = |z: &&crate::plan::Zone| {
+            self.group_chain
+                .get(z.group as usize)
+                .is_some_and(Option::is_some)
+        };
+        let zones = self.plan.zones.iter().filter(chained).count();
         (self.chains.len(), zones)
     }
 
@@ -66,6 +71,20 @@ impl Engine {
     #[must_use]
     pub fn unhandled_actions(&self) -> Vec<(contra_vm::Action, u32)> {
         ranked(&self.unhandled)
+    }
+
+    /// Engine-parameter addresses (par, group, slot, generic) that
+    /// `set_engine_par` or `get_engine_par_disp` left unanswered, most first.
+    #[must_use]
+    pub fn unanswered_pars(&self) -> Vec<([i32; 4], u32)> {
+        let mut out: Vec<_> = self
+            .unanswered_pars
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .copied()
+            .collect();
+        out.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        out
     }
 
     /// Every script action called since load, most called first.
@@ -188,11 +207,11 @@ impl Engine {
         self.trace.iter().flat_map(|t| t.routes.iter())
     }
 
-    /// Enable blocking page waits in every voice for offline rendering only.
-    #[cfg(feature = "trace")]
-    pub fn set_offline_wait(&mut self, enabled: bool) {
+    /// How the host renders, for every voice: offline, a read waits for
+    /// its pages.
+    pub fn set_render_mode(&mut self, mode: contra_voice::RenderMode) {
         for slot in &mut self.voices {
-            slot.voice.set_offline_wait(enabled);
+            slot.voice.set_render_mode(mode);
         }
     }
 
@@ -257,6 +276,7 @@ impl Engine {
             };
             let age = crate::modulators::Age {
                 warp: slot.warp,
+                stretch: slot.stretch,
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,
@@ -329,6 +349,7 @@ impl Engine {
             };
             let age = crate::modulators::Age {
                 warp: slot.warp,
+                stretch: slot.stretch,
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,
@@ -400,6 +421,7 @@ impl Engine {
             };
             let age = crate::modulators::Age {
                 warp: slot.warp,
+                stretch: slot.stretch,
                 chaos: slot.chaos.map(|c| c[3]),
                 ..self.age(
                     slot.started,

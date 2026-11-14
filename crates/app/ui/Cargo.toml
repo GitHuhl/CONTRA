@@ -9,11 +9,12 @@ publish = false
 workspace = true
 
 [dependencies]
-contra-protocol = {path = "../../model/protocol"}
-contra-ui-model = {path = "../../model/ui-model"}
-contra-ui-pictures = {path = "../ui-pictures"}
-mui = {path = "../../../vendor/mui"}
+contra-protocol = { path = "../../model/protocol" }
+contra-ui-model = { path = "../../model/ui-model" }
+contra-ui-pictures = { path = "../ui-pictures" }
+contra-ui-view = { path = "../ui-view" }
+mui = { workspace = true }
 
 [dev-dependencies]
-mui = {features = ["cpu"], path = "../../../vendor/mui"}
+mui-headless = { workspace = true }
 png = "0.18"

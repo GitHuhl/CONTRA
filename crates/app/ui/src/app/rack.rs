@@ -11,11 +11,17 @@ use crate::kit::{self, Icon, icon_button, knob, latch, nudge, rule, tab};
 use crate::theme::{CONTROL, SIDEBAR, SMALL, SPACE, TEXT, TIGHT, lift, part_color, secondary};
 
 pub(super) fn view(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
-    // A preset dropped on free rack space adds a part.
-    if let Some(Carried { library, preset }) = ui.dropped_on::<Carried>("rack") {
-        out.push(Action::Load { library, preset });
+    // A preset dropped on free rack space, or on its foot, adds a part.
+    for at in ["rack", "rack-drop"] {
+        if let Some(Carried { library, preset }) = ui.dropped_on::<Carried>(at) {
+            out.push(Action::Load {
+                library,
+                preset,
+                into: None,
+            });
+        }
     }
-    if app.parts.is_empty() {
+    if app.parts.is_empty() && app.loading != Some(super::Loading::New) {
         return col![
             spacer(),
             title("Pick an instrument"),
@@ -35,9 +41,10 @@ pub(super) fn view(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         SIDEBAR + 1.
     };
     let room = (app.width - browser - 2. * SPACE).max(0.);
-    // Fit one open face inside the rack viewport with its two header rows.
+    // Fit one open face inside the rack viewport with its two header rows,
+    // its rule and the foot below it, so the rack itself never scrolls.
     let height = ui.scene().and_then(|s| s.surface("rack")).map_or(0., |s| {
-        (s.frame.size.height - 2. * ROW - TIGHT - SPACE).max(0.)
+        (s.frame.size.height - 2. * ROW - TIGHT - SPACE - FOOT - 2.).max(0.)
     });
     let mut strips = Vec::new();
     for n in 0..app.parts.len() {
@@ -66,28 +73,41 @@ pub(super) fn view(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
         strips.push(rule());
     }
     if app.loading == Some(super::Loading::New) {
-        let row = row![block(3, Len::Pct(100.)).fill(lift(3)).shrink(0), chip()]
-            .gap(SPACE)
-            .align(Align::Center);
+        let stripe = block(3, Len::Pct(100.)).fill(lift(3)).shrink(0);
+        let row = row![stripe, chip(app.load_progress)].gap(SPACE);
         strips.push(band(row, None, 0));
         strips.push(rule());
     }
-    strips.push(foot(ui, app, out));
+    strips.push(foot(ui, app));
     col(strips).scroll().min_h(0).w(Len::Pct(100.)).id("rack")
 }
 
-/// v2's load chip: shown until the instrument plays.
-fn chip() -> El {
-    caption("Loading…")
-        .text_size(SMALL - 1.)
-        .fill(secondary())
-        .lines(1)
-        .shrink(0)
+/// What the load is doing, in words, over a bar that fills with it.
+fn chip(progress: contra_protocol::LoadSnapshot) -> El {
+    let done = block(Len::Pct(f64::from(progress.percent)), 6).fill(Role::Ink.alpha(0.85));
+    let bar = row![done].w(Len::Pct(100.)).h(6).fill(Role::Ink.alpha(0.1));
+    let said = progress.to_string();
+    let text = caption(said.clone()).text_size(SMALL).lines(1);
+    // Wide enough for its stage beside a part's name; the rest on hover.
+    col![text, bar]
+        .gap(4)
+        .grow(1)
+        .min_w(TEXT * 11.)
         .named("Loading")
+        .tip(said)
+}
+
+/// Whether a part's name and its preset's say the same: equal, or one
+/// holds the other, letter case aside.
+fn same_name(part: &str, preset: &str) -> bool {
+    let (a, b) = (part.to_lowercase(), preset.to_lowercase());
+    !a.is_empty() && !b.is_empty() && (a.contains(&b) || b.contains(&a))
 }
 
 /// A header row's height: both rows are one, so the artwork lines up.
 const ROW: f64 = CONTROL + 2. * TIGHT;
+/// The "Add an instrument" row under the parts.
+const FOOT: f64 = CONTROL + 2. * SPACE;
 /// The artwork behind a part's header, fading out over this width (v2's).
 const BANNER: f64 = crate::artwork::BANNER.0;
 
@@ -251,6 +271,7 @@ fn header(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
         .unwrap_or_default();
     let output = output(ui, app, n, id("output"), out);
     let loading = app.loading == Some(super::Loading::Part(n));
+    let progress = app.load_progress;
     let menu = &mut app.view.menu;
     let Some(p) = app.parts.get_mut(n) else {
         return spacer();
@@ -265,7 +286,15 @@ fn header(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
     if fold.changed {
         p.open = !p.open;
     }
-    let name = body(p.name.clone())
+    // The preset field beside it names the same thing more often than not
+    // (Areia's "01 Areia - 16 Violins - Core..." twice): then the title is
+    // the library's, and the preset field alone carries the name.
+    let names = super::preset::names(&presets);
+    let title = match p.preset.and_then(|c| names.get(c)) {
+        Some(preset) if same_name(&p.name, preset) => p.library.clone(),
+        _ => p.name.clone(),
+    };
+    let name = body(title)
         .text_weight(Weight::SEMIBOLD)
         .lines(1)
         .min_w(TEXT * 6.)
@@ -273,33 +302,42 @@ fn header(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
         .grow(1)
         .tip(format!("{}\n{}", p.name, p.library));
     let name = match loading {
-        true => row![name, chip()]
+        true => row![name, chip(progress)]
             .gap(SPACE)
             .align(Align::Center)
             .grow(1)
             .min_w(0),
         false => name,
     };
-    let names: Vec<&str> = presets
-        .iter()
-        .map(|s| s.rsplit('/').next().unwrap_or(s))
-        .collect();
-    let current = names.iter().position(|&s| s == p.name);
-    // v2's preset field beside the name: what plays, or what to pick.
-    let shown = current
-        .and_then(|c| names.get(c).copied())
-        .unwrap_or("Select preset…");
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let current = p.preset.filter(|&n| n < names.len());
+    // v2's preset field beside the name: what plays, or what to pick; a
+    // star once the player changed it, as UVI marks an edited preset.
+    let named = current.and_then(|c| names.get(c).copied());
+    let starred;
+    let shown = match (named, p.modified) {
+        (Some(name), true) => {
+            starred = format!("{name} *");
+            starred.as_str()
+        }
+        (Some(name), false) => name,
+        (None, _) => "Select preset…",
+    };
     let preset = kit::dropdown(
         ui,
         menu,
         &id("preset"),
-        (None, shown, "Preset"),
+        (None, shown, &format!("Preset: {shown}")),
         &names,
         current,
     );
     if let Some(preset) = preset.changed {
         out.push(Action::Switch { part: n, preset });
     }
+    // The player's own presets: save, rename, delete, in the More menu.
+    let playing = current.and_then(|c| presets.get(c)).map(String::as_str);
+    let edits = super::preset::edits(playing);
+    let mut edit = None;
     let prev = icon_button(ui, id("prev"), Icon::Left, "Previous preset", false);
     let next = icon_button(ui, id("next"), Icon::Right, "Next preset", false);
     for (r, by) in [(&prev, -1), (&next, 1)] {
@@ -373,7 +411,15 @@ fn header(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
         })
         .shrink(0)
         .tip(if playing { "Playing" } else { "Silent" });
-    let more = icon_button(ui, id("more"), Icon::More, "More", false);
+    // Its tip would float over its own open menu.
+    let open = menu.as_deref() == Some(id("more").as_str());
+    let more = icon_button(
+        ui,
+        id("more"),
+        Icon::More,
+        if open { "" } else { "More" },
+        false,
+    );
     let close = icon_button(ui, id("remove"), Icon::Close, "Remove", false);
     if close.changed {
         out.push(Action::Remove(n));
@@ -402,16 +448,28 @@ fn header(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
         close.el,
     ];
     if kit::toggle(ui, menu, &id("more"), more.changed) {
-        let m = kit::menu(ui, &id("more"), &["Duplicate", "Remove"], 1, None);
-        match m.changed {
-            Some(0) => out.push(Action::Duplicate(n)),
-            Some(_) => out.push(Action::Remove(n)),
+        let more: Vec<&str> = edits
+            .iter()
+            .chain(&["Duplicate", "Remove"])
+            .copied()
+            .collect();
+        let m = kit::menu(ui, &id("more"), &more, 1, None);
+        match m.changed.and_then(|i| more.get(i)).copied() {
+            Some("Duplicate") => out.push(Action::Duplicate(n)),
+            Some("Remove") => out.push(Action::Remove(n)),
+            Some(pick) => edit = Some((pick, named.unwrap_or(&p.name).to_owned())),
             None => {}
         }
         if m.changed.is_some() {
             *menu = None;
         }
         items.push(m.el);
+    }
+    if let Some((pick, name)) = edit {
+        super::preset::picked(app, n, &name, pick, out);
+        // A sheet that asks a name opens with it selected, to type over.
+        ui.focus("preset-name");
+        app.view.select_name = true;
     }
     row(items)
         .gap(TIGHT)
@@ -530,12 +588,9 @@ fn tabs(ui: &mut Ui, app: &mut App, n: usize, out: &mut Vec<Action>) -> El {
 
 /// Where presets are dropped to be added, and a button that shows the
 /// browser to find one (v2's `src/ui/rack.rs` `foot`).
-fn foot(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
+fn foot(ui: &mut Ui, app: &mut App) -> El {
     let dragging = ui.dragging::<Carried>().is_some();
     let over = ui.get("rack-drop").drop_target && dragging;
-    if let Some(Carried { library, preset }) = ui.dropped_on::<Carried>("rack-drop") {
-        out.push(Action::Load { library, preset });
-    }
     if ui.get("rack-drop").activated() {
         app.view.browser_hidden = false;
         ui.focus("search");
@@ -558,7 +613,7 @@ fn foot(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     .align(Align::Center)
     .justify(Justify::Center)
     .pad(SPACE)
-    .h(CONTROL + 2. * SPACE)
+    .h(FOOT)
     .w(Len::Pct(100.))
     .when(over, |e| e.stroke(Role::Ink).stroke_width(1))
     .focusable()
@@ -568,4 +623,25 @@ fn foot(ui: &mut Ui, app: &mut App, out: &mut Vec<Action>) -> El {
     .id("rack-drop")
     .shrink(0);
     kit::interactive(el)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_part_named_as_its_preset_says_it_once() {
+        assert!(super::same_name(
+            "01 Areia - 16 Violins - Core",
+            "01 Areia - 16 Violins - Core"
+        ));
+        assert!(super::same_name(
+            "Clarinet A",
+            "Clarinet A (VWinds-AClarinet_V2)"
+        ));
+        assert!(super::same_name("conflux", "Conflux"));
+        assert!(!super::same_name(
+            "Strings Decrescendo Vel",
+            "V Strings Decrescendo"
+        ));
+        assert!(!super::same_name("", "Conflux"));
+    }
 }

@@ -10,12 +10,12 @@ use crate::script_knobs::{
 };
 
 /// The readouts of `$ENGINE_PAR_*` names, by name.
-// The chorus depth and JMP amp knobs read 0.0..100.0 too, but CONTRA
-// carries neither module, so they have no row (scratch/laneB/disp).
+// The chorus depth and JMP amp knobs read 0.0..100.0 too; CONTRA carries
+// neither module, so they only show text (scratch/laneB/disp).
 // ponytail: the cutoff law is the one filter measured (ANALOG's); measure
 // each filter kind when a library shows another.
 pub(crate) fn readouts() -> Vec<(&'static str, ir::Readout)> {
-    use ir::Form::{Decimal, Padded, Pan, Ratio, Whole, Wide};
+    use ir::Form::{Blank, Decimal, Hundredths, Padded, Pan, Ratio, Whole, Wide, WideWhole};
     let lin = |lo, hi| ir::Law::Linear { lo, hi };
     let exp = |lo, hi| ir::Law::Exp { lo, hi };
     let curve = |points: [(f32, f32, f32); 2]| ir::Law::Breakpoints(points.into());
@@ -28,6 +28,11 @@ pub(crate) fn readouts() -> Vec<(&'static str, ir::Readout)> {
         "$ENGINE_PAR_RV_SIZE",
         "$ENGINE_PAR_PH_DEPTH",
         "$ENGINE_PAR_PH_FEEDBACK",
+        "$ENGINE_PAR_CH_DEPTH",
+        "$ENGINE_PAR_JMP_PREAMP",
+        "$ENGINE_PAR_JMP_BASS",
+        "$ENGINE_PAR_JMP_MID",
+        "$ENGINE_PAR_JMP_TREBLE",
     ];
     let none = [None; 2];
     let mut rows: Vec<_> = percent
@@ -101,7 +106,49 @@ pub(crate) fn readouts() -> Vec<(&'static str, ir::Readout)> {
         ("$ENGINE_PAR_GAIN1", lin(-18.0, 18.0), Padded, none),
         ("$ENGINE_PAR_GAIN2", lin(-18.0, 18.0), Padded, none),
         ("$ENGINE_PAR_GAIN3", lin(-18.0, 18.0), Padded, none),
+        // Morphology's wavetable group 932 and ANALOG's LFO at 0, .1, .25,
+        // .5, .75 and 1 (Kontakt 8.13.1, 2026-11-11, scratch/laneB/disp2).
+        ("$ENGINE_PAR_WT_POSITION", lin(0.0, 100.0), Decimal, none),
+        ("$ENGINE_PAR_WT_FORM", lin(0.0, 100.0), Decimal, none),
+        ("$ENGINE_PAR_WT_FORM2", lin(0.0, 100.0), Decimal, none),
+        ("$ENGINE_PAR_WT_MOD_AMOUNT", lin(0.0, 100.0), Decimal, none),
+        (
+            "$ENGINE_PAR_WT_INHARMONIC",
+            lin(-100.0, 100.0),
+            Decimal,
+            none,
+        ),
+        (
+            "$ENGINE_PAR_WT_MOD_TUNE",
+            lin(-36.0, 36.0),
+            Hundredths,
+            none,
+        ),
+        ("$ENGINE_PAR_LFO_PHASE", lin(0.0, 360.0), WideWhole, none),
+        // Una Corda's Solid G-EQ, bus 0 slot 7 (Kontakt 8.13.1, 2026-11-12,
+        // scratch/lane-scripts/probes/b2): every band's gain ±20 dB; the
+        // bell switches show nothing.
+        ("$ENGINE_PAR_SEQ_LF_GAIN", lin(-20.0, 20.0), Padded, none),
+        ("$ENGINE_PAR_SEQ_LMF_GAIN", lin(-20.0, 20.0), Padded, none),
+        ("$ENGINE_PAR_SEQ_HMF_GAIN", lin(-20.0, 20.0), Padded, none),
+        ("$ENGINE_PAR_SEQ_HF_GAIN", lin(-20.0, 20.0), Padded, none),
+        ("$ENGINE_PAR_SEQ_LF_BELL", lin(0.0, 1.0), Blank, none),
+        ("$ENGINE_PAR_SEQ_HF_BELL", lin(0.0, 1.0), Blank, none),
     ]);
+    // The Convolution's knobs read what they set: the measured knob laws
+    // (impulse.rs). ponytail: the print forms are unmeasured.
+    rows.extend(
+        crate::impulse::script_knobs()
+            .into_iter()
+            .map(|(name, _, law)| {
+                let form = if name.contains("LENGTH") {
+                    Hundredths
+                } else {
+                    Padded
+                };
+                (name, law, form, none)
+            }),
+    );
     rows.into_iter()
         .map(|(name, law, form, ends)| (name, ir::Readout { law, form, ends }))
         .collect()

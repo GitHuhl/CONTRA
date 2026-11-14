@@ -68,7 +68,7 @@ impl Engine {
 
     /// Row `n`, or the [`ir::KnobTarget::LfoSteps`] row after it when `n`
     /// sets the rate of a stepped LFO.
-    fn row(&mut self, n: u16, group: i32, slot: i32) -> u16 {
+    pub(crate) fn row(&mut self, n: u16, group: i32, slot: i32) -> u16 {
         let next = n.saturating_add(1);
         let target = |e: &Self, k: u16| e.script()?.knobs.get(usize::from(k)).map(|r| r.0);
         if target(self, n) != Some(ir::KnobTarget::LfoRate)
@@ -96,6 +96,9 @@ impl Engine {
         let Some(at) = rack_at(group, generic) else {
             return false;
         };
+        if let Some(hit) = self.set_modelled(knob, x, at, group, slot, generic) {
+            return hit;
+        }
         let mut hit = false;
         for (field, law) in laws(&plan, self.own_laws(&plan, at, slot), knob, at, slot) {
             let effect = self.effect_mut(group, slot, generic);
@@ -115,9 +118,54 @@ impl Engine {
     fn slot_x(&mut self, knob: ir::SlotKnob, group: i32, slot: i32, generic: i32) -> Option<f32> {
         let plan = Arc::clone(&self.plan);
         let at = rack_at(group, generic)?;
+        if let Some((_, k)) = self.modelled(&plan, knob, at, slot) {
+            let mut live = self.behaviour.knobs.iter();
+            let (.., live) = live.find(|l| l.0 == at && i32::from(l.1) == slot)?;
+            return live.get(k).copied();
+        }
         let (field, law) = laws(&plan, self.own_laws(&plan, at, slot), knob, at, slot).next()?;
         let y = *field.field_mut(&mut self.effect_mut(group, slot, generic)?.kind)?;
         Some(law.invert(y))
+    }
+
+    /// Moves `knob` of a slot whose knobs interact to `x` and rebuilds its
+    /// effect from all its knobs; `None` when it has no such model.
+    fn set_modelled(
+        &mut self,
+        knob: ir::SlotKnob,
+        x: f32,
+        at: ir::RackAt,
+        group: i32,
+        slot: i32,
+        generic: i32,
+    ) -> Option<bool> {
+        let plan = Arc::clone(&self.plan);
+        let (model, k) = self.modelled(&plan, knob, at, slot)?;
+        let live = self.behaviour.knobs.iter_mut();
+        let (.., live) = live
+            .into_iter()
+            .find(|l| l.0 == at && i32::from(l.1) == slot)?;
+        *live.get_mut(k)? = x;
+        let kind = live.get(..model.saved.len()).and_then(model.build);
+        let (Some(kind), Some(effect)) = (kind, self.effect_mut(group, slot, generic)) else {
+            return Some(false);
+        };
+        effect.kind = kind;
+        self.refresh_all(None);
+        Some(true)
+    }
+
+    /// The knob model of slot `slot` of `at` (its loaded type's, else its
+    /// saved one's) and the place of `knob` in it.
+    fn modelled<'p>(
+        &self,
+        plan: &'p Plan,
+        knob: ir::SlotKnob,
+        at: ir::RackAt,
+        slot: i32,
+    ) -> Option<(&'p ir::KnobModel, usize)> {
+        let model = plan.knob_model(at, u8::try_from(slot).ok()?, self.loaded_type(at, slot))?;
+        Some((model, model.knobs.iter().position(|&k| k == knob)?))
     }
 
     /// The addressed slot's own laws: those of the shape it last switched
@@ -191,11 +239,16 @@ impl Engine {
                 p.field_mut(&mut self.effect_mut(group, slot, generic)?.kind)
             }
             ir::KnobTarget::Slot(_) | ir::KnobTarget::Impulse(_) => None,
+            ir::KnobTarget::Speed => self.group_mut(group)?.speed.as_mut(),
             ir::KnobTarget::LfoRate
             | ir::KnobTarget::LfoSteps
             | ir::KnobTarget::LfoWidth
+            | ir::KnobTarget::LfoPhase
             | ir::KnobTarget::LfoWeight(_) => {
                 let lfo = self.group_mut(group)?.lfo_mut(slot)?;
+                if target == ir::KnobTarget::LfoPhase {
+                    return Some(&mut lfo.phase);
+                }
                 match (target, &mut lfo.rate, &mut lfo.wave) {
                     (ir::KnobTarget::LfoRate, ir::Rate::Hz(hz), _) => Some(hz),
                     (ir::KnobTarget::LfoSteps, ir::Rate::Steps { count, .. }, _) => Some(count),
@@ -219,7 +272,7 @@ pub(crate) fn rack_at(group: i32, generic: i32) -> Option<ir::RackAt> {
     Some(match (u32::try_from(group), generic) {
         (Ok(g), _) => ir::RackAt::Group(g),
         (Err(_), 0) => ir::RackAt::Sends,
-        (Err(_), 1) => ir::RackAt::Inserts,
+        (Err(_), 1 | -1) => ir::RackAt::Inserts,
         (Err(_), 2) => ir::RackAt::Main,
         (Err(_), b) => {
             ir::RackAt::Bus(u8::try_from(b.checked_sub(crate::params::BUS_OFFSET)?).ok()?)

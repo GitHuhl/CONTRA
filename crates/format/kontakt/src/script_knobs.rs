@@ -15,8 +15,10 @@ use contra_law::common::BIPOLAR;
 /// are the slot's own (`Slot`), as are the legacy Delay's.
 pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
     use ir::EffectParam as E;
-    use ir::KnobTarget::{Effect, LfoRate, LfoSteps, LfoWeight, LfoWidth, Slot};
+    use ir::KnobTarget::{Effect, LfoPhase, LfoRate, LfoSteps, LfoWeight, LfoWidth, Slot, Speed};
     let lin = |lo, hi| ir::Law::Linear { lo, hi };
+    // A switch: any KSP value but 0 (in millionths) is on.
+    let on = || ir::Law::Breakpoints([(0.0, 0.0, 0.0), (1e-6, 1.0, 0.0), (1.0, 1.0, 0.0)].into());
     let mod_hz = ir::Law::Exp { lo: 0.05, hi: 8.0 };
     let mut rows = vec![
         // The filter in the slot carries these knobs' laws (filter_knobs).
@@ -163,7 +165,7 @@ pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
             Slot(ir::SlotKnob::Release),
             lin(0.0, 1.0),
         ),
-        // Solid G-EQ: its slot carries the bands' laws (solid_knobs).
+        // Solid G-EQ: its slot's knob model (solid_knobs).
         (
             "$ENGINE_PAR_SEQ_LF_GAIN",
             Slot(ir::SlotKnob::BandGain(0)),
@@ -214,7 +216,19 @@ pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
             Slot(ir::SlotKnob::BandHz(3)),
             lin(0.0, 1.0),
         ),
-        // Solid Bus Comp: its slot carries the switches' laws (bus_knobs).
+        // The bell switches: any value but 0 is on, read back as 1
+        // (probes/b2: 1, 2, 500000, 1000000 all read 1).
+        (
+            "$ENGINE_PAR_SEQ_LF_BELL",
+            Slot(ir::SlotKnob::BandBell(0)),
+            on(),
+        ),
+        (
+            "$ENGINE_PAR_SEQ_HF_BELL",
+            Slot(ir::SlotKnob::BandBell(3)),
+            on(),
+        ),
+        // Solid Bus Comp: its slot's knob model (solid_knobs).
         (
             "$ENGINE_PAR_SCOMP_THRESHOLD",
             Slot(ir::SlotKnob::Threshold),
@@ -223,26 +237,26 @@ pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
         (
             "$ENGINE_PAR_SCOMP_RATIO",
             Slot(ir::SlotKnob::Ratio),
-            lin(0.0, 1.0),
+            six_steps(),
         ),
         (
             "$ENGINE_PAR_SCOMP_ATTACK",
             Slot(ir::SlotKnob::Attack),
-            lin(0.0, 1.0),
+            six_steps(),
         ),
         (
             "$ENGINE_PAR_SCOMP_RELEASE",
             Slot(ir::SlotKnob::Release),
-            lin(0.0, 1.0),
+            six_steps(),
         ),
         (
             "$ENGINE_PAR_SCOMP_MAKEUP",
-            Effect(E::CompressorMakeup),
-            lin(-5.25, 21.0),
+            Slot(ir::SlotKnob::Makeup),
+            lin(0.0, 1.0),
         ),
         (
             "$ENGINE_PAR_SCOMP_MIX",
-            Effect(E::CompressorMix),
+            Slot(ir::SlotKnob::Mix),
             lin(0.0, 1.0),
         ),
         (
@@ -336,12 +350,15 @@ pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
         // The saved width for x = 0, .1, .25, .5, .75, .9, 1 is 0.05, 0.14,
         // 0.275, 0.5, 0.725, 0.86, 0.95 (probes/knob_save_laws.lua).
         ("$ENGINE_PAR_INTMOD_PULSEWIDTH", LfoWidth, lin(0.05, 0.95)),
+        // Saved as set, in cycles; shown in degrees (readouts.rs).
+        ("$ENGINE_PAR_LFO_PHASE", LfoPhase, lin(0.0, 1.0)),
         // The Multi weights in the mixer's order: sine, saw, triangle, pulse, random.
         ("$ENGINE_PAR_LFO_SINE", LfoWeight(0), BIPOLAR),
         ("$ENGINE_PAR_LFO_SAW", LfoWeight(1), BIPOLAR),
         ("$ENGINE_PAR_LFO_TRI", LfoWeight(2), BIPOLAR),
         ("$ENGINE_PAR_LFO_RECT", LfoWeight(3), BIPOLAR),
         ("$ENGINE_PAR_LFO_RAND", LfoWeight(4), BIPOLAR),
+        ("$ENGINE_PAR_SPEED", Speed, crate::laws::speed()),
         (
             "$ENGINE_PAR_FILTER_SHIFTB",
             Slot(ir::SlotKnob::StageShift(1)),
@@ -398,7 +415,15 @@ pub(crate) fn script_knobs() -> Vec<(&'static str, ir::KnobTarget, ir::Law)> {
             lin(0.0, 1.0),
         ),
     ];
+    rows.extend(crate::dynamics::feedback_rows());
+    rows.extend(crate::skreamer::rows());
+    rows.extend(crate::tape::rows());
+    rows.extend(crate::phasis::rows());
     rows.extend(crate::impulse::script_knobs());
+    rows.extend(crate::choral::rows());
+    rows.extend(crate::raum::rows());
+    rows.extend(crate::wowflutter::rows());
+    rows.extend(crate::flair::rows());
     rows
 }
 
@@ -485,31 +510,6 @@ pub(crate) fn compressor_knobs(mode: i32, saved: [f32; 4], link: bool) -> Vec<Sl
     out
 }
 
-/// Solid Bus Comp's knobs through [`crate::laws::bus_compressor`], the
-/// others at their saved values. KSP saves a switch (ratio, attack,
-/// release) at position `min(⌊6x⌋, 5)/6` (fx_dynamics_dist_tape.tsv), which
-/// the compressor reads as `⌊5·saved + ½⌋`: measured natively, ratio
-/// positions 3 and 4 both compress 4:1 and position 5 is 5:1. The ratio
-/// also moves the threshold's offset.
-pub(crate) fn bus_knobs(saved: [f32; 6], link: bool) -> Vec<SlotKnob> {
-    use ir::EffectParam::{
-        CompressorAttack, CompressorRatio, CompressorRelease, CompressorThreshold,
-    };
-    use ir::SlotKnob::{Attack, Ratio, Release, Threshold};
-    let comp = |n: usize, x: f32| {
-        let mut knobs = saved;
-        *knobs.get_mut(n)? = x;
-        let c = crate::laws::bus_compressor(knobs, link).0;
-        Some(ir::EffectKind::Compressor(c))
-    };
-    let mut out = sampled(Threshold, &[CompressorThreshold], &|x| comp(0, x));
-    out.extend(switched(Attack, &[CompressorAttack], &|x| comp(2, x)));
-    out.extend(switched(Release, &[CompressorRelease], &|x| comp(3, x)));
-    let ratio = [CompressorRatio, CompressorThreshold];
-    out.extend(switched(Ratio, &ratio, &|x| comp(4, x)));
-    out
-}
-
 /// The 1/2/3-band EQ's saved Hz, octaves and dB for a knob `x`: 20·1000^x
 /// Hz, 1/3 + 8x/3 octaves, −18 + 36x dB, exact at x = 0, .1, .25, .5, .75,
 /// .9, 1 (probes/eq_knob_laws.lua).
@@ -569,10 +569,18 @@ pub(crate) fn eq_knobs(saved: &[[f32; 3]]) -> Vec<SlotKnob> {
 /// high cut and low shelf 0, stereo 1, output and dry at unity (an insert's;
 /// a send slot's dry starts at 0, the engine's rule); for
 /// `$EFFECT_TYPE_SEND_LEVELS` (11) every level at unity (630000; oracle
-/// probe rvdef, 2026-10-29); for `$EFFECT_TYPE_REPLIKA` (40) [`crate::replika::INIT`].
+/// probe rvdef, 2026-10-29); for `$EFFECT_TYPE_REPLIKA` (40) [`crate::replika::INIT`];
+/// for `$EFFECT_TYPE_BUS_COMP` (29) [`BUS_COMP_INIT`].
 // ponytail: Kontakt carries the filter's cutoff and resonance into a
 // subtype it switches to (oracle: 0.3 and 0.7 stay); a loaded subtype here
 // starts at its defaults. The corpus scripts write both after loading.
+/// A new Solid Bus Comp's saved knobs (threshold, make-up, attack, release,
+/// ratio, mix): read back natively as .5, .2 (0 dB), .5, .5, .5 and 1, not
+/// bypassed, output gain 0 dB (oracle probe, Kontakt 8.13.1, 2026-11-11:
+/// scratch/laneA/burst3/bcdef/probe.lua). Conflux loads its compressors so.
+// ponytail: the link byte has no engine parameter to read back; linked.
+pub(crate) const BUS_COMP_INIT: [f32; 6] = [0.5, 0.2, 0.5, 0.5, 0.5, 1.0];
+
 pub(crate) fn slot_types() -> Vec<ir::SlotType> {
     let unit = |kind| ir::Effect {
         kind,
@@ -589,12 +597,15 @@ pub(crate) fn slot_types() -> Vec<ir::SlotType> {
     for (band, &[hz, octaves, db]) in bands.iter_mut().zip(&saved) {
         *band = crate::laws::eq_band(hz, octaves, db).unwrap_or(ir::Bell::FLAT);
     }
+    // A filter subtype loads a `$EFFECT_TYPE_FILTER` (7).
     let ty = |id, subtype, reads, effect, laws| ir::SlotType {
         id,
         subtype,
         reads,
+        kind: if subtype { 7 } else { id },
         effect,
         laws,
+        model: None,
     };
     let eq = Some(unit(ir::EffectKind::Eq(bands)));
     let clocked = |kind| {
@@ -614,9 +625,25 @@ pub(crate) fn slot_types() -> Vec<ir::SlotType> {
         dry: 1.0,
         ..unit(ir::EffectKind::Delay(d))
     });
+    let bus_comp = Some(unit(ir::EffectKind::Compressor(
+        crate::laws::bus_compressor(BUS_COMP_INIT, true).0,
+    )));
+    // Any switchable filter shape loads as a subtype too: Una Corda switches
+    // a bus slot holding the Versatile filter to the ladder (30), as Kontakt
+    // does (probes/b2: 7.50 → 7.30).
+    // ponytail: a fresh unit's cutoff and resonance are unmeasured; the
+    // shape's own (0.5, 0.5).
+    let shapes = crate::laws::filter_shapes().into_iter().map(|s| {
+        let effect = Some(unit(ir::EffectKind::Filter(s.filter)));
+        ty(s.id, true, s.id, effect, s.laws)
+    });
     // ponytail: an empty slot's subtype readback is unmeasured; 0, as for
     // the reverb and send levels.
-    vec![
+    let mut types = vec![
+        ir::SlotType {
+            model: Some(crate::solid_knobs::bus_model(BUS_COMP_INIT, true)),
+            ..ty(29, false, 0, bus_comp, [].into())
+        },
         ty(39, false, 0, reverb, [].into()),
         ty(11, false, 0, sends, [].into()),
         ty(
@@ -633,7 +660,20 @@ pub(crate) fn slot_types() -> Vec<ir::SlotType> {
         ty(13, true, 13, clocked(13), crate::clocked::knobs().into()),
         ty(14, true, 14, clocked(14), crate::clocked::knobs().into()),
         ty(15, true, 15, clocked(15), crate::clocked::knobs().into()),
-    ]
+    ];
+    types.extend(shapes);
+    // A saved project or preset names a loaded type by its index here
+    // (`state::SlotType.ty`): new entries are appended, never inserted.
+    // Subtype 0 is no shape: Kontakt 8.13.1 takes it on a filter slot,
+    // which then reads 7.0 (Una Corda's presets without a filter;
+    // probes/b4sub). ponytail: its sound is unmeasured; it passes.
+    types.push(ty(0, true, 0, None, [].into()));
+    types.push(crate::phasis::slot_type());
+    types.push(crate::choral::slot_type());
+    types.push(crate::flair::slot_type());
+    types.push(crate::raum::slot_type());
+    types.push(crate::wowflutter::slot_type());
+    types
 }
 
 /// Saved ms for a knob `x`, `lo + (hi − lo)·(e^(kx) − 1)/(e^k − 1)`, fitted
@@ -730,28 +770,14 @@ pub(crate) fn sampled(
         .collect()
 }
 
-/// [`sampled`] for a six-position switch at `⌊6x⌋`, `build` given the
-/// saved `k/6`: steps that jump at each k/6 (KSP's knob is in millionths).
-fn switched(
-    knob: ir::SlotKnob,
-    fields: &[ir::EffectParam],
-    build: &dyn Fn(f32) -> Option<ir::EffectKind>,
-) -> Vec<SlotKnob> {
-    let at = (0..6u8).map(|k| f32::from(k) / 6.0);
-    let steps = |values: Vec<f32>| {
-        let ends = values.iter().zip(0..6u8).flat_map(|(&v, k)| {
-            let end = if k == 5 {
-                1.0
-            } else {
-                f32::from(k + 1) / 6.0 - 2e-7
-            };
-            [(f32::from(k) / 6.0, v, 0.0), (end, v, 0.0)]
-        });
-        ir::Law::Breakpoints(ends.collect())
-    };
-    moving(at, fields, build)
-        .map(|(field, values)| (knob, field, steps(values)))
-        .collect()
+/// A six-position switch's KSP value onto the position it saves, `⌊6x⌋/6`
+/// (KSP's knob is in millionths: 166666 is still the first step).
+fn six_steps() -> ir::Law {
+    let ends = (0..6u8).flat_map(|k| {
+        let (at, end) = (f32::from(k) / 6.0, f32::from(k + 1) / 6.0 - 2e-7);
+        [(at, at, 0.0), (if k == 5 { 1.0 } else { end }, at, 0.0)]
+    });
+    ir::Law::Breakpoints(ends.collect())
 }
 
 /// Each of `fields` with its values in what `build` makes at `at`, if it
@@ -799,22 +825,26 @@ mod tests {
     /// .55 and .7 compress 4:1, .9 compresses 5:1.
     #[test]
     fn the_bus_compressor_switches_step_where_kontakt_saves_them() {
-        let saved = [0.3, 0.3, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 0.3];
-        let knobs = bus_knobs(saved, true);
-        let law = |knob, field| {
-            let k = knobs.iter().find(|k| k.0 == knob && k.1 == field);
-            k.map(|k| k.2.clone()).unwrap()
+        let model =
+            crate::solid_knobs::bus_model([0.3, 0.3, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 0.3], true);
+        // A KSP value through its row's step, then the model.
+        let at = |k: usize, x: f32| {
+            let mut p = model.saved.to_vec();
+            p[k] = six_steps().eval(x);
+            match (model.build)(&p) {
+                Some(ir::EffectKind::Compressor(c)) => c,
+                _ => panic!(),
+            }
         };
-        use ir::EffectParam::{CompressorAttack, CompressorRatio, CompressorThreshold};
-        let ratio = law(ir::SlotKnob::Ratio, CompressorRatio);
-        let got = [0.0, 0.2, 0.4, 0.55, 0.7, 0.9, 1.0].map(|x| ratio.eval(x));
+        let got = [0.0, 0.2, 0.4, 0.55, 0.7, 0.9, 1.0].map(|x| at(4, x).ratio);
         assert_eq!(got, [1.5, 2.0, 3.0, 4.0, 4.0, 5.0, 5.0]);
         // The threshold's offset follows the ratio: 4:1 is 1 dB above 3:1.
-        let t = law(ir::SlotKnob::Ratio, CompressorThreshold);
-        assert!((t.eval(0.55) - t.eval(0.4) - 1.0).abs() < 1e-4);
+        assert!((at(4, 0.55).threshold_db - at(4, 0.4).threshold_db - 1.0).abs() < 1e-4);
         // KSP 166666 is still the first position, 166667 the second.
-        let attack = law(ir::SlotKnob::Attack, CompressorAttack);
-        assert_eq!([attack.eval(0.166_666), attack.eval(0.166_667)], [0.1, 0.3]);
+        assert_eq!(
+            [at(2, 0.166_666).attack_ms, at(2, 0.166_667).attack_ms],
+            [0.1, 0.3]
+        );
     }
 
     #[test]
@@ -896,6 +926,51 @@ mod tests {
         );
     }
 
+    /// Una Corda switches a Versatile bus slot to the ladder (30).
+    /// Saved projects and presets name a loaded type by its index in
+    /// [`slot_types`] (Codex r4549008544): this pins every index. A new
+    /// type is appended at the end, and its line added here.
+    #[test]
+    fn the_saved_type_indices_never_move() {
+        #[rustfmt::skip]
+        const PINNED: [(i32, bool); 53] = [
+            (29, false), (39, false), (11, false), (40, false), (0, false), (7, false),
+            (24, true), (19, true), (13, true), (14, true), (15, true),
+            (100, true), (101, true), (102, true), (103, true), (104, true), (105, true),
+            (106, true), (107, true), (108, true), (70, true), (71, true),
+            (30, true), (31, true), (32, true), (33, true), (34, true), (35, true),
+            (36, true), (37, true), (38, true), (39, true), (40, true), (41, true),
+            (50, true), (51, true), (52, true), (53, true), (54, true), (55, true),
+            (56, true), (57, true), (58, true), (59, true), (60, true), (61, true),
+            (62, true),
+            // Appended entries, in order. The pairs are Kontakt's own
+            // `$EFFECT_TYPE_*` ids, not indices: Phasis (41) is index 48,
+            // Choral (43) index 49, Flair (42) index 50, Raum (51) index
+            // 51, Wow/Flutter (56) index 52.
+            (0, true),
+            (41, false),
+            (43, false),
+            (42, false),
+            (51, false),
+            (56, false),
+        ];
+        let types: Vec<_> = slot_types().iter().map(|t| (t.id, t.subtype)).collect();
+        assert_eq!(types, PINNED);
+    }
+
+    #[test]
+    fn every_switchable_filter_shape_loads_as_a_subtype() {
+        let types = slot_types();
+        let ladder = types.iter().find(|t| t.id == 30 && t.subtype).unwrap();
+        assert_eq!((ladder.kind, ladder.reads), (7, 30));
+        assert!(matches!(
+            ladder.effect.map(|e| e.kind),
+            Some(ir::EffectKind::Filter(_))
+        ));
+        let none = types.iter().find(|t| t.id == 0 && t.subtype).unwrap();
+        assert_eq!((none.kind, none.reads, none.effect), (7, 0, None));
+    }
+
     #[test]
     fn a_loaded_reverb_and_send_levels_start_where_kontakt_puts_them() {
         let types = slot_types();
@@ -921,6 +996,11 @@ mod tests {
         );
         let sends = effect(11).map(|e| e.kind);
         assert_eq!(sends, Some(ir::EffectKind::Sends([1.0; 8])));
+        // A new Solid Bus Comp: 4:1 (ratio .5), 0 dB make-up, fully wet.
+        let Some(ir::EffectKind::Compressor(c)) = effect(29).map(|e| e.kind) else {
+            panic!("no bus compressor type");
+        };
+        assert_eq!((c.ratio, c.makeup_db, c.mix), (4.0, 0.0, 1.0));
     }
 
     #[test]

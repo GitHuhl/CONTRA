@@ -2,10 +2,11 @@
 
 use contra_format::Notes;
 use contra_ir::{self as ir, FormShaper, Side, Warp, WarpShape};
+use contra_law::kontakt::{INHARMONIC_RANGE, MOD_FM_HZ, MOD_TUNE_RANGE};
 use ni_file::kontakt::objects::WavetableSource;
 
-/// The source's table and forms. Its modulation oscillator, inharmonic
-/// partials and random start phase are not played yet: each leaves a note.
+/// The source's table, forms, start phase, inharmonic stretch and mod
+/// oscillator. The oscillator plays a sine whatever its saved wave.
 pub(crate) fn wavetable(source: &WavetableSource, group: &str, notes: &mut Notes) -> ir::Wavetable {
     let mut warp = |form: u32, amount: f32| {
         let kind = form.checked_sub(1);
@@ -27,20 +28,102 @@ pub(crate) fn wavetable(source: &WavetableSource, group: &str, notes: &mut Notes
         warp(source.form_type, source.form1),
         warp(source.form2_type, source.form2),
     ];
-    for (on, feature) in [
-        (source.mod_type != 0, "wavetable modulation"),
-        (source.inharmonic_enabled, "wavetable inharmonic"),
-        (source.phase_random != 0.0, "wavetable random phase"),
-    ] {
-        if on {
-            notes.add(ir::Impact::Audible, feature, group);
-        }
+    contra_law::record(|| contra_law::Application {
+        id: contra_law::LawId("kontakt.wavetable.v1"),
+        location: format!("groups/{group}/wavetable"),
+        input: format!(
+            "mod type={} wave={} amount={} tune={}, inharmonic={}:{}",
+            source.mod_type,
+            source.mod_wave,
+            source.mod_amount,
+            source.mod_tune,
+            source.inharmonic_enabled,
+            source.inharmonic
+        ),
+        output: String::new(),
+    });
+    // The reader's names are swapped: `mod_wave` holds the type and
+    // `mod_type` the wave (probes saved with type FM1/FM2 and wave sine read
+    // wave=1/2, type=0); the tune is in octaves (+5 st reads 0.41666).
+    let kind = mod_kind(source.mod_wave);
+    if kind.is_none() {
+        notes.add(ir::Impact::Audible, "wavetable modulation", group);
     }
     ir::Wavetable {
         position: source.position,
         phase: source.phase,
+        phase_random: source.phase_random.clamp(0.0, 1.0),
+        gain: LEVEL,
+        inharmonic: ir::Inharmonic {
+            on: source.inharmonic_enabled,
+            amount: source.inharmonic.clamp(0.0, 1.0),
+            range: INHARMONIC_RANGE,
+        },
+        modosc: ir::ModOsc {
+            kind: kind.unwrap_or(ir::ModOscKind::Off),
+            amount: source.mod_amount.clamp(0.0, 1.0),
+            tune: ((12.0 * source.mod_tune + 36.0) / 72.0).clamp(0.0, 1.0),
+            tune_range: MOD_TUNE_RANGE,
+            fm_hz: MOD_FM_HZ,
+        },
         warps,
     }
+}
+
+/// Kontakt plays a wavetable group 6.9 dB below the same cycles in sampler
+/// mode, whatever their level: measured on an oracle probe, a 0.5 saw and a
+/// 0.25 sine, each −6.9 dB against ours at unity.
+const LEVEL: f32 = 0.45;
+
+/// The wavetable value a modulation target moves: Kontakt adds the routes
+/// to it in its 0..=1 units and clamps the sum every 32 frames
+/// (`fminf`/`fmaxf` at 0x140b52133..0x140b521b4, targets +0x10260/4/74).
+pub(crate) fn target(param: &str) -> Option<ir::TableValue> {
+    Some(match param {
+        "wavetablePosition" => ir::TableValue::Position,
+        "warpFactor" => ir::TableValue::Warp(0),
+        "warpFactor2" => ir::TableValue::Warp(1),
+        "wavetableInharmonic" => ir::TableValue::Inharmonic,
+        "wavetableModAmount" => ir::TableValue::ModAmount,
+        "wavetableModFrequency" => ir::TableValue::ModTune,
+        _ => return None,
+    })
+}
+
+/// The mod oscillator kind of each `$NI_WT_MOD_TYPE_*` value (OFF 0, FM1 1,
+/// FM2 2, FM3 3, RM 4, MIX 5, PM1 6, PM2 7, PM3 8, BLEND 9), a script's
+/// `$ENGINE_PAR_WT_MOD_TYPE` and the saved type alike. Every type but BLEND
+/// (a guess) renders as Kontakt does at amount ¼ on a sine probe
+/// (scratch/laneDSP/b8 mo2_case*, partials within 1 dB; FM3's pitch pull
+/// 303 Hz vs 307): FM1 moves the table's frequency, FM2 sounds the
+/// oscillator moved by the table, FM3 and PM3 feed the table back, PM1 and
+/// PM2 (without forms) move its phase, RM scales by 1 − A.
+#[must_use]
+pub fn mod_kinds() -> Vec<Option<ir::ModOscKind>> {
+    (0..10).map(mod_kind).collect()
+}
+
+fn mod_kind(kind: u32) -> Option<ir::ModOscKind> {
+    use ir::ModOscKind as K;
+    Some(match kind {
+        0 => K::Off,
+        1 => K::Fm,
+        2 => K::FmBy,
+        3 => K::FmFeedback,
+        4 => K::Ring,
+        5 => K::Mix,
+        6 | 7 => K::Pm,
+        8 => K::PmFeedback,
+        9 => K::Blend,
+        _ => return None,
+    })
+}
+
+/// The warp and shaper of each `$NI_WT_FORM_*` value, a script's form mode:
+/// the KSP values are the kinds below (LINEAR 0, SATURATE 18, WRAP 27).
+#[must_use]
+pub fn warp_modes() -> Vec<Option<(WarpShape, FormShaper)>> {
+    (0..=33).map(|k| shape(k).map(|s| (s, shaper(k)))).collect()
 }
 
 /// Kontakt's phase forms, numbered as its phase routine (`0x140567aa0`)

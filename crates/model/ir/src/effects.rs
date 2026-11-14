@@ -1,6 +1,6 @@
 //! The dynamics and time effects' settings in physical units.
 
-use crate::{Network, Rate};
+use crate::{Network, Rate, Section};
 
 /// A feed-forward compressor in physical units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,13 +15,24 @@ pub struct Compressor {
     /// Time constants of the gain reduction rising and falling.
     pub attack_ms: f32,
     pub release_ms: f32,
-    /// Gain after compression.
+    /// Gain after compression, before [`Self::makeup_slope`]'s share.
     pub makeup_db: f32,
+    /// Make-up that follows the settings: this many dB per dB of the
+    /// threshold's full-scale reduction `−threshold·(1 − 1/ratio)`; 0 is none.
+    pub makeup_slope: f32,
     /// Both channels follow the louder one.
     pub link: bool,
     /// 0..=1: the compressed share of the output.
     pub mix: f32,
     pub detector: Detector,
+}
+
+impl Compressor {
+    /// The whole make-up gain in dB at the current threshold and ratio.
+    pub fn makeup(&self) -> f32 {
+        let reduction = -self.threshold_db * (1.0 - 1.0 / self.ratio.max(1.0));
+        self.makeup_db + self.makeup_slope * reduction
+    }
 }
 
 /// What a compressor's level detector reads.
@@ -124,6 +135,186 @@ pub struct Phaser {
     pub phase: f32,
 }
 
+/// A notch phaser: `stages` second-order allpasses at one corner the LFO
+/// sweeps, inside a loop through its own band-pass, averaged with their
+/// input, mixed with the dry signal at a held level, then high-passed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Notches {
+    /// 1..=12.
+    pub stages: u8,
+    /// The corner with the LFO at 0, and the LFO's swing of it, octaves.
+    pub hz: f32,
+    pub octaves: f32,
+    /// The stages' damping is `2·2^r` (their Q `1/(2·2^r)`),
+    /// `r = spread + spread_swing·lfo` held within `±spread_limit`.
+    pub spread: f32,
+    pub spread_swing: f32,
+    pub spread_limit: f32,
+    /// The loop gain; its band-pass spans the corner `÷a` to `·a`,
+    /// `a = r + √(1 + r²)`, `r = loop_width·2^r`, the top edge at most
+    /// `loop_top` as `tan(π·f/rate)` at the running rate.
+    pub feedback: f32,
+    pub loop_width: f32,
+    pub loop_top: f32,
+    /// The LFO's rate, rounding (0: a triangle), depth and warp, and the
+    /// channels' phases either side of it, cycles.
+    pub rate: Rate,
+    pub rounding: f32,
+    pub depth: f32,
+    pub warp: f32,
+    pub phase: f32,
+    pub polarity: Polarity,
+    pub mix: f32,
+    /// The output's high-pass, and the rate it runs nearest to by octaves.
+    pub low_cut_hz: f32,
+    pub internal_hz: f32,
+}
+
+/// A chorus ensemble: [`ENSEMBLE_VOICES`] swept delay lines whose reads
+/// feed back into every line through a circulant `scatter`; each voice's
+/// tap (its read plus its input) turns in the stereo field to a wet bus
+/// with a low shelf on it, plus `direct` of the input. The voices' fixed
+/// shape is shared data; the knobs set the rest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ensemble {
+    pub voices: &'static EnsembleVoices,
+    /// The rest delays' scale: voice `v` rests at `delay[v]·span` s.
+    pub span: f32,
+    /// The LFOs' scale: voice `v` runs at `rate[v]·hz`.
+    pub hz: f32,
+    /// A voice's swing times its LFO rate, s·Hz: every voice sweeps to the
+    /// same pitch whatever its rate.
+    pub sweep: f32,
+    /// Each voice's level on the wet bus (0: heard only through `scatter`)
+    /// and its turn in the stereo field (radians, a rotation).
+    pub levels: [f32; ENSEMBLE_VOICES],
+    pub angles: [f32; ENSEMBLE_VOICES],
+    /// The loop's circulant mix, its first row: line `i` takes
+    /// `Σₖ scatter[(k − i) mod 7]` of read `k` (`[1, 0, …]` each its own).
+    pub scatter: [f32; ENSEMBLE_VOICES],
+    /// The first voice's loop gain; a voice `k` times as long takes it to
+    /// the power `k`, so all decay alike per second.
+    pub feedback: f32,
+    /// The reads' polarity, in the loop and on the bus.
+    pub polarity: Polarity,
+    /// The input into the lines, the wet bus's gain out, and the input
+    /// straight out.
+    pub input: f32,
+    pub wet: f32,
+    pub direct: f32,
+    /// The filter on the wet bus.
+    pub shelf: Section,
+}
+
+pub const ENSEMBLE_VOICES: usize = 7;
+
+/// The voices' fixed shape, a field per row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnsembleVoices {
+    /// The rest delay per unit span.
+    pub delay: [f32; ENSEMBLE_VOICES],
+    /// The LFO's rate per unit hz, and its start (cycles). The LFO is a
+    /// triangle from the rest delay up to the swing and back.
+    pub rate: [f32; ENSEMBLE_VOICES],
+    pub start: [f32; ENSEMBLE_VOICES],
+    /// The triangle's bend: `u` becomes `(1 − b)·u + b·u²`.
+    pub bend: [f32; ENSEMBLE_VOICES],
+    /// A second LFO, a cosine starting at its low point: its rate over the
+    /// voice's, and its depth in swings (0 for none). It moves the delay by
+    /// `depth·(1 + ½·cos)`.
+    pub wobble_rate: [f32; ENSEMBLE_VOICES],
+    pub wobble: [f32; ENSEMBLE_VOICES],
+    /// The one-pole that rounds the sweep, Hz (infinite for none).
+    pub smooth_hz: [f32; ENSEMBLE_VOICES],
+    /// The filter on each line's input.
+    pub filter: [Section; ENSEMBLE_VOICES],
+}
+
+/// Whether a signal passes as it is or turned over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    Normal,
+    Inverted,
+}
+
+/// Four stereo combs on one input, each a line around a soft-clipped,
+/// rotated feedback loop with a smoother in it, read by a swept head, its
+/// mirror and a still head; a triangle LFO sweeps the heads or scans a
+/// window across the voices. Its input mixed in (slot `dry` 0). What the
+/// voices share is carried once; per voice only the interval and detune.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CombBank {
+    /// The first voice's pitch before its interval and detune.
+    pub root_hz: f32,
+    /// Each voice's interval over the root (it also sets the voice's loop
+    /// gain, `feedback^(1/ratio)`) and its detune factor.
+    pub ratio: [f32; 4],
+    pub detune: [f32; 4],
+    /// The lowest voice pitch any setting reaches: the lines' length.
+    pub lowest_hz: f32,
+    /// The root's loop gain a pass.
+    pub feedback: f32,
+    /// 0..=3: the voices after the first, fading in one by one; where the
+    /// scan rests.
+    pub voices: f32,
+    /// 0..=¼: the loop smoother's outer tap, ¼ a zero at Nyquist.
+    pub damping: f32,
+    /// 0..=1: the heads' swing, a share of their rest delay.
+    pub depth: f32,
+    pub rate: Rate,
+    /// How much further back the still head reads, a share of the rest.
+    pub offset: f32,
+    /// The swept head's sign, out and round the loop.
+    pub polarity: Polarity,
+    pub mode: CombMode,
+    /// The share of its shape the LFO moves the scan window.
+    pub scan_depth: f32,
+    pub scan_shape: ScanShape,
+    /// 0..=1: the heads turned apart (and the mirror head in).
+    pub width: f32,
+    /// The wet share; the input makes up the rest.
+    pub mix: f32,
+}
+
+/// A feedback comb on one voice: the input plus its own output, delayed one
+/// period of `hz` and scaled by `feedback` (0..1). Runs per voice, so a route
+/// can move `hz` for each note.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Comb {
+    pub hz: f32,
+    pub feedback: f32,
+    /// Feed-forward: the input delayed, not the output (no ringing).
+    pub forward: bool,
+    /// Octaves a [`crate::ModKind::Cutoff`] depth of 1 moves `hz` (the range
+    /// of the format's frequency control).
+    pub octaves: f32,
+}
+
+/// The lowest `hz` a [`Comb`] reaches: its line's length.
+pub const COMB_LOWEST_HZ: f32 = 20.0;
+
+/// What a [`CombBank`]'s voices play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombMode {
+    /// The swept heads.
+    Standard,
+    /// The swept heads around the still one.
+    ThruZero,
+    /// Still heads, a window scanning the voices.
+    Scan,
+}
+
+/// What moves a [`CombBank`]'s scan window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanShape {
+    /// From the first voice to the last and back.
+    Triangle,
+    /// Once round all the voices, rising.
+    SawUp,
+    /// Once round, falling.
+    SawDown,
+}
+
 /// An algorithmic reverb in physical units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reverb {
@@ -169,6 +360,10 @@ pub enum ImpulseKnob {
         late: bool,
         high: bool,
     },
+    /// The early or late part's length ratio ([`crate::Impulse::size`]).
+    Size {
+        late: bool,
+    },
 }
 
 impl ImpulseKnob {
@@ -177,6 +372,10 @@ impl ImpulseKnob {
     pub fn field_mut(self, law: &mut crate::Impulse) -> &mut f32 {
         match self {
             Self::PredelayMs => &mut law.predelay_ms,
+            Self::Size { late } => {
+                let [early, late_part] = &mut law.size;
+                if late { late_part } else { early }
+            }
             Self::Cut { late, high } => {
                 let cuts = law.cuts.get_or_insert(ImpulseCuts {
                     early: [20.0, 20_000.0],

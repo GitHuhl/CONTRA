@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::ops::{Range, RangeInclusive};
+use std::path::Path;
 use std::sync::Arc;
 
 mod levels;
@@ -15,7 +16,7 @@ use contra_stream::{
 use contra_voice::{Ahdsr, Loop, PERIOD, Read, Region, Shape, Shaper, Side, Warp};
 
 use contra_engine::{
-    Atom, Bus, Control, Crossfade, Group, Level, Plan, RoundRobin, RrCounter, Trigger, Zone,
+    Atom, Bus, Dormant, Group, Level, Plan, RoundRobin, RrCounter, Trigger, Zone, ZoneRules,
     response,
 };
 
@@ -37,6 +38,9 @@ pub fn prepare(
     let mut zones = Vec::new();
     let mut switches: Vec<RangeInclusive<u8>> = Vec::new();
     let mut polyphony = Vec::new();
+    let mut facts = Vec::new();
+    let mut group_rules = Vec::with_capacity(instrument.groups.len());
+    let mut dormant = Vec::new();
     for (index, group) in instrument.groups.iter().enumerate() {
         let group_id = u32::try_from(index).unwrap_or(u32::MAX);
         if let Some(voices) = group.polyphony {
@@ -49,23 +53,46 @@ pub fn prepare(
                 switches.push(range.clone());
             }
         }
+        let rules = rules(group, &switches);
         for (member, z) in group.zones.iter().enumerate() {
-            let Some(Some(sample)) = loaded.get(z.sample) else {
-                continue;
-            };
             let Some(source) = instrument.samples.get(z.sample) else {
                 continue;
             };
-            let mut zone = zone(group, group_id, z, source, sample, (&switches, &client));
+            // A script sees every saved zone, played or not (a purged group,
+            // a sample that failed to open).
+            facts.push(contra_engine::ZoneFacts {
+                id: z.id,
+                name: contra_engine::zone_name(&source.name).into(),
+                group: group_id,
+                keys: z.keys.clone(),
+                velocities: z.velocities.clone(),
+                root: z.root,
+                start: z.start,
+                end: z.end,
+                start_range: z.start_mod,
+                rate: source.rate,
+            });
+            // A purged group loads nothing: a script's un-purge builds it.
+            if group.purged {
+                continue;
+            }
+            let Some(Some(sample)) = loaded.get(z.sample) else {
+                continue;
+            };
+            let mut zone = zone((group, group_id, &rules), z, source, sample, &client);
             zone.member = u16::try_from(member).unwrap_or(u16::MAX);
             zones.push(zone);
         }
+        if group.purged && !group.zones.is_empty() {
+            dormant.push(dormant_of(instrument, group, group_id));
+        }
+        group_rules.push(rules);
     }
     let mut plan = Plan::new(zones, usize::from(instrument.voices));
-    plan.groups = instrument
-        .groups
-        .iter()
-        .map(|g| Group {
+    plan.dormant = Arc::new(dormant);
+    plan.zone_facts = facts;
+    plan.groups = (instrument.groups.iter().zip(group_rules))
+        .map(|(g, zones)| Group {
             name: g.name.clone(),
             level: Level {
                 gain: gain(g.volume_db),
@@ -73,7 +100,7 @@ pub fn prepare(
                 tune: g.tune,
             },
             purged: g.purged,
-            inserts: g.inserts.clone(),
+            inserts: Vec::new(),
             mods: g.mods.clone(),
             envelope: envelope(g.envelope, rate),
             envelopes: g.envelopes.clone(),
@@ -83,6 +110,9 @@ pub fn prepare(
             routes: g.routes.clone(),
             release_trigger: g.trigger == ir::Trigger::Release,
             bus: g.bus,
+            wavetable: g.wavetable.map(read),
+            speed: g.speed,
+            zones,
         })
         .collect();
     if !instrument.buses.is_empty() {
@@ -93,22 +123,49 @@ pub fn prepare(
                 name: b.name.clone(),
                 gain: gain(b.volume_db),
                 pan: b.pan,
-                inserts: b.inserts.clone(),
+                inserts: Vec::new(),
                 sends: b.sends.clone(),
                 to_main: b.to_main,
                 enabled: true,
                 mods: b.mods.clone(),
                 blends: b.blends.clone(),
+                lfos: b.lfos.clone(),
             })
             .collect();
+    }
+    plan.output = instrument.output;
+    plan.route_pitch = instrument.route_pitch;
+    plan.steal_whole_groups = instrument.steal_whole_groups;
+    effects(&mut plan, instrument, rate, &mut diagnostics);
+    plan.polyphony = polyphony;
+    plan.voice_groups.clone_from(&instrument.voice_groups);
+    plan.default_keyswitch = switches.iter().map(|r| *r.start()).min();
+    plan.switches = switches;
+    (plan, diagnostics)
+}
+
+/// Puts `instrument`'s effects into `plan`, whose groups and buses are
+/// its own: every rack, the buses' levels, the slots' laws and the
+/// convolution responses (read here). A build does it, and so does a
+/// snapshot that saves other effects for the same instrument.
+pub fn effects(
+    plan: &mut Plan,
+    instrument: &ir::Instrument,
+    rate: u32,
+    diagnostics: &mut Vec<ir::Diagnostic>,
+) {
+    for (g, from) in plan.groups.iter_mut().zip(&instrument.groups) {
+        g.inserts.clone_from(&from.inserts);
+    }
+    for (b, from) in plan.buses.iter_mut().zip(&instrument.buses) {
+        b.inserts.clone_from(&from.inserts);
+        (b.gain, b.pan) = (gain(from.volume_db), from.pan);
     }
     plan.inserts.clone_from(&instrument.inserts);
     plan.sends.clone_from(&instrument.sends);
     plan.main.clone_from(&instrument.main);
-    plan.output = instrument.output;
-    plan.route_pitch = instrument.route_pitch;
-    plan.steal_whole_groups = instrument.steal_whole_groups;
     plan.slot_laws.clone_from(&instrument.slot_laws);
+    plan.slot_models.clone_from(&instrument.slot_models);
     plan.slot_shapes.clone_from(&instrument.slot_shapes);
     plan.impulses = instrument
         .impulses
@@ -152,11 +209,76 @@ pub fn prepare(
             plan.responses.push((name.clone(), s.clone()));
         }
     }
-    plan.polyphony = polyphony;
-    plan.voice_groups.clone_from(&instrument.voice_groups);
-    plan.default_keyswitch = switches.iter().map(|r| *r.start()).min();
-    plan.switches = switches;
-    (plan, diagnostics)
+}
+
+/// `group` as a purge keeps it: its zones, the samples they play renumbered
+/// from 0.
+fn dormant_of(instrument: &ir::Instrument, group: &ir::Group, id: u32) -> Dormant {
+    let mut source = group.clone();
+    let mut samples = Vec::new();
+    let mut local: HashMap<usize, usize> = HashMap::new();
+    for z in &mut source.zones {
+        let Some(s) = instrument.samples.get(z.sample) else {
+            continue;
+        };
+        z.sample = *local.entry(z.sample).or_insert_with(|| {
+            samples.push(s.clone());
+            samples.len() - 1
+        });
+    }
+    Dormant {
+        group: id,
+        source,
+        samples,
+    }
+}
+
+/// `plan` with purged group `group` loaded and its zones appended (indices of
+/// the zones already there stay), the loads' diagnostics, and how many
+/// samples it loaded. `None` when the group is not dormant. Samples open and
+/// read on the calling thread: call it off the audio thread; with
+/// [`Store::defer_heads`] on, the heads come after ([`Store::take_heads`]).
+pub fn wake(
+    plan: &Plan,
+    group: u32,
+    store: &mut Store,
+    open: &Open<'_>,
+) -> Option<(Plan, Vec<ir::Diagnostic>, usize)> {
+    let d = plan.dormant.iter().find(|d| d.group == group)?;
+    let mut source = d.source.clone();
+    source.purged = false;
+    let instrument = ir::Instrument {
+        groups: vec![source],
+        samples: d.samples.clone(),
+        ..ir::Instrument::DEFAULT
+    };
+    let mut diagnostics = Vec::new();
+    let loaded = load_samples(&instrument, store, open, &mut diagnostics);
+    let client = store.client();
+    let [source] = instrument.groups.as_slice() else {
+        return None;
+    };
+    let rules = rules(source, &plan.switches);
+    let mut out = plan.clone();
+    for (member, z) in source.zones.iter().enumerate() {
+        let (Some(from), Some(Some(sample))) =
+            (instrument.samples.get(z.sample), loaded.get(z.sample))
+        else {
+            continue;
+        };
+        let mut zone = zone((source, group, &rules), z, from, sample, &client);
+        zone.member = u16::try_from(member).unwrap_or(u16::MAX);
+        out.zones.push(zone);
+    }
+    out.dormant = Arc::new(
+        plan.dormant
+            .iter()
+            .filter(|d| d.group != group)
+            .cloned()
+            .collect(),
+    );
+    let count = loaded.iter().flatten().count();
+    Some((out, diagnostics, count))
 }
 
 /// Loads each sample a resident zone plays, pinning the union of its zones'
@@ -173,12 +295,26 @@ fn load_samples(
             used.entry(z.sample).or_default().push((z, group.stream));
         }
     }
-    let used: Vec<_> = used.into_iter().collect();
+    let mut used: Vec<_> = used.into_iter().collect();
+    // The keys played most (middle C and two octaves either side) first, so
+    // deferred heads reach them first.
+    used.sort_by_key(|(_, zones)| {
+        (zones.iter())
+            .map(|(z, _)| {
+                let (lo, hi) = (*z.keys.start(), *z.keys.end());
+                lo.saturating_sub(72).max(48u8.saturating_sub(hi))
+            })
+            .min()
+            .unwrap_or(u8::MAX)
+    });
     // On fast storage a head of FAST_HEAD bytes per channel starts every
-    // page on time; the law's own 60 KB is sized for spinning disks.
-    let fast = (used.first())
-        .and_then(|(index, _)| instrument.samples.get(*index))
-        .is_some_and(|s| contra_stream::fast_storage(&s.file));
+    // page on time; the law's own 60 KB is sized for spinning disks. Each
+    // sample's file answers for itself: a library may keep archives on
+    // several drives.
+    let mut speeds: HashMap<std::path::PathBuf, bool> = HashMap::new();
+    let mut fast = |s: &ir::Sample| {
+        *(speeds.entry(s.file.clone())).or_insert_with(|| contra_stream::fast_storage(&s.file))
+    };
     let opened = parallel(&used, |(index, _)| match instrument.samples.get(*index) {
         Some(sample) => open(sample),
         None => Err(io::Error::new(
@@ -188,6 +324,10 @@ fn load_samples(
     });
     let mut requests = Vec::new();
     let mut slots = Vec::new();
+    // A folder that moved fails every sample in it alike: one line per
+    // folder, not per sample; any other failure is told once per file.
+    let mut missing: std::collections::BTreeMap<&Path, (usize, &Path)> = Default::default();
+    let mut told: std::collections::HashSet<(&Path, String)> = Default::default();
     for ((index, zones), result) in used.iter().zip(opened) {
         let name = instrument
             .samples
@@ -196,13 +336,27 @@ fn load_samples(
         let (source, fmt) = match result {
             Ok(opened) => opened,
             Err(e) => {
-                diagnostics.push(broken("sample-open", format!("{name}: {e}")));
+                match instrument.samples.get(*index) {
+                    Some(s) if e.kind() == io::ErrorKind::NotFound => {
+                        let dir = s.file.parent().unwrap_or(Path::new(""));
+                        missing.entry(dir).or_insert((0, &s.file)).0 += 1;
+                    }
+                    Some(s) if told.insert((&s.file, e.to_string())) => {
+                        diagnostics.push(broken(
+                            "sample-open",
+                            format!("{} cannot be read: {e}", s.file.display()),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => diagnostics.push(broken("sample-open", format!("{name}: {e}"))),
+                }
                 continue;
             }
         };
         let Some(sample) = instrument.samples.get(*index) else {
             continue;
         };
+        let fast = fast(sample);
         requests.push(LoadRequest {
             key: BlobKey {
                 file: format!("{}#{}", sample.file.display(), sample.offset).into(),
@@ -222,15 +376,55 @@ fn load_samples(
         slots.push(*index);
     }
     let mut loaded = vec![None; instrument.samples.len()];
-    for (index, result) in slots.into_iter().zip(store.load_many(requests)) {
-        match result {
-            Ok(s) => {
-                if let Some(slot) = loaded.get_mut(index) {
-                    *slot = Some(s);
+    // A wavetable zone's table is built from its frames right here, so those
+    // samples load whole now even when the store leaves heads for later.
+    let tabled: Vec<usize> = (instrument.groups.iter().filter(|g| g.wavetable.is_some()))
+        .flat_map(|g| g.zones.iter().map(|z| z.sample))
+        .collect();
+    let (now, later): (Vec<_>, Vec<_>) =
+        (slots.into_iter().zip(requests)).partition(|(index, _)| tabled.contains(index));
+    for (batch, whole) in [(now, true), (later, false)] {
+        let (indices, batch): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let results = if whole {
+            store.load_many_now(batch)
+        } else {
+            store.load_many(batch)
+        };
+        for (index, result) in indices.into_iter().zip(results) {
+            match result {
+                Ok(s) => {
+                    if let Some(slot) = loaded.get_mut(index) {
+                        *slot = Some(s);
+                    }
+                }
+                Err(e) => {
+                    let (name, file) = instrument
+                        .samples
+                        .get(index)
+                        .map_or((String::new(), Path::new("")), |s| {
+                            (s.name.clone(), s.file.as_path())
+                        });
+                    if told.insert((file, e.to_string())) {
+                        diagnostics.push(broken(
+                            "sample-load",
+                            format!("{} ({name}) is damaged: {e}", file.display()),
+                        ));
+                    }
                 }
             }
-            Err(e) => diagnostics.push(broken("sample-load", format!("sample {index}: {e}"))),
         }
+    }
+    for (dir, (count, first)) in missing {
+        // The first file is how the host searches for the folder.
+        diagnostics.push(broken(
+            "samples not found",
+            format!(
+                "{count} sample{} not found in {}\nfirst: {}",
+                if count == 1 { "" } else { "s" },
+                dir.display(),
+                first.display()
+            ),
+        ));
     }
     loaded
 }
@@ -308,14 +502,15 @@ fn mix(rows: &[[f32; 2]]) -> Option<Mix> {
     })
 }
 
-/// A group's wavetable as its voices read it.
-fn read(w: ir::Wavetable) -> Read {
+/// A wavetable form as voices read it.
+#[must_use]
+pub fn warp(w: ir::Warp) -> Warp {
     let side = |s| match s {
         ir::Side::Minus => Side::Minus,
         ir::Side::Plus => Side::Plus,
         ir::Side::Both => Side::Both,
     };
-    let warp = |w: ir::Warp| Warp {
+    Warp {
         shape: match w.shape {
             ir::WarpShape::Off => Shape::Off,
             ir::WarpShape::Sync => Shape::Sync,
@@ -349,21 +544,91 @@ fn read(w: ir::Wavetable) -> Read {
             ir::FormShaper::Wrap => Shaper::Wrap,
         },
         amount: w.amount,
-    };
+    }
+}
+
+/// The voice's kind of mod oscillator.
+#[must_use]
+pub fn mod_kind(k: ir::ModOscKind) -> contra_voice::ModKind {
+    use contra_voice::ModKind as V;
+    match k {
+        ir::ModOscKind::Off => V::Off,
+        ir::ModOscKind::Fm => V::Fm,
+        ir::ModOscKind::FmBy => V::FmBy,
+        ir::ModOscKind::FmFeedback => V::FmFeedback,
+        ir::ModOscKind::Pm => V::Pm,
+        ir::ModOscKind::PmFeedback => V::PmFeedback,
+        ir::ModOscKind::Ring => V::Ring,
+        ir::ModOscKind::Mix => V::Mix,
+        ir::ModOscKind::Blend => V::Blend,
+    }
+}
+
+/// A group's wavetable as its voices read it.
+#[must_use]
+pub fn read(w: ir::Wavetable) -> Read {
     Read {
         position: w.position,
         phase: w.phase,
+        phase_random: w.phase_random,
+        gain: w.gain,
+        inharmonic: contra_voice::Inharmonic {
+            on: w.inharmonic.on,
+            amount: w.inharmonic.amount,
+            range: w.inharmonic.range,
+        },
+        modosc: contra_voice::ModOsc {
+            kind: mod_kind(w.modosc.kind),
+            amount: w.modosc.amount,
+            tune: w.modosc.tune,
+            tune_range: w.modosc.tune_range,
+            fm_hz: w.modosc.fm_hz,
+        },
+        rate: 48_000.0,
         warps: w.warps.map(warp),
     }
 }
 
+/// A table plays its cycle at 440 Hz on A4, whatever the zone's root and
+/// the sample's rate: (root, rate).
+const TABLE_PITCH: (u8, u32) = (69, (440.0 * PERIOD) as u32);
+
+/// `plan` with a table for every zone in a wavetable group that has none
+/// (`set_zone_par` moved it there), built off the audio thread; `None` when
+/// none lacks one. A sample not in memory stays without (plays raw). How a
+/// table reads, and dropping it outside a wavetable group, is
+/// `Plan::edit_zone`'s.
+// ponytail: a zone that leaves a wavetable group drops its table and one
+// that returns has it built again (~2 ms off audio); keep it aside if a
+// library toggles zones faster.
+#[must_use]
+pub fn tables(plan: &Plan, client: &StreamClient) -> Option<Plan> {
+    let read = |z: &Zone| {
+        let group = plan.groups.get(z.group as usize)?;
+        group.wavetable.filter(|_| z.region.table.is_none())
+    };
+    plan.zones.iter().any(|z| read(z).is_some()).then(|| {
+        let mut out = plan.clone();
+        for (z, read) in out.zones.iter_mut().zip(plan.zones.iter().map(read)) {
+            let r = &z.region;
+            let Some(table) =
+                read.and_then(|w| levels::table(&r.sample, client, (r.start, r.end), w))
+            else {
+                continue;
+            };
+            z.region.table = Some(table);
+            (z.root, z.sample_rate) = TABLE_PITCH;
+        }
+        out
+    })
+}
+
 fn zone(
-    group: &ir::Group,
-    group_id: u32,
+    (group, group_id, rules): (&ir::Group, u32, &ZoneRules),
     z: &ir::Zone,
     source: &ir::Sample,
     sample: &Arc<Sample>,
-    (switches, client): (&[RangeInclusive<u8>], &StreamClient),
+    client: &StreamClient,
 ) -> Zone {
     let region = Region {
         sample: Arc::clone(sample),
@@ -387,40 +652,40 @@ fn zone(
             levels::table(sample, client, (z.start, z.end.min(source.frames)), read(w))
         }),
     };
-    // A table plays its cycle at 440 Hz on A4, whatever the zone's root and
-    // the sample's rate.
     let (root, rate) = if region.table.is_some() {
-        (69, (440.0 * PERIOD) as u32)
+        TABLE_PITCH
     } else {
         (z.root, source.rate)
     };
     let mut out = Zone::new(region, root, rate);
     out.start_mod = z.start_mod;
     out.slot = z.slot;
+    out.id = z.id;
     out.keys = z.keys.clone();
     out.velocities = z.velocities.clone();
-    for (control, range, (fade_in, fade_out)) in [
-        (Control::Velocity, &z.velocities, z.velocity_fade),
-        (Control::Key, &z.keys, z.key_fade),
-    ] {
-        let (low, high) = (*range.start(), *range.end());
-        if fade_in > 0 || fade_out > 0 {
-            out.crossfades.push(Crossfade {
-                control,
-                fade_in: (fade_in > 0)
-                    .then(|| (low.saturating_sub(1), low.saturating_add(fade_in))),
-                fade_out: (fade_out > 0)
-                    .then(|| (high.saturating_sub(fade_out), high.saturating_add(1))),
-            });
-        }
-    }
-    out.trigger = match group.trigger {
+    out.fades = [z.velocity_fade, z.key_fade];
+    out.range_crossfades();
+    out.group = group_id;
+    rules.apply(&mut out);
+    // The group's own level, pan and tune are its plan group's.
+    out.tune = z.tune;
+    out.gain = gain(z.volume_db);
+    out.pan = z.pan;
+    out
+}
+
+/// What `group` gives each of its zones; `switches` are the plan's ranges.
+fn rules(group: &ir::Group, switches: &[RangeInclusive<u8>]) -> ZoneRules {
+    let mut slots: Vec<u16> = group.zones.iter().map(|z| z.slot).collect();
+    slots.sort_unstable();
+    slots.dedup();
+    let trigger = match group.trigger {
         ir::Trigger::Attack => Trigger::Attack,
         ir::Trigger::Release => Trigger::Release,
         ir::Trigger::First => Trigger::First,
         ir::Trigger::Legato => Trigger::Legato,
     };
-    out.start = group
+    let start = group
         .start
         .iter()
         .filter_map(|(join, rule)| {
@@ -440,32 +705,27 @@ fn zone(
                     length: *length,
                     random: *random,
                 }),
-                ir::StartRule::Cycle { random } => {
-                    let slots: std::collections::BTreeSet<u16> =
-                        group.zones.iter().map(|z| z.slot).collect();
-                    let count = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
-                    Atom::RoundRobin(RoundRobin {
-                        counter: RrCounter::Group,
-                        position: count(slots.range(..z.slot).count()),
-                        length: count(slots.len()),
-                        random: *random,
-                    })
-                }
+                // Each zone's position is its own (ZoneRules::apply).
+                ir::StartRule::Cycle { random } => Atom::RoundRobin(RoundRobin {
+                    counter: RrCounter::Group,
+                    position: 0,
+                    length: u8::try_from(slots.len()).unwrap_or(u8::MAX),
+                    random: *random,
+                }),
             };
             Some((*join, atom))
         })
         .collect();
-    out.group = group_id;
-    out.off_by = group.off_by.and_then(|g| u32::try_from(g).ok());
-    out.voice_group = group.voice_group.and_then(|g| u32::try_from(g).ok());
-    out.keytrack = group.keytrack;
-    // The group's own level, pan and tune are its plan group's.
-    out.tune = z.tune;
-    out.gain = gain(z.volume_db);
-    out.pan = z.pan;
-    out.release_decay_db = group.release_decay_db;
-    out.one_shot = group.one_shot;
-    out
+    ZoneRules {
+        start,
+        slots,
+        trigger,
+        off_by: group.off_by.and_then(|g| u32::try_from(g).ok()),
+        voice_group: group.voice_group.and_then(|g| u32::try_from(g).ok()),
+        keytrack: group.keytrack,
+        release_decay_db: group.release_decay_db,
+        one_shot: group.one_shot,
+    }
 }
 
 fn envelope(e: ir::Envelope, rate: u32) -> Ahdsr {
@@ -505,6 +765,7 @@ mod tests {
 
     fn at(start: u64, start_mod: u64) -> ir::Zone {
         ir::Zone {
+            id: 0,
             mix: Vec::new(),
             sample: 0,
             keys: 0..=127,
@@ -518,7 +779,7 @@ mod tests {
             start,
             end: 1_000_000,
             start_mod,
-            loops: vec![],
+            loops: Default::default(),
             reverse: false,
             slot: 0,
         }

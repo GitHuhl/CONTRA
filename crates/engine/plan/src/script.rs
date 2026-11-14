@@ -22,15 +22,28 @@ pub struct ScriptPlan {
     pub library_folder: Option<Text>,
     /// The installed sampler's factory data folder, when one was found.
     pub factory_folder: Option<Text>,
-    /// Saved values written after `on init`, before `on persistence_changed`.
+    /// Saved values written after `on init`, before `on persistence_changed`;
+    /// sorted by cell (`read_persistent_var` binary-searches a range).
     pub restore: Vec<(u32, i64)>,
     pub restore_texts: Vec<(u32, Text)>,
     pub controls: Controls,
     pub engine_pars: EnginePars,
+    /// The performance view the host prepared for it, by file stem: the
+    /// one name `load_performance_view` loads.
+    pub view: Option<Box<str>>,
     /// The translator's law for each reverb control, keyed by its control identity.
     pub reverb_laws: contra_ir::ReverbControls<contra_ir::Law>,
     /// The networks [`EnginePar::ReverbNetwork`] picks from, in order.
     pub reverb_networks: Vec<contra_ir::Network>,
+    /// The rate kind each [`EnginePar::LfoUnit`] value picks, by value: a
+    /// free [`contra_ir::Rate::Hz`] or one-count [`contra_ir::Rate::Steps`].
+    pub lfo_units: Vec<Option<contra_ir::Rate>>,
+    /// The phase warp and shaper each [`EnginePar::WarpMode`] value picks,
+    /// by value.
+    pub warp_modes: Vec<Option<(contra_voice::Shape, contra_voice::Shaper)>>,
+    /// The mod oscillator kind each [`EnginePar::ModOscKind`] value picks,
+    /// by value.
+    pub mod_kinds: Vec<Option<contra_voice::ModKind>>,
     /// What each [`EnginePar::Knob`] sets, through the translator's law.
     pub knobs: Vec<(contra_ir::KnobTarget, contra_ir::Law)>,
     /// Reads the array files the script names by path while it initialises.
@@ -73,7 +86,9 @@ impl ScriptPlan {
         match par {
             EnginePar::Knob(n) => match self.knobs.get(usize::from(n)).map(|k| k.0) {
                 Some(K::Effect(_) | K::Slot(_) | K::Impulse(_)) => Holder::Slot,
-                Some(K::LfoRate | K::LfoSteps | K::LfoWidth | K::LfoWeight(_)) => Holder::Lfo,
+                Some(K::LfoRate | K::LfoSteps | K::LfoWidth | K::LfoPhase | K::LfoWeight(_)) => {
+                    Holder::Lfo
+                }
                 _ => Holder::Group,
             },
             EnginePar::EffectBypass
@@ -86,9 +101,17 @@ impl ScriptPlan {
             | EnginePar::StereoWidth
             | EnginePar::StereoPan => Holder::Slot,
             EnginePar::EffectType | EnginePar::EffectSubtype => Holder::SlotKind,
-            EnginePar::LfoFade => Holder::Lfo,
+            EnginePar::LfoFade | EnginePar::LfoRetrigger | EnginePar::LfoUnit => Holder::Lfo,
             EnginePar::RouteDepth | EnginePar::RouteIntensity => Holder::Route,
-            EnginePar::ModBypass => Holder::Mod,
+            // An envelope's stages live on its modulator: a group without
+            // one is a missing target, as for its bypass.
+            EnginePar::ModBypass
+            | EnginePar::Attack
+            | EnginePar::Hold
+            | EnginePar::Decay
+            | EnginePar::Sustain
+            | EnginePar::Release
+            | EnginePar::AttackCurve => Holder::Mod,
             EnginePar::Volume | EnginePar::Pan | EnginePar::Tune | EnginePar::OutputChannel => {
                 Holder::Level
             }
@@ -149,6 +172,17 @@ impl CcLink {
     }
 }
 
+/// A controller that moves a foreign script's control `id` (see
+/// [`ir::KnobMod`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KnobModPlan {
+    pub slot: u8,
+    pub cc: u8,
+    pub id: i32,
+    pub saved: f32,
+    pub ratio: f32,
+}
+
 pub use contra_script_ui::{Controls, LookPars};
 
 /// Entry points; a missing callback lets events through unchanged.
@@ -158,11 +192,15 @@ pub struct Callbacks {
     pub note: Option<u32>,
     pub release: Option<u32>,
     pub controller: Option<u32>,
+    /// `on poly_at`, run for each polyphonic aftertouch message.
+    pub poly_at: Option<u32>,
     pub persistence_changed: Option<u32>,
     pub listener: Option<u32>,
     pub pgs_changed: Option<u32>,
     /// `on ui_controls`, run first when any control moves.
     pub ui_controls: Option<u32>,
+    /// `on ui_update`, run after a control moved.
+    pub ui_update: Option<u32>,
     pub async_complete: Option<u32>,
     /// Every control by UI id, with its own `on ui_control` if it has one.
     pub ui_control: Vec<(i32, Option<u32>)>,
@@ -210,7 +248,8 @@ impl Recall {
     }
 }
 
-/// One script slot's saved values, as cell writes.
+/// One script slot's saved values, as cell writes, each sorted by cell
+/// (`read_persistent_var` binary-searches a range).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Saved {
     pub ints: Vec<(u32, i64)>,

@@ -12,7 +12,6 @@ use contra_ui::app::{
     self, Action, App, Envelope, Filter, Library, Part, PartTab, Pass, Sound, Stats, Zone,
 };
 use mui::prelude::{Buttons, Input, Point, PointerInput, Size, Ui};
-use mui::vello;
 
 struct Shot {
     ui: Ui,
@@ -94,6 +93,7 @@ fn specimen() -> App {
     let library = |name: &str, presets: &[&str], starred| Library {
         name: name.into(),
         presets: presets.iter().map(|p| (*p).to_owned()).collect(),
+        recalls: Vec::new(),
         starred,
         art: Vec::new(),
     };
@@ -106,7 +106,7 @@ fn specimen() -> App {
             library("Una Corda", &["Una Corda Cotton", "Una Corda Felt"], false),
         ],
         recent: vec![(0, 0), (2, 0), (4, 0)],
-        stats: Stats { cpu: 3., voices: 12, ram_mb: 412, samples_mb: 180, disk_mbs: 1.4, cache_mb: 128 },
+        stats: Stats { cpu: 3., peak: 9., voices: 12, ram_mb: 412, samples_mb: 180, disk_mbs: 1.4, cache_mb: 128 },
         level: 0.4,
         report: vec![
             "Areia 16 Violins: the convolution reverb's impulse is not in the library\nThe library names Hall.wav in its reverb, and no file of that name ships with it; the dry signal plays.".into(),
@@ -238,6 +238,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         s.click("library-0")?;
         s.save("presets")?;
         s.click("preset-0")?;
+        s.app.loading = Some(app::Loading::New);
+        s.app.load_progress = contra_protocol::LoadSnapshot {
+            stage: contra_protocol::LoadStage::Samples,
+            percent: 76,
+            bytes: 152_000_000,
+            total: 283_000_000,
+        };
+        s.save("loading")?;
+        s.app.loading = None;
         s.app.parts = parts();
         s.save("rack")?;
         for menu in [
@@ -281,33 +290,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn paint(ui: &Ui, w: u16, h: u16) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut ctx = vello::vello_cpu::RenderContext::new(w, h);
-    let mut resources = vello::vello_cpu::Resources::default();
     let scene = ui.scene().ok_or("no scene")?;
-    let cpu = &mut vello::Cpu {
-        ctx: &mut ctx,
-        resources: &mut resources,
-        cache: &mut vello::Cache::default(),
-    };
-    vello::paint(cpu, scene, vello::kurbo::Affine::IDENTITY).map_err(|e| format!("{e:?}"))?;
-    ctx.flush();
-    let mut pix = vello::vello_cpu::Pixmap::new(w, h);
-    ctx.render(&mut pix, &mut resources);
-    Ok(pix
-        .take_unpremultiplied()
-        .iter()
-        .flat_map(|p| [p.r, p.g, p.b, p.a])
-        .collect())
+    Ok(mui_headless::Raster::new(w, h).draw(scene, 1.0)?)
 }
 
 fn save(file: &Path, w: u16, h: u16, rgba: &[u8]) -> Result<(), Box<dyn Error>> {
-    let mut e = png::Encoder::new(
-        std::io::BufWriter::new(std::fs::File::create(file)?),
-        w.into(),
-        h.into(),
-    );
-    e.set_color(png::ColorType::Rgba);
-    e.set_depth(png::BitDepth::Eight);
-    e.write_header()?.write_image_data(rgba)?;
-    Ok(())
+    Ok(mui_headless::write_png(file, w.into(), h.into(), rgba)?)
 }

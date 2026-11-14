@@ -2,9 +2,12 @@
 
 mod glide;
 mod halfband;
+mod section;
 
 pub use glide::{Fader, Levels};
 pub use halfband::Halfband;
+pub use contra_law::{Section, Sections, Stage};
+pub use section::{Biquad32, bilinear};
 
 /// One stereo biquad section, transposed direct form II, f64 state so
 /// low bands stay clean at high rates.
@@ -26,6 +29,7 @@ impl Biquad {
     }
 
     /// Filters both channels of `io` in place.
+    #[inline]
     pub fn process(&mut self, io: &mut [[f32; 2]]) {
         let [b0, b1, b2, a1, a2] = self.c;
         for frame in io {

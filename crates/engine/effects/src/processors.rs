@@ -2,13 +2,15 @@
 //! delays, dynamics, drives, a cascade) and the summed EQ and filter stages,
 //! with their settings in DSP terms. Not real-time unless a function says so.
 
-use contra_dsp::delay::{MAX_MS, ModDelay, Phaser, PhaserSettings};
-use contra_dsp::drive::{self, Circuit, Clipper, Shaper};
+use contra_dsp::delay::{CombBank, CombSettings, MAX_MS, ModDelay, Phaser, PhaserSettings};
+use contra_dsp::drive::{self, Circuit, Clipper, Crush, Overdrive, Reduction, Shaper, Voicing};
 use contra_dsp::dynamics::{
     Compressor, CompressorSettings, Detector, Limiter, LimiterSettings, Transient,
     TransientSettings,
 };
-use contra_dsp::filter::{Cascade, CascadeSettings, CascadeStage, Clocked, ClockedShape, Svf};
+use contra_dsp::filter::{
+    Cascade, CascadeSettings, CascadeStage, Clocked, ClockedShape, NotchSettings, Notches, Svf,
+};
 use contra_dsp::reverb::{Combs, Convolver, Fdn, Hadamard, Network, Settings};
 use contra_ir as ir;
 use contra_voice::Gain;
@@ -34,29 +36,77 @@ pub trait Wet: Send {
     /// The slot's settings as scripts left them, at the host's tempo,
     /// before each block. Never allocates.
     fn set(&mut self, _kind: ir::EffectKind, _tempo: f32) {}
+    /// Frames after which silent input leaves it silent, once nothing
+    /// louder than silence went into its state for as long; `None`: it
+    /// always runs.
+    fn memory(&self) -> Option<usize> {
+        None
+    }
+    /// The loudest value the last [`Wet::process`] wrote into its state
+    /// (its lines, rings and filters), heard or not: a muted output may
+    /// hide a tail a later setting lets out.
+    fn written(&self) -> f32 {
+        0.0
+    }
+    /// `silence.len()` silent frames pass unprocessed: its clocks (an LFO,
+    /// a glide) move on as [`Wet::process`] would move them. `silence` is
+    /// scratch. Only called on processors with a [`Wet::memory`].
+    fn idle(&mut self, _silence: &mut [[f32; 2]]) {}
+    /// Whether its input gains are all 0, so its input reaches neither its
+    /// state nor its output: the slot hears it as silence.
+    fn deaf(&self) -> bool {
+        false
+    }
 }
 
 impl Wet for Convolver {
     fn process(&mut self, io: &mut [[f32; 2]]) {
         Convolver::process(self, io);
     }
-}
 
-impl Wet for Compressor {
-    fn process(&mut self, io: &mut [[f32; 2]]) {
-        Compressor::process(self, io);
+    // No clocks and no feedback: its state is its last `taps` inputs (and
+    // the sums made of them), so silent input alone settles it; the slot's
+    // output gain sits after it, in the rack. `written` stays 0.
+    fn memory(&self) -> Option<usize> {
+        Some(self.taps())
     }
 }
 
-impl Wet for Limiter {
+// Dynamics follow their slot each span: a script may move any setting
+// (Una Corda's compressor amount and transient knobs).
+impl Wet for Rated<Compressor> {
     fn process(&mut self, io: &mut [[f32; 2]]) {
-        Limiter::process(self, io);
+        self.0.process(io);
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
+        if let ir::EffectKind::Compressor(c) = kind {
+            self.0.set(compressor(c), self.1);
+        }
+    }
+}
+
+impl Wet for Rated<Limiter> {
+    fn process(&mut self, io: &mut [[f32; 2]]) {
+        self.0.process(io);
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
+        if let ir::EffectKind::Limiter(l) = kind {
+            self.0.set(limiter(l), self.1);
+        }
     }
 }
 
 impl Wet for Transient {
     fn process(&mut self, io: &mut [[f32; 2]]) {
         Transient::process(self, io);
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
+        if let ir::EffectKind::Transient(t) = kind {
+            Transient::set(self, transient(t));
+        }
     }
 }
 
@@ -125,6 +175,18 @@ impl Wet for Network {
         Network::process(self, io);
     }
 
+    fn memory(&self) -> Option<usize> {
+        Some(Network::memory(self))
+    }
+
+    fn written(&self) -> f32 {
+        Network::written(self)
+    }
+
+    fn idle(&mut self, silence: &mut [[f32; 2]]) {
+        Network::idle(self, silence);
+    }
+
     fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
         if let ir::EffectKind::Reverb(r) = kind {
             Network::set(self, settings(r));
@@ -137,9 +199,49 @@ impl Wet for ModDelay {
         ModDelay::process(self, io);
     }
 
+    fn memory(&self) -> Option<usize> {
+        Some(ModDelay::memory(self))
+    }
+
+    fn written(&self) -> f32 {
+        ModDelay::written(self)
+    }
+
+    fn idle(&mut self, silence: &mut [[f32; 2]]) {
+        ModDelay::idle(self, silence.len());
+    }
+
+    fn deaf(&self) -> bool {
+        ModDelay::deaf(self)
+    }
+
     fn set(&mut self, kind: ir::EffectKind, tempo: f32) {
         if let ir::EffectKind::Delay(d) = kind {
             ModDelay::set(self, delay(d, tempo));
+        }
+    }
+}
+
+impl Wet for CombBank {
+    fn process(&mut self, io: &mut [[f32; 2]]) {
+        CombBank::process(self, io);
+    }
+
+    fn memory(&self) -> Option<usize> {
+        Some(CombBank::memory(self))
+    }
+
+    fn written(&self) -> f32 {
+        CombBank::written(self)
+    }
+
+    fn idle(&mut self, silence: &mut [[f32; 2]]) {
+        CombBank::idle(self, silence.len());
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, tempo: f32) {
+        if let ir::EffectKind::CombBank(c) = kind {
+            CombBank::set(self, comb_bank(c, tempo));
         }
     }
 }
@@ -156,14 +258,72 @@ impl Wet for Phaser {
     }
 }
 
-impl Wet for Shaper {
+impl Wet for Notches {
     fn process(&mut self, io: &mut [[f32; 2]]) {
-        Shaper::process(self, io);
+        Notches::process(self, io);
+    }
+
+    fn memory(&self) -> Option<usize> {
+        Some(Notches::memory(self))
+    }
+
+    fn written(&self) -> f32 {
+        Notches::written(self)
+    }
+
+    fn idle(&mut self, silence: &mut [[f32; 2]]) {
+        Notches::idle(self, silence.len());
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, tempo: f32) {
+        if let ir::EffectKind::Notches(n) = kind {
+            Notches::set(self, notches(n, tempo));
+        }
+    }
+}
+
+impl Wet for Rated<Shaper> {
+    fn process(&mut self, io: &mut [[f32; 2]]) {
+        self.0.process(io);
     }
 
     fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
         if let ir::EffectKind::Shaper(s) = kind {
-            self.set_curve(curve(s.curve));
+            self.0.retune(curve(s.curve), tone(s), self.1);
+        }
+    }
+
+    // A memoryless curve between filters whose slowest pole (a 12.5 Hz
+    // Butterworth high-pass) is down 120 dB after a quarter second: silent
+    // input for that long leaves it silent.
+    fn memory(&self) -> Option<usize> {
+        Some(self.1 as usize / 4)
+    }
+}
+
+/// A drive unit on summed audio and the rate its settings retune at.
+struct Rated<T>(T, u32);
+
+impl Wet for Rated<Overdrive> {
+    fn process(&mut self, io: &mut [[f32; 2]]) {
+        self.0.process(io);
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
+        if let ir::EffectKind::Overdrive(o) = kind {
+            self.0.set(voicing(o), self.1);
+        }
+    }
+}
+
+impl Wet for Rated<Crush> {
+    fn process(&mut self, io: &mut [[f32; 2]]) {
+        self.0.process(io);
+    }
+
+    fn set(&mut self, kind: ir::EffectKind, _tempo: f32) {
+        if let ir::EffectKind::Crush(c) = kind {
+            self.0.set(reduction(c, self.1));
         }
     }
 }
@@ -171,6 +331,15 @@ impl Wet for Shaper {
 impl Wet for Clipper {
     fn process(&mut self, io: &mut [[f32; 2]]) {
         Clipper::process(self, io);
+    }
+}
+
+fn transient(t: ir::Transient) -> TransientSettings {
+    TransientSettings {
+        attack: t.attack,
+        sustain: t.sustain,
+        gain_db: t.gain_db,
+        clip: t.clip,
     }
 }
 
@@ -213,7 +382,7 @@ fn compressor(c: ir::Compressor) -> CompressorSettings {
         knee_db: c.knee_db,
         attack_ms: c.attack_ms,
         release_ms: c.release_ms,
-        makeup_db: c.makeup_db,
+        makeup_db: c.makeup(),
         link: c.link,
         mix: c.mix,
         detector: match c.detector {
@@ -270,6 +439,62 @@ fn delay(d: ir::Delay, tempo: f32) -> contra_dsp::delay::Settings {
     }
 }
 
+fn notches(n: ir::Notches, tempo: f32) -> NotchSettings {
+    NotchSettings {
+        stages: n.stages,
+        hz: n.hz,
+        octaves: n.octaves,
+        spread: n.spread,
+        spread_swing: n.spread_swing,
+        spread_limit: n.spread_limit,
+        feedback: n.feedback,
+        loop_width: n.loop_width,
+        loop_top: n.loop_top,
+        lfo_hz: hz(n.rate, tempo),
+        rounding: n.rounding,
+        depth: n.depth,
+        warp: n.warp,
+        phase: n.phase,
+        sign: match n.polarity {
+            ir::Polarity::Normal => 1.0,
+            ir::Polarity::Inverted => -1.0,
+        },
+        mix: n.mix,
+        low_cut_hz: n.low_cut_hz,
+        internal_hz: n.internal_hz,
+    }
+}
+
+fn comb_bank(c: ir::CombBank, tempo: f32) -> CombSettings {
+    use contra_dsp::delay::ScanShape;
+    let blend = |on: bool| if on { 1.0 } else { 0.0 };
+    CombSettings {
+        root_hz: c.root_hz,
+        ratio: c.ratio,
+        detune: c.detune,
+        feedback: c.feedback,
+        voices: c.voices,
+        damping: c.damping,
+        depth: c.depth,
+        lfo_hz: hz(c.rate, tempo),
+        offset: c.offset,
+        polarity: match c.polarity {
+            ir::Polarity::Normal => 1.0,
+            ir::Polarity::Inverted => -1.0,
+        },
+        thru_zero: blend(c.mode == ir::CombMode::ThruZero),
+        scan: blend(c.mode == ir::CombMode::Scan),
+        scan_depth: c.scan_depth,
+        scan_shape: match c.scan_shape {
+            ir::ScanShape::Triangle => ScanShape::Triangle,
+            ir::ScanShape::SawUp => ScanShape::SawUp,
+            ir::ScanShape::SawDown => ScanShape::SawDown,
+        },
+        width: c.width,
+        mix: c.mix,
+    }
+}
+
 fn phaser(p: ir::Phaser, tempo: f32) -> PhaserSettings {
     PhaserSettings {
         stages: p.stages,
@@ -314,17 +539,12 @@ fn settings(r: ir::Reverb) -> Settings {
     }
 }
 
-/// The processor slot `slot` runs; `moved` when routes move it. Not real-time.
-pub fn processor(
-    slot: Option<ir::Effect>,
-    moved: bool,
-    rate: u32,
-    impulses: &Responses<'_>,
-) -> Dsp {
+/// The processor slot `slot` runs. Not real-time.
+pub fn processor(slot: Option<ir::Effect>, rate: u32, impulses: &Responses<'_>) -> Dsp {
     match slot.map(|e| e.kind) {
-        Some(ir::EffectKind::Eq(bells)) if moved => {
-            Dsp::Bells(Box::new(filters::VoiceEq::new(bells, rate)))
-        }
+        // Retuned from its slot each span: a route or a script may move any
+        // band, and one saved flat (no stages) may be raised later.
+        Some(ir::EffectKind::Eq(bells)) => Dsp::Bells(Box::new(filters::VoiceEq::new(bells, rate))),
         Some(ir::EffectKind::Filter(f)) => {
             let mut svf = Svf::new(filters::shape(&f));
             svf.set_cutoff(f.hz, rate);
@@ -333,7 +553,7 @@ pub fn processor(
             Dsp::Filter(Box::new(svf))
         }
         // Built even while bypassed: a script may enable it later.
-        Some(ir::EffectKind::Eq(_) | ir::EffectKind::Formant(_)) => {
+        Some(ir::EffectKind::Formant(_)) => {
             let live = slot.map(|e| ir::Effect { bypass: false, ..e });
             let sections = filters::sections(&[live]);
             Dsp::Eq(filters::stages(&sections, rate))
@@ -350,8 +570,12 @@ pub fn processor(
             }
             None => wet(Box::new(Fdn::new(settings(r), rate))),
         },
-        Some(ir::EffectKind::Compressor(c)) => wet(Box::new(Compressor::new(compressor(c), rate))),
-        Some(ir::EffectKind::Limiter(l)) => wet(Box::new(Limiter::new(limiter(l), rate))),
+        Some(ir::EffectKind::Compressor(c)) => {
+            wet(Box::new(Rated(Compressor::new(compressor(c), rate), rate)))
+        }
+        Some(ir::EffectKind::Limiter(l)) => {
+            wet(Box::new(Rated(Limiter::new(limiter(l), rate), rate)))
+        }
         // ponytail: an echo gets the longest line, so a script or a
         // tempo can lengthen it; a swept line only what it needs.
         Some(ir::EffectKind::Delay(d)) => {
@@ -362,6 +586,13 @@ pub fn processor(
             wet(Box::new(ModDelay::new(delay(d, 120.0), rate, max_ms)))
         }
         Some(ir::EffectKind::Phaser(p)) => wet(Box::new(Phaser::new(phaser(p, 120.0), rate))),
+        Some(ir::EffectKind::Notches(n)) => wet(Box::new(Notches::new(notches(n, 120.0), rate))),
+        Some(ir::EffectKind::Ensemble(e)) => wet(Box::new(crate::ensemble::Ensemble::new(e, rate))),
+        Some(ir::EffectKind::CombBank(c)) => wet(Box::new(CombBank::new(
+            comb_bank(c, 120.0),
+            rate,
+            c.lowest_hz,
+        ))),
         Some(ir::EffectKind::Cascade(c)) => wet(Box::new(Cascade::new(cascade(c), rate))),
         Some(ir::EffectKind::Clocked(c)) => {
             let shape = match c.shape {
@@ -371,7 +602,15 @@ pub fn processor(
             };
             wet(Box::new(Clocked::new(shape, [c.cutoff, c.resonance], rate)))
         }
-        Some(ir::EffectKind::Shaper(s)) => wet(Box::new(shaper(s, rate))),
+        // Drive effects run in any rack: on one voice in a group rack, on
+        // the sum in a bus or instrument rack.
+        Some(ir::EffectKind::Shaper(s)) => wet(Box::new(Rated(shaper(s, rate), rate))),
+        Some(ir::EffectKind::Overdrive(o)) => {
+            wet(Box::new(Rated(Overdrive::new(voicing(o), rate), rate)))
+        }
+        Some(ir::EffectKind::Crush(c)) => {
+            wet(Box::new(Rated(Crush::new(reduction(c, rate), 1), rate)))
+        }
         Some(ir::EffectKind::Clipper(c)) => wet(Box::new(Clipper::new(
             Circuit {
                 drive: c.drive,
@@ -385,15 +624,7 @@ pub fn processor(
             },
             rate,
         ))),
-        Some(ir::EffectKind::Transient(t)) => wet(Box::new(Transient::new(
-            TransientSettings {
-                attack: t.attack,
-                sustain: t.sustain,
-                gain_db: t.gain_db,
-                clip: t.clip,
-            },
-            rate,
-        ))),
+        Some(ir::EffectKind::Transient(t)) => wet(Box::new(Transient::new(transient(t), rate))),
         _ => Dsp::None,
     }
 }
@@ -411,12 +642,17 @@ pub fn apply(m: Gain, io: &mut [[f32; 2]]) {
 
 /// The waveshaper for `s` at `rate`, in a group rack or a bus rack.
 pub fn shaper(s: ir::Shaper, rate: u32) -> Shaper {
-    let tone = drive::Tone {
+    Shaper::new(curve(s.curve), tone(s), rate)
+}
+
+/// The filters around `s`'s curve.
+pub fn tone(s: ir::Shaper) -> drive::Tone {
+    drive::Tone {
         pre_lowpass_hz: s.pre_lowpass_hz,
         lowpass_hz: s.lowpass_hz,
         highpass_hz: s.highpass_hz,
-    };
-    Shaper::new(curve(s.curve), tone, rate)
+        sections: s.sections,
+    }
 }
 
 pub fn curve(c: ir::DriveCurve) -> drive::Curve {
@@ -428,5 +664,74 @@ pub fn curve(c: ir::DriveCurve) -> drive::Curve {
         ir::DriveCurve::Fold(x) => drive::Curve::Fold(x),
         ir::DriveCurve::Tanh(x) => drive::Curve::Tanh(x),
         ir::DriveCurve::Atan(x) => drive::Curve::Atan(x),
+        ir::DriveCurve::Saturate(x) => drive::Curve::Saturate(x),
+        ir::DriveCurve::Table { drive, points } => drive::Curve::Table { drive, points },
+    }
+}
+
+/// Multiband overdrive settings in DSP terms.
+pub fn voicing(o: ir::Overdrive) -> Voicing {
+    Voicing {
+        split_hz: o.split_hz,
+        smooth_hz: o.smooth_hz,
+        drive: o.drive,
+        mix: o.mix,
+        level: o.level,
+        curve: o.curve,
+    }
+}
+
+/// Sample-and-bit reduction settings in DSP terms: sample hold, bits and noise.
+pub fn reduction(c: ir::Crush, rate: u32) -> Reduction {
+    let hold = if c.rate < 1.0 {
+        (1.0 / c.rate.max(1e-6)).min(rate as f32 / 50.0) + 1.0
+    } else {
+        1.0
+    };
+    Reduction {
+        hold,
+        bits: (c.bits < 16.0).then_some(c.bits.max(1.0)),
+        noise: c.noise,
+        noise_tone: c.noise_tone,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_effects_run_on_summed_audio() {
+        let o = ir::Overdrive {
+            split_hz: [700.0, 2000.0, 4000.0],
+            smooth_hz: [8000.0, 6000.0, 3000.0],
+            drive: 4.0,
+            mix: 1.0,
+            level: 1.0,
+            curve: Box::leak(Box::new(std::array::from_fn(|i| (i as f32 - 128.0) / 64.0))),
+        };
+        let c = ir::Crush {
+            rate: 0.25,
+            bits: 8.0,
+            noise: 0.0,
+            noise_tone: 0.0,
+        };
+        for kind in [ir::EffectKind::Overdrive(o), ir::EffectKind::Crush(c)] {
+            let slot = ir::Effect {
+                kind,
+                bypass: false,
+                output: 1.0,
+                dry: 0.0,
+            };
+            let Dsp::Wet(mut unit, _) = processor(Some(slot), 48_000, &Responses(&[], &[])) else {
+                panic!("{kind:?} has no bus processor");
+            };
+            let mut io: Vec<[f32; 2]> = (0..256)
+                .map(|n| [(n as f32 * 0.05).sin() * 0.8; 2])
+                .collect();
+            let dry = io.clone();
+            unit.process(&mut io);
+            assert_ne!(io, dry, "{kind:?}");
+        }
     }
 }

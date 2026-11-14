@@ -37,7 +37,7 @@ fn zone(store: &mut Store, level: f32, group: u32) -> Zone {
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     };
     let mut z = Zone::new(region, 60, RATE);
@@ -110,11 +110,38 @@ fn off(key: u8) -> Timed<Event> {
     }
 }
 
+fn cc(controller: u8, value: u8) -> Timed<Event> {
+    Timed {
+        at: SampleTime(0),
+        body: Event::midi1(0xB0, controller, value),
+    }
+}
+
 /// Left level at the end of a 4096-frame block.
 fn level(e: &mut Engine, input: &[Timed<Event>]) -> f32 {
     let mut out = vec![[0.0; 2]; 4096];
     e.process(&mut out, input);
     out.last().unwrap()[0]
+}
+
+/// Kontakt's `real_to_int` of a NaN is 42 (measured; `contra_ksp`'s
+/// `NAN_INT`): Dolce's start offset hangs on it.
+#[test]
+fn a_real_zero_over_zero_converts_as_kontakt_does() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let zones = vec![zone(&mut store, 0.25, 0), zone(&mut store, 0.5, 1)];
+    let mut e = engine(
+        &store,
+        zones,
+        "on init
+            declare $z := 0
+        end on
+        on note
+            disallow_group($ALL_GROUPS)
+            allow_group(real_to_int(int_to_real(127) * int_to_real($z) / int_to_real($z)) - 41)
+        end on",
+    );
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
 }
 
 #[test]
@@ -191,6 +218,37 @@ fn a_child_ends_with_its_key_even_when_the_keys_release_is_ignored() {
     assert_eq!(e.active_voices(), 0);
 }
 
+/// Una Corda's pedal: the child's own release, sent by its key's, is ignored
+/// while the pedal is down and the child rings on (native rings 3 s past the
+/// key-up); the pedal-up `note_off` ends it.
+#[test]
+fn a_child_whose_own_release_is_ignored_rings_until_its_note_off() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut z = zone(&mut store, 0.5, 0);
+    z.keys = 72..=72;
+    let mut e = engine(
+        &store,
+        vec![z],
+        "on init
+            declare $child
+        end on
+        on note
+            ignore_event($EVENT_ID)
+            $child := play_note($EVENT_NOTE + 12, $EVENT_VELOCITY, 0, -1)
+        end on
+        on release
+            ignore_event($EVENT_ID)
+        end on
+        on controller
+            note_off($child)
+        end on",
+    );
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
+    assert!((level(&mut e, &[off(60)]) - 0.5).abs() < 1e-3, "held");
+    assert_eq!(level(&mut e, &[cc(64, 0)]), 0.0);
+    assert_eq!(e.active_voices(), 0);
+}
+
 /// CHORUS and Dolce: `on release` waits a millisecond, then plays its
 /// release sample on `$EVENT_NOTE` and takes the key out of its legato
 /// buffer. Once the ignored key's note left the ledger (a block boundary
@@ -260,6 +318,30 @@ fn at_pedal_up_a_script_sees_the_keys_it_held_as_up() {
     assert_eq!(level(&mut e, &[pedal(0)]), 0.0);
     level(&mut e, &[]);
     assert_eq!(e.active_voices(), 0);
+}
+
+/// Kontakt runs `on release` at the key-up and again at pedal-up for each
+/// note the pedal held, after `on controller` (oracle, sine probe, Kontakt 8:
+/// "release,60,cc64=127" at the key-up, "release,60,cc64=0" at pedal-up).
+#[test]
+fn pedal_up_runs_on_release_again_for_the_notes_it_held() {
+    let store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut e = engine(
+        &store,
+        Vec::new(),
+        "on init
+            declare $n
+        end on
+        on release
+            inc($n)
+            message($n & \",\" & %CC[64])
+        end on",
+    );
+    level(&mut e, &[cc(64, 127), on(60)]);
+    level(&mut e, &[off(60)]);
+    assert_eq!(e.last_message(), "1,127");
+    level(&mut e, &[cc(64, 0)]);
+    assert_eq!(e.last_message(), "2,0");
 }
 
 /// `%CC_TOUCHED` marks the controller that changed: Pacific releases its
@@ -397,6 +479,7 @@ fn a_script_switches_on_a_waveshaper_bypassed_at_load() {
             curve: ir::DriveCurve::Soft(1.0),
             lowpass_hz: None,
             highpass_hz: None,
+            sections: ir::Sections::NONE,
         }),
         bypass: true,
         output: 1.0,
@@ -640,6 +723,7 @@ fn a_script_finds_a_modulator_that_carries_no_route() {
         slot: 33,
         name: "Phase_P1".into(),
         names: vec![String::new()],
+        depths: vec![0.0],
     }];
     let script = contra_ksp::compile(
         "on init
@@ -1385,6 +1469,7 @@ fn a_script_moves_a_group_onto_a_bus() {
             enabled: true,
             mods: Vec::new(),
             blends: Vec::new(),
+            lfos: Vec::new(),
         });
         let script = contra_ksp::compile(
             &format!(
@@ -1789,6 +1874,93 @@ fn a_script_moves_a_playing_reverbs_time() {
     assert!(long > short + 10.0, "short {short} dB, long {long} dB");
 }
 
+/// One 0.5-level zone under a Lua script.
+fn lua_engine(store: &mut Store, source: &str) -> Engine {
+    let zones = vec![zone(store, 0.5, 0)];
+    let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+    let mut plan = Plan::new(zones, 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+    Engine::new(Arc::new(plan), store.client(), RATE)
+}
+
+#[test]
+fn a_uvi_note_on_an_oscillator_starts_only_that_zone_slot() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut second = zone(&mut store, 0.25, 0);
+    second.slot = 1;
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0), second], 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    let source = "function onNote(e) playNote{note=e.note, velocity=e.velocity, oscIndex=1} end";
+    let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+    plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let measured = level(&mut e, &[on(60)]);
+    assert!((measured - 0.25).abs() < 1e-3, "{measured}");
+}
+
+#[test]
+fn a_script_modulation_sent_at_init_scales_notes_that_start_later() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    for g in &mut plan.groups {
+        g.mods = vec![contra_engine::ir::Mod {
+            name: "Script Event Modulation 1".into(),
+            slot: 1,
+            target: 0,
+            bypass: false,
+            kind: contra_engine::ir::ModKind::Volume {
+                source: contra_engine::ir::Source::Script(1),
+                intensity: 1.0,
+                curve: contra_engine::ir::Curve::Depth { power: 1 },
+                tau_ms: 0.0,
+            },
+        }];
+    }
+    let source = "function onInit() sendScriptModulation(1, 0.5) end
+        function onNote(e) postEvent(e) end";
+    let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+    plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let measured = level(&mut e, &[on(60)]);
+    assert!((measured - 0.25).abs() < 1e-3, "{measured}");
+}
+
+#[test]
+fn a_script_modulation_index_keeps_its_value_after_many_others() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    for g in &mut plan.groups {
+        g.mods = vec![contra_engine::ir::Mod {
+            name: "Script Event Modulation 20".into(),
+            slot: 1,
+            target: 0,
+            bypass: false,
+            kind: contra_engine::ir::ModKind::Volume {
+                source: contra_engine::ir::Source::Script(20),
+                intensity: 1.0,
+                curve: contra_engine::ir::Curve::Depth { power: 1 },
+                tau_ms: 0.0,
+            },
+        }];
+    }
+    // Twelve indices no route reads go first; the one a route reads still lands.
+    let source = "function onInit()
+            for i = 1, 12 do sendScriptModulation(i, 1) end
+            sendScriptModulation(20, 0.5)
+        end
+        function onNote(e) postEvent(e) end";
+    let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+    plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let measured = level(&mut e, &[on(60)]);
+    assert!((measured - 0.25).abs() < 1e-3, "{measured}");
+}
+
 #[test]
 fn a_modulation_value_no_route_reads_is_still_read_back() {
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
@@ -1805,6 +1977,183 @@ fn a_modulation_value_no_route_reads_is_still_read_back() {
     );
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "300000");
+}
+
+#[test]
+fn a_script_modulation_ramps_to_its_value() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    for g in &mut plan.groups {
+        g.mods = vec![contra_engine::ir::Mod {
+            name: "Script Event Modulation 1".into(),
+            slot: 1,
+            target: 0,
+            bypass: false,
+            kind: contra_engine::ir::ModKind::Volume {
+                source: contra_engine::ir::Source::Script(1),
+                intensity: 1.0,
+                curve: contra_engine::ir::Curve::Depth { power: 1 },
+                tau_ms: 0.0,
+            },
+        }];
+    }
+    // Silent at the note, then up to full over 200 ms.
+    let source = "function onNote(e) postEvent(e) sendScriptModulation2(1, 0, 1, 200) end";
+    let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+    plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let early = level(&mut e, &[on(60)]);
+    for _ in 0..4 {
+        level(&mut e, &[]);
+    }
+    let late = level(&mut e, &[]);
+    assert!(early < 0.2, "early {early}");
+    assert!((late - 0.5).abs() < 1e-3, "late {late}");
+}
+
+/// C5 on a UVI script: waits, spawned notes and a ramp render the same
+/// audio whatever the host's block size.
+#[test]
+fn a_uvi_script_renders_the_same_at_any_block_size() {
+    let source = "function onNote(e)
+            postEvent(e)
+            sendScriptModulation2(1, 0, 1, 50)
+            spawn(function() wait(30) playNote(e.note + 12, 100, 40) end)
+        end";
+    let render = |block: usize| {
+        let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+        let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+        for g in &mut plan.groups {
+            g.mods = vec![contra_engine::ir::Mod {
+                name: "Script Event Modulation 1".into(),
+                slot: 1,
+                target: 0,
+                bypass: false,
+                kind: contra_engine::ir::ModKind::Volume {
+                    source: contra_engine::ir::Source::Script(1),
+                    intensity: 1.0,
+                    curve: contra_engine::ir::Curve::Depth { power: 1 },
+                    tau_ms: 0.0,
+                },
+            }];
+        }
+        let compiled = contra_lua::compile(source, &[], &[]).unwrap();
+        plan.scripts = vec![contra_host::script::lua_plan(compiled)];
+        let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+        let mut rendered = Vec::new();
+        let mut input = vec![on(60)];
+        while rendered.len() < 9600 {
+            let mut out = vec![[0.0; 2]; block];
+            e.process(&mut out, &input);
+            input.clear();
+            rendered.extend(out.iter().map(|f| f[0]));
+        }
+        rendered.truncate(9600);
+        rendered
+    };
+    let reference = render(64);
+    assert!(reference.iter().any(|&v| v != 0.0));
+    for block in [100, 480, 1024] {
+        assert_eq!(render(block), reference, "block {block}");
+    }
+}
+
+#[test]
+fn a_uvi_note_sounds_only_when_the_script_posts_it() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let held = "function onNote(e) end";
+    let mut e = lua_engine(&mut store, held);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    let posted = "function onNote(e) postEvent(e) end
+        function onRelease(e) end";
+    let mut e = lua_engine(&mut store, posted);
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
+    // The script keeps the release to itself: the note plays on.
+    assert!((level(&mut e, &[off(60)]) - 0.5).abs() < 1e-3);
+}
+
+/// A UVI script's own gated note ends without reaching its `onRelease`
+/// (Augmented Orchestra's arpeggiator: a step's gate on the held key once
+/// released every layer's held note and stopped the arpeggio).
+#[test]
+fn a_uvi_scripts_own_note_ending_does_not_run_its_release() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let source = "local held
+        function onNote(e) held = playNote(e.note, 100) playNote(e.note, 100, 10) end
+        function onRelease(e) releaseVoice(held) end";
+    let mut e = lua_engine(&mut store, source);
+    level(&mut e, &[on(60)]);
+    let after_gate = level(&mut e, &[]);
+    assert!((after_gate - 0.5).abs() < 1e-3, "{after_gate}");
+    // The key-up still reaches it.
+    level(&mut e, &[off(60)]);
+    assert_eq!(level(&mut e, &[]), 0.0);
+}
+
+#[test]
+fn uvi_waits_and_spawned_coroutines_land_on_time() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    // 100 ms is 4800 frames: past the first 4096-frame block.
+    let waited = "function onNote(e) wait(100) postEvent(e) end";
+    let mut e = lua_engine(&mut store, waited);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    assert!((level(&mut e, &[]) - 0.5).abs() < 1e-3);
+    let spawned = "function onNote(e)
+            spawn(function() wait(100) playNote(60, 100) end)
+            print('spawned')
+        end";
+    let mut e = lua_engine(&mut store, spawned);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    assert_eq!(e.last_message(), "spawned");
+    assert!((level(&mut e, &[]) - 0.5).abs() < 1e-3);
+}
+
+/// A task that waits 10 µs, then spawns its replacement, moves time on by
+/// the summed waits: 10000 links are 100 ms (4800 frames), never a spin.
+#[test]
+fn a_wait_then_spawn_chain_advances_by_its_summed_waits() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let chain = "function link(n)
+            wait(0.01)
+            if n < 10000 then spawn(function() link(n + 1) end) else playNote(60, 100) end
+        end
+        function onNote(e) link(1) end";
+    let mut e = lua_engine(&mut store, chain);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    assert!((level(&mut e, &[]) - 0.5).abs() < 1e-3);
+}
+
+/// A UVI `getTime()` is `1000 * samples / rate` (UVI's own prelude): two
+/// notes a fraction of a millisecond apart read different times. VWinds'
+/// legato skips a glide whose time equals the previous one; whole
+/// milliseconds made a rolled chord lose its last note.
+#[test]
+fn notes_under_a_millisecond_apart_read_different_times() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let script = "local last = -1
+        function onNote(e)
+            if getTime() ~= last then playNote(60, 100) end
+            last = getTime()
+        end";
+    let mut e = lua_engine(&mut store, script);
+    let later = Timed {
+        at: SampleTime(10),
+        ..on(64)
+    };
+    assert!((level(&mut e, &[on(60), later]) - 1.0).abs() < 1e-3);
+}
+
+#[test]
+fn a_uvi_script_that_fails_counts_a_fault_and_the_engine_plays_on() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let broken = "function onNote(e) error('no') end";
+    let mut e = lua_engine(&mut store, broken);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    assert_eq!(e.script_faults().first().map(|f| f.bad_code), Some(1));
+    let runaway = "function onNote(e) while true do end end";
+    let mut e = lua_engine(&mut store, runaway);
+    assert_eq!(level(&mut e, &[on(60)]), 0.0);
+    assert_eq!(e.script_faults().first().map(|f| f.bad_code), Some(1));
 }
 
 /// Kontakt's MIDI automation (Dolce Legato ties CC 1 to its second slider,
@@ -2007,8 +2356,10 @@ fn a_script_loads_an_effect_type_into_a_slot() {
         id,
         subtype: false,
         reads: id * 10,
+        kind: id,
         effect,
         laws: Vec::new().into(),
+        model: None,
     };
     let effect = ir::Effect {
         kind: ir::EffectKind::Filter(high),
@@ -2066,8 +2417,10 @@ fn wait_async_holds_until_the_effect_type_is_installed() {
         id,
         subtype: false,
         reads: id * 10,
+        kind: id,
         effect: None,
         laws: Vec::new().into(),
+        model: None,
     };
     plan.slot_shapes.types = vec![ty(0), ty(7)];
     let script = contra_ksp::compile(
@@ -2170,6 +2523,52 @@ fn stop_wait_ends_the_current_wait_or_every_wait() {
         assert_eq!(at_release != 0.0, sounds_at_release, "rest {rest}");
         assert!((level(&mut e, &[]) - 0.5).abs() < 1e-3, "rest {rest}");
     }
+}
+
+/// A wait keeps its wake time to the microsecond: one shorter than a frame
+/// goes on in the same frame, so 10000 × `wait(1)` take 10 ms, not 10000
+/// frames (oracle, Kontakt 8.13.1: 10 / 100 / 200 / 210 ms for 10000 ×
+/// `wait(1 | 10 | 20 | 21)`, `$ENGINE_UPTIME`).
+#[test]
+fn a_wait_shorter_than_a_frame_goes_on_in_the_same_frame() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let z = zone(&mut store, 0.5, 0);
+    let source = "on init
+            declare $i
+        end on
+        on note
+            ignore_event($EVENT_ID)
+            while ($i < 10000)
+                wait(1)
+                inc($i)
+            end while
+            play_note(60, 127, 0, 0)
+        end on";
+    let mut e = engine(&store, vec![z], source);
+    // 10 ms = 480 frames: inside the first 4096-frame block.
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
+}
+
+/// Waits that end in the same frame go on in time order: B (1 + 20 µs)
+/// before A (41 µs), though A started waiting first.
+#[test]
+fn waits_ending_in_one_frame_go_on_in_time_order() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let z = zone(&mut store, 0.5, 0);
+    let source = "on note
+            ignore_event($EVENT_ID)
+            if ($EVENT_NOTE = 60)
+                wait(41)
+                message(\"A\")
+            else
+                wait(1)
+                wait(20)
+                message(\"B\")
+            end if
+        end on";
+    let mut e = engine(&store, vec![z], source);
+    level(&mut e, &[on(60), on(62)]);
+    assert_eq!(e.last_message(), "A");
 }
 
 /// Kontakt keeps one release-trigger counter per key; its system script
@@ -2281,6 +2680,7 @@ fn a_script_loads_a_library_response_into_a_convolution() {
             cuts: None,
             envelope: None,
             mix: None,
+            size: [1.0, 1.0],
         },
     )];
     plan.responses = vec![(
@@ -2385,6 +2785,7 @@ fn a_scripts_convolution_predelay_prepares_its_response_again() {
         cuts: None,
         envelope: None,
         mix: None,
+        size: [1.0, 1.0],
     };
     plan.impulse_laws = vec![("half".into(), law)];
     plan.responses = vec![(
@@ -2604,8 +3005,10 @@ fn a_loaded_filter_follows_its_subtype() {
         id: 7,
         subtype: false,
         reads: 0,
+        kind: 7,
         effect,
         laws: Vec::new().into(),
+        model: None,
     }];
     plan.slot_shapes.slots = vec![(ir::RackAt::Inserts, 0)];
     plan.slot_shapes.shapes = vec![ir::SlotShape {
@@ -2842,6 +3245,7 @@ fn get_folder_patch_returns_prepared_directory() {
         scripts: vec![ir::Script {
             name: "test".into(),
             slot: 0,
+            dialect: ir::Dialect::Ksp,
             source: source.into(),
             saved: vec![],
             data: vec![],
@@ -3033,42 +3437,6 @@ fn a_parameter_on_a_missing_target_reads_zero_and_shows_nothing() {
     level(&mut e, &[on(60)]);
     assert_eq!(e.last_message(), "0||on");
     assert_eq!(e.unhandled_actions(), []);
-}
-
-/// KSP manual (`load_array`, `save_array`): mode 0 opens a file dialog and
-/// the callback goes on. CONTRA shows none yet, so it is a dialog cancelled
-/// at once: an async id, the array as it was, `on async_complete` with 0.
-#[test]
-fn a_file_dialog_array_is_cancelled_and_completes_with_failure() {
-    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
-    let zones = vec![zone(&mut store, 0.5, 0)];
-    let mut e = engine(
-        &store,
-        zones,
-        "on init
-            declare %preset[2] := (7, 8)
-            declare $load
-            declare $save
-            declare $done
-        end on
-        on note
-            $load := load_array(%preset, 0)
-            $save := save_array(%preset, 0)
-        end on
-        on async_complete
-            $done := $done * 100 + $NI_ASYNC_ID * 10 + $NI_ASYNC_EXIT_STATUS
-            message($load & \" \" & $save & \" \" & $NI_ASYNC_ID & \" \" & $done & \" \" & %preset[0] & %preset[1])
-        end on",
-    );
-    level(&mut e, &[on(60)]);
-    // Both completed, in order: id 1 (load) status 0, then id 2 (save)
-    // status 0.
-    assert_eq!(e.last_message(), "1 2 2 1020 78");
-    assert!(
-        e.unhandled_actions().is_empty(),
-        "{:?}",
-        e.unhandled_actions()
-    );
 }
 
 #[test]
@@ -3277,4 +3645,700 @@ fn reverb_control_on_non_reverb_remains_unhandled() {
             .any(|(action, _)| *action == contra_engine::Action::GetEnginePar),
         "{actions:?}"
     );
+}
+
+/// A callback that plays more notes than the note table holds: the table
+/// steals the oldest of them before any starts, and the last note played
+/// still sounds (it was dropped once a full start list held the stolen ones).
+#[test]
+fn a_callback_playing_past_the_note_table_still_starts_its_last_note() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut filler = zone(&mut store, 0.0, 0);
+    filler.keys = 72..=72;
+    let mut last = zone(&mut store, 0.5, 0);
+    last.keys = 84..=84;
+    let mut e = engine(
+        &store,
+        vec![filler, last],
+        "on init
+            declare $i
+        end on
+        on note
+            ignore_event($EVENT_ID)
+            $i := 0
+            while ($i < 199)
+                play_note(72, $EVENT_VELOCITY, 0, -1)
+                inc($i)
+            end while
+            play_note(84, $EVENT_VELOCITY, 0, -1)
+        end on",
+    );
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
+    assert_eq!(e.stats().notes_refused, 0);
+}
+
+/// Dolce's empty START groups: an envelope stage written to a group with no
+/// envelope (`find_mod` answers 0 for a miss) is a missing target, answered.
+#[test]
+fn an_envelope_stage_on_a_group_without_one_is_a_missing_target() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let (a, b) = (zone(&mut store, 0.5, 0), zone(&mut store, 0.5, 0));
+    let mut e = engine(
+        &store,
+        vec![a],
+        "on init
+            set_engine_par($ENGINE_PAR_ATTACK, 500000, 0, find_mod(0, \"ENV_AHDSR\"), -1)
+            set_engine_par($ENGINE_PAR_SUSTAIN, 1000000, 0, 0, -1)
+            message(get_engine_par($ENGINE_PAR_ATTACK, 0, 0, -1) & \"|\" ...
+                & get_engine_par_disp($ENGINE_PAR_ATTACK, 0, 0, -1) & \"|\")
+        end on",
+    );
+    assert_eq!(e.unhandled_actions(), vec![]);
+    // A missing target reads 0 and shows "".
+    assert_eq!(e.last_message(), "0||");
+    // The dropped writes leave the group's envelope as it was.
+    let mut plain = engine(&store, vec![b], "on init\nend on");
+    assert_eq!(level(&mut e, &[on(60)]), level(&mut plain, &[on(60)]));
+}
+
+/// `load_performance_view` loads the view the host prepared, by its file
+/// name in any case; another name has no view to load.
+#[test]
+fn a_script_loads_only_the_performance_view_it_has() {
+    let store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let data = [(
+        "performance_view/Main.nckp".to_owned(),
+        br#"{"value":{"performanceView":{}}}"#.to_vec(),
+    )];
+    let run = |name: &str| {
+        let source = format!("on init\n load_performance_view(\"{name}\")\nend on");
+        let script = contra_ksp::compile(&source, &[]).unwrap();
+        let mut plan = Plan::new(vec![], 16);
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &data)];
+        Engine::new(Arc::new(plan), store.client(), RATE).unhandled_actions()
+    };
+    assert_eq!(run("main"), vec![]);
+    assert_eq!(
+        run("Other"),
+        vec![(contra_engine::Action::LoadPerformanceView, 1)]
+    );
+}
+
+/// A knob's declared range reads back as its min and max, a performance
+/// view knob's too (Conflux loops its wavetables up to `$WTSelect`'s max).
+#[test]
+fn a_knobs_declared_range_reads_back() {
+    let store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let source = "on init
+        load_performance_view(\"v\")
+        declare ui_knob $k(-5, 40, 1)
+        message(get_control_par(get_ui_id($k), $CONTROL_PAR_MIN_VALUE) & \" \" & ...
+            get_control_par(get_ui_id($k), $CONTROL_PAR_MAX_VALUE) & \" \" & ...
+            get_control_par(get_ui_id($wt), $CONTROL_PAR_MAX_VALUE))
+    end on";
+    let script = contra_ksp::compile_with_view(source, &[], &[("$wt", &[0, 99, 1])]).unwrap();
+    let mut plan = Plan::new(vec![], 16);
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.last_message(), "-5 40 99");
+}
+
+/// Conflux: a route the engine does not carry (a wavetable target) keeps
+/// the depth it was saved with; a script reads it, shows it and moves it.
+#[test]
+fn a_route_not_carried_keeps_its_depth_for_the_script() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].routes = vec![ir::Routes {
+        slot: 53,
+        name: "CC1".into(),
+        names: vec!["WT_POSITION".into()],
+        depths: vec![-1.0],
+    }];
+    let script = contra_ksp::compile(
+        "on init
+            declare $before
+            $before := get_engine_par($ENGINE_PAR_MOD_TARGET_MP_INTENSITY, 0, 53, -1)
+            set_engine_par($ENGINE_PAR_MOD_TARGET_MP_INTENSITY, 1000000, 0, 53, -1)
+            message($before & \" \" & get_engine_par($ENGINE_PAR_MOD_TARGET_MP_INTENSITY, 0, 53, -1) ...
+                & \" \" & get_engine_par_disp($ENGINE_PAR_MOD_TARGET_MP_INTENSITY, 0, 53, -1))
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    let message = e.last_message();
+    assert!(message.starts_with("0 1000000 "), "{message}");
+}
+
+/// Morphology finds its wavetables' zones by name and reads their group;
+/// Conflux reads which effect each instrument insert slot holds. Values as
+/// Kontakt 8.13.1 answered them (find_zone is exact; a missing zone reads
+/// -1; ANALOG's Jump slot reads 31 and an empty one 0).
+#[test]
+fn a_script_finds_zones_and_reads_their_slots_types() {
+    use contra_engine::{ZoneFacts, ir};
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.zone_facts = vec![ZoneFacts {
+        id: 3494,
+        name: "Warmth".into(),
+        group: 932,
+        keys: 24..=108,
+        velocities: 1..=127,
+        root: 36,
+        start: 0,
+        end: 204_800,
+        start_range: 204_800,
+        rate: 44_100,
+    }];
+    plan.inserts = vec![
+        Some(ir::Effect {
+            kind: ir::EffectKind::Gain(1.0),
+            bypass: false,
+            output: 1.0,
+            dry: 0.0,
+        }),
+        None,
+    ];
+    plan.slot_shapes.saved_types = vec![(ir::RackAt::Inserts, 0, 31)];
+    plan.slot_shapes.types = vec![ir::SlotType {
+        id: 0,
+        subtype: false,
+        reads: 0,
+        kind: 0,
+        effect: None,
+        laws: Vec::new().into(),
+        model: None,
+    }];
+    let script = contra_ksp::compile(
+        "on init
+            declare ui_waveform $wave(6, 6)
+            declare $z
+            $z := find_zone(\"Warmth\")
+            attach_zone($wave, $z, 0)
+            message($z & \" \" & find_zone(\"warmth\") ...
+                & \" \" & get_zone_par($z, $ZONE_PAR_GROUP) ...
+                & \" \" & get_zone_par($z, $ZONE_PAR_ROOT_KEY) ...
+                & \" \" & get_zone_par($z, $ZONE_PAR_SAMPLE_END) ...
+                & \" \" & get_zone_par(1, $ZONE_PAR_GROUP) ...
+                & \" \" & get_engine_par($ENGINE_PAR_EFFECT_TYPE, -1, 0, 1) ...
+                & \" \" & get_engine_par($ENGINE_PAR_EFFECT_TYPE, -1, 1, 1))
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    assert_eq!(e.last_message(), "3494 -1 932 36 204800 -1 31 0");
+}
+
+/// The LFO and wavetable texts and switches as Kontakt 8.13.1 answered them
+/// (ANALOG's stepped LFO, Morphology's wavetable group): a stepped rate
+/// shows its count, the phase whole degrees, retrigger is a switch, and a
+/// wavetable control not carried yet still shows a value's text.
+#[test]
+fn lfo_and_wavetable_controls_read_as_kontakt_shows_them() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    let g = &mut plan.groups[0];
+    g.lfos = vec![ir::Lfo {
+        wave: ir::Wave::Sine,
+        rate: ir::Rate::Steps {
+            beats: 1.0 / 6.0,
+            count: 24.0,
+        },
+        phase: 0.0,
+        fade_ms: 0.0,
+        clock: ir::Clock::Free,
+    }];
+    g.mods = vec![ir::Mod {
+        name: "LFO".into(),
+        slot: 3,
+        target: 0,
+        bypass: false,
+        kind: ir::ModKind::Pan {
+            source: ir::Source::Lfo(0),
+            amount: 0.0,
+        },
+    }];
+    let script = contra_ksp::compile(
+        "on init
+            declare @t
+            set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 500000, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_LFO_PHASE, 250000, 0, 3, -1)
+            @t := get_engine_par_disp($ENGINE_PAR_INTMOD_FREQUENCY, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par_disp_ext($ENGINE_PAR_INTMOD_FREQUENCY, 0, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_LFO_PHASE, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par_disp($ENGINE_PAR_LFO_PHASE, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_INTMOD_RETRIGGER, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_INTMOD_RETRIGGER, 500000, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_INTMOD_RETRIGGER, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par_disp_ext($ENGINE_PAR_WT_POSITION, 375491, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par_disp_ext($ENGINE_PAR_WT_INHARMONIC, 488462, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par_disp_ext($ENGINE_PAR_WT_MOD_TUNE, 501923, 0, -1, -1)
+            message(@t)
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    assert_eq!(
+        e.last_message(),
+        "32.0|4609.0|250000|   90|0|1|37.5|-2.3|0.14"
+    );
+}
+
+/// An LFO's rate unit switches it between free Hz and a note value
+/// (Conflux, Morphology, Shreddage set the unit, then the rate): the unit
+/// reads back as set, and a synced rate takes the count law.
+#[test]
+fn an_lfo_rate_unit_switches_between_hz_and_note_counts() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    let g = &mut plan.groups[0];
+    g.lfos = vec![ir::Lfo {
+        wave: ir::Wave::Sine,
+        rate: ir::Rate::Hz(2.0),
+        phase: 0.0,
+        fade_ms: 0.0,
+        clock: ir::Clock::Free,
+    }];
+    g.mods = vec![ir::Mod {
+        name: "LFO".into(),
+        slot: 3,
+        target: 0,
+        bypass: false,
+        kind: ir::ModKind::Pan {
+            source: ir::Source::Lfo(0),
+            amount: 0.0,
+        },
+    }];
+    let script = contra_ksp::compile(
+        "on init
+            declare @t
+            @t := get_engine_par($ENGINE_PAR_INTMOD_FREQUENCY_UNIT, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY_UNIT, $NI_SYNC_UNIT_16TH, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 500000, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_INTMOD_FREQUENCY_UNIT, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par_disp($ENGINE_PAR_INTMOD_FREQUENCY, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY_UNIT, $NI_SYNC_UNIT_ABS, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_INTMOD_FREQUENCY_UNIT, 0, 3, -1)
+            set_engine_par($ENGINE_PAR_INTMOD_FREQUENCY, 500000, 0, 3, -1)
+            @t := @t & \"|\" & get_engine_par_disp($ENGINE_PAR_INTMOD_FREQUENCY, 0, 3, -1)
+            message(@t)
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    // The free text as Kontakt 8.13.1 prints it (ANALOG STRINGS: 0.5 reads "  1.5").
+    assert_eq!(e.last_message(), "0|15|32.0|0|  1.5");
+}
+
+/// A script switches a wavetable form's kind by its `$NI_WT_FORM_*` value
+/// (Conflux's shaper menus), and reads the kind back as set.
+#[test]
+fn a_wavetable_form_mode_switches_the_forms_kind() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].wavetable = Some(contra_prepare::read(ir::Wavetable {
+        position: 0.0,
+        phase: 0.0,
+        phase_random: 0.0,
+        gain: 1.0,
+        inharmonic: ir::Inharmonic::OFF,
+        modosc: ir::ModOsc::OFF,
+        warps: [ir::Warp::OFF; 2],
+    }));
+    let script = contra_ksp::compile(
+        "on init
+            declare @t
+            @t := get_engine_par($ENGINE_PAR_WT_FORM_MODE, 0, -1, -1)
+            set_engine_par($ENGINE_PAR_WT_FORM_MODE, $NI_WT_FORM_SATURATE, 0, -1, -1)
+            set_engine_par($ENGINE_PAR_WT_FORM2_MODE, $NI_WT_FORM_BEND2P, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_WT_FORM_MODE, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par($ENGINE_PAR_WT_FORM2_MODE, 0, -1, -1)
+            message(@t)
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    assert_eq!(e.last_message(), "0|18|31");
+}
+
+/// A time-stretch speed reads in %, one decimal (Kontakt 8.13.1, Time
+/// Machine 2: .1, .5, 1 read "26.4", "100.0", "800.0").
+#[test]
+fn a_stretch_speed_reads_in_percent() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].speed = Some(1.0);
+    let script = contra_ksp::compile(
+        "on init
+            declare @t
+            set_engine_par($ENGINE_PAR_SPEED, 100000, 0, -1, -1)
+            @t := get_engine_par_disp($ENGINE_PAR_SPEED, 0, -1, -1)
+            set_engine_par($ENGINE_PAR_SPEED, 500000, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par_disp($ENGINE_PAR_SPEED, 0, -1, -1)
+            set_engine_par($ENGINE_PAR_SPEED, 1000000, 0, -1, -1)
+            @t := @t & \"|\" & get_engine_par_disp($ENGINE_PAR_SPEED, 0, -1, -1)
+            message(@t)
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.unhandled_actions(), vec![]);
+    assert_eq!(e.last_message(), "26.4|100.0|800.0");
+}
+
+/// A parameter of one effect type on a slot of another names nothing: the
+/// set is dropped, the read is 0 and the script runs on. The group index
+/// wins over a bus `<generic>` (Kontakt 8.13.1, ANALOG STRINGS: STEREO_PAN at
+/// group 480, slot 5, generic 1026 reads 0 and leaves bus 2 alone).
+#[test]
+fn a_parameter_of_another_effect_type_names_nothing() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].inserts = vec![Some(ir::Effect {
+        kind: ir::EffectKind::Crush(ir::Crush {
+            rate: 0.1,
+            bits: 8.0,
+            noise: 0.0,
+            noise_tone: 0.8,
+        }),
+        bypass: false,
+        output: 1.0,
+        dry: 0.0,
+    })];
+    let lofi = contra_ksp::constant("$EFFECT_TYPE_LOFI").unwrap();
+    plan.slot_shapes.saved_types = vec![(ir::RackAt::Group(0), 0, lofi)];
+    let script = contra_ksp::compile(
+        "on init
+            set_engine_par($ENGINE_PAR_STEREO_PAN, 123456, 0, 0, 1026)
+            message(get_engine_par($ENGINE_PAR_STEREO_PAN, 0, 0, 1026))
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.last_message(), "0");
+    assert!(
+        e.unhandled_actions().is_empty(),
+        "{:?}",
+        e.unhandled_actions()
+    );
+}
+
+/// Knobs that interact compose in any order: each move rebuilds the slot
+/// from all its knobs (saved input 0.4 and make-up 0.8; the input also
+/// drives the make-up), and each reads back as set.
+#[test]
+fn interacting_knobs_rebuild_the_slot_in_any_order() {
+    use contra_engine::ir;
+    fn build(p: &[f32]) -> Option<ir::EffectKind> {
+        let (input, makeup) = (*p.first()?, *p.get(1)?);
+        Some(ir::EffectKind::Compressor(ir::Compressor {
+            threshold_db: -50.0 * input,
+            ratio: 4.0,
+            knee_db: 0.0,
+            attack_ms: 10.0,
+            release_ms: 100.0,
+            makeup_db: 50.0 * makeup - 40.0 + 50.0 * input - 10.0,
+            makeup_slope: 0.0,
+            link: true,
+            mix: 1.0,
+            detector: ir::Detector::Output,
+        }))
+    }
+    let run = |first: &str, second: &str| {
+        let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+        let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+        let kind = build(&[0.4, 0.8]).unwrap();
+        plan.groups[0].inserts = vec![Some(ir::Effect {
+            kind,
+            bypass: false,
+            output: 1.0,
+            dry: 0.0,
+        })];
+        plan.slot_models = vec![(
+            ir::RackAt::Group(0),
+            0,
+            ir::KnobModel {
+                knobs: [ir::SlotKnob::Input, ir::SlotKnob::Makeup].into(),
+                saved: [0.4, 0.8].into(),
+                build,
+            },
+        )];
+        let script = contra_ksp::compile(
+            &format!(
+                "on init
+                    set_engine_par($ENGINE_PAR_FCOMP_{first}, 0, 0, -1)
+                    set_engine_par($ENGINE_PAR_FCOMP_{second}, 0, 0, -1)
+                    message(get_engine_par($ENGINE_PAR_FCOMP_INPUT, 0, 0, -1) & \" \" & get_engine_par($ENGINE_PAR_FCOMP_MAKEUP, 0, 0, -1))
+                end on"
+            ),
+            &[],
+        )
+        .unwrap();
+        plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+        let e = Engine::new(Arc::new(plan), store.client(), RATE);
+        let sounds = e.group_sounds();
+        let effect = sounds[0].1[0].as_ref().map(|e| e.kind);
+        (e.last_message().to_owned(), effect)
+    };
+    let want = build(&[0.8, 0.6]);
+    let a = run("INPUT, 800000", "MAKEUP, 600000");
+    let b = run("MAKEUP, 600000", "INPUT, 800000");
+    assert_eq!(a, ("800000 600000".to_owned(), want));
+    assert_eq!(b, a);
+}
+
+/// A recalled project's type loaded into an empty slot before the engine is
+/// built (Rack::load_built → Plan::load_type) starts at its model's saved
+/// knobs: scripts read and move them as in a slot that held it all along.
+#[test]
+fn a_restored_type_in_an_empty_slot_reads_and_moves_its_modelled_knobs() {
+    use contra_engine::ir;
+    fn build(p: &[f32]) -> Option<ir::EffectKind> {
+        let (input, makeup) = (*p.first()?, *p.get(1)?);
+        Some(ir::EffectKind::Compressor(ir::Compressor {
+            threshold_db: -50.0 * input,
+            ratio: 4.0,
+            knee_db: 0.0,
+            attack_ms: 10.0,
+            release_ms: 100.0,
+            makeup_db: 50.0 * makeup - 40.0,
+            makeup_slope: 0.0,
+            link: true,
+            mix: 1.0,
+            detector: ir::Detector::Output,
+        }))
+    }
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].inserts = vec![None];
+    let model = ir::KnobModel {
+        knobs: [ir::SlotKnob::Input, ir::SlotKnob::Makeup].into(),
+        saved: [0.4, 0.8].into(),
+        build,
+    };
+    let effect = build(&model.saved).map(|kind| ir::Effect {
+        kind,
+        bypass: false,
+        output: 1.0,
+        dry: 0.0,
+    });
+    plan.slot_shapes.types = vec![ir::SlotType {
+        id: 30,
+        subtype: false,
+        reads: 300,
+        kind: 30,
+        effect,
+        laws: Vec::new().into(),
+        model: Some(model),
+    }];
+    assert!(plan.load_type(ir::RackAt::Group(0), 0, 0));
+    let script = contra_ksp::compile(
+        "on init
+            declare @was
+            @was := get_engine_par($ENGINE_PAR_FCOMP_INPUT, 0, 0, -1)
+            set_engine_par($ENGINE_PAR_FCOMP_INPUT, 600000, 0, 0, -1)
+            message(@was & \" \" & get_engine_par($ENGINE_PAR_FCOMP_INPUT, 0, 0, -1) & \" \" & get_engine_par($ENGINE_PAR_FCOMP_MAKEUP, 0, 0, -1))
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.last_message(), "400000 600000 800000");
+    let sounds = e.group_sounds();
+    assert_eq!(sounds[0].1[0].as_ref().map(|e| e.kind), build(&[0.6, 0.8]));
+}
+
+/// A Solid G-EQ's bell switch reads any value but 0 back as 1 and shows no
+/// text; its gains show ±20 dB (Kontakt 8.13.1, probes/b2).
+#[test]
+fn a_bell_switch_reads_one_and_shows_nothing() {
+    use contra_engine::ir;
+    fn build(p: &[f32]) -> Option<ir::EffectKind> {
+        let gain_db = 40.0 * p.first()? - 20.0;
+        let shape = if *p.get(1)? > 0.5 {
+            ir::Shape::Peak
+        } else {
+            ir::Shape::LowShelf
+        };
+        let band = ir::Bell {
+            shape,
+            hz: 100.0,
+            q: 0.7,
+            gain_db,
+        };
+        Some(ir::EffectKind::Eq([
+            band,
+            ir::Bell::FLAT,
+            ir::Bell::FLAT,
+            ir::Bell::FLAT,
+        ]))
+    }
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    plan.groups[0].inserts = vec![Some(ir::Effect {
+        kind: build(&[0.5, 0.0]).unwrap(),
+        bypass: false,
+        output: 1.0,
+        dry: 0.0,
+    })];
+    let model = ir::KnobModel {
+        knobs: [ir::SlotKnob::BandGain(0), ir::SlotKnob::BandBell(0)].into(),
+        saved: [0.5, 0.0].into(),
+        build,
+    };
+    plan.slot_models = vec![(ir::RackAt::Group(0), 0, model)];
+    plan.slot_shapes.saved_types = vec![(ir::RackAt::Group(0), 0, 28)];
+    let script = contra_ksp::compile(
+        "on init
+            set_engine_par($ENGINE_PAR_SEQ_LF_BELL, 2, 0, 0, -1)
+            set_engine_par($ENGINE_PAR_SEQ_LF_GAIN, 250000, 0, 0, -1)
+            message(get_engine_par($ENGINE_PAR_SEQ_LF_BELL, 0, 0, -1) & \"[\" & get_engine_par_disp($ENGINE_PAR_SEQ_LF_BELL, 0, 0, -1) & \"]\" & get_engine_par_disp($ENGINE_PAR_SEQ_LF_GAIN, 0, 0, -1))
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(e.last_message(), "1[]-10.0");
+    assert!(e.unhandled_actions().is_empty());
+    let sounds = e.group_sounds();
+    let eq = sounds[0].1[0].as_ref().map(|e| e.kind);
+    assert_eq!(eq, build(&[0.25, 1.0]));
+}
+
+/// The end-of-init restore skips what `read_persistent_var` already
+/// reloaded, so the script's later writes stand; the rest lands after
+/// `on init`. A menu read before its entries reads 0 and selects its saved
+/// entry as it gets it. Kontakt 8.13.1 reloading the same script and saved
+/// values (probes/b2/reload.lua): read `k70 a5,6,7 m0 p9 q0`, saved
+/// `k10 a5,0,7 m2 p1 q4`.
+#[test]
+fn a_reloaded_variable_keeps_what_init_wrote_after_reading_it() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5, 0)], 16);
+    let script = contra_ksp::compile(
+        "on init
+            declare ui_knob $k (0, 100, 1)
+            declare ui_menu $m
+            declare %a[3]
+            declare $p
+            declare $q
+            declare @t
+            make_persistent($k)
+            make_persistent($m)
+            make_persistent(%a)
+            make_persistent($p)
+            make_persistent($q)
+            read_persistent_var($k)
+            read_persistent_var(%a)
+            read_persistent_var($m)
+            read_persistent_var($p)
+            @t := \"k\" & $k & \" a\" & %a[0] & \",\" & %a[1] & \",\" & %a[2] & \" m\" & $m & \" p\" & $p & \" q\" & $q
+            $k := 10
+            %a[1] := 0
+            $p := 1
+            $q := 3
+            add_menu_item($m, \"a\", 0)
+            add_menu_item($m, \"b\", 1)
+            add_menu_item($m, \"c\", 2)
+        end on
+        on persistence_changed
+            message(@t & \" | k\" & $k & \" a\" & %a[0] & \",\" & %a[1] & \",\" & %a[2] & \" m\" & $m & \" p\" & $p & \" q\" & $q)
+        end on",
+        &[],
+    )
+    .unwrap();
+    let saved = ["$k 70", "$m 2", "%a 5 6 7", "$p 9", "$q 4"].map(String::from);
+    plan.scripts = vec![contra_host::script::plan(&script, &saved, &[])];
+    let e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert_eq!(
+        e.last_message(),
+        "k70 a5,6,7 m0 p9 q0 | k10 a5,0,7 m2 p1 q4"
+    );
+}
+
+/// `set_zone_par` (KSP manual; Kontakt 8.13.1, probes/zonepar): a callback's
+/// edits wait for the host and go in together; the voice sounding in the
+/// zone that changed group fades out, the async ids complete after the
+/// swap, and the next note-on plays the zone through its new group.
+#[test]
+fn a_zone_moved_to_another_group_and_keys_plays_there_from_the_next_note() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut moved = zone(&mut store, 0.5, 0);
+    (moved.id, moved.keys) = (0, 60..=60);
+    let mut other = zone(&mut store, 0.25, 1);
+    (other.id, other.keys) = (1, 100..=100);
+    let script = contra_ksp::compile(
+        "on init
+            declare $a
+            declare $b
+            declare $c
+        end on
+        on note
+            if ($EVENT_NOTE = 61)
+                ignore_event($EVENT_ID)
+                $a := set_zone_par(0, $ZONE_PAR_GROUP, 1)
+                $b := set_zone_par(0, $ZONE_PAR_LOW_KEY, 72)
+                $c := set_zone_par(0, $ZONE_PAR_HIGH_KEY, 72)
+            end if
+        end on
+        on async_complete
+            message(\"done \" & $NI_ASYNC_ID & \" of \" & $a & \" \" & $b & \" \" & $c)
+        end on",
+        &[],
+    )
+    .unwrap();
+    let mut plan = Plan::new(vec![moved, other], 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    plan.groups[1].level.gain = 2.0;
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    assert!((level(&mut e, &[on(60)]) - 0.5).abs() < 1e-3);
+    level(&mut e, &[on(61)]);
+    let mut edits = Vec::new();
+    e.drain_zone_edits(|edit| {
+        edits.push(edit);
+        true
+    });
+    assert_eq!(edits.len(), 3);
+    assert!(!e.last_message().starts_with("done"));
+    let mut plan = Plan::clone(e.plan());
+    let done: Vec<_> = edits
+        .iter()
+        .map(|x| (*x, plan.edit_zone(x.zone, x.par, x.value)))
+        .collect();
+    e.swap_plan(&mut Arc::new(plan), &done);
+    // The held voice's zone changed group: it fades out.
+    assert!(level(&mut e, &[]).abs() < 1e-4);
+    assert!(e.last_message().starts_with("done"), "{}", e.last_message());
+    assert!((level(&mut e, &[off(60), on(60)])).abs() < 1e-4);
+    assert!((level(&mut e, &[on(72)]) - 1.0).abs() < 1e-3);
 }

@@ -8,6 +8,7 @@ use std::ops::RangeInclusive;
 use mui::prelude::*;
 
 pub use crate::icon::{Icon, glyph};
+pub(crate) use contra_ui_view::rect_path;
 
 use crate::theme::{
     CONTROL, INSET, SMALL, SPACE, TEXT, TIGHT, accent, hairline, lift, quick, secondary,
@@ -78,7 +79,8 @@ pub fn icon_button(ui: &mut Ui, id: impl Into<Id>, icon: Icon, name: &str, on: b
         .focusable()
         .a11y(A11y::Button)
         .named(name.to_owned())
-        .tip(name.to_owned())
+        // No name, no tip: a menu's button while its menu is open.
+        .when(!name.is_empty(), |e| e.tip(name.to_owned()))
         .id(id);
     Response {
         el: interactive(el),
@@ -256,12 +258,7 @@ pub fn slider(
     let from: f64 = if lo == -hi { 0.5 } else { 0. };
     let hover = ui.state(id.clone()).hover as f32;
     let el = canvas(move |s| {
-        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
-            Path::polyline(
-                [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| Point::new(x, y)),
-                true,
-            )
-        };
+        let rect = rect_path;
         // Along the travel: 0 at the start (left, or bottom), 1 at the end.
         let (len, mid) = if vertical {
             (s.height - 4., s.width / 2.)
@@ -355,10 +352,10 @@ pub fn nudge(
 }
 
 /// A one-line field with a dim `hint` while empty and a search glyph.
-pub fn field(ui: &mut Ui, id: impl Into<Id>, hint: &str, value: &mut String) -> Response {
+pub fn field(ui: &mut Ui, id: impl Into<Id>, hint: &str, value: &mut String) -> Response<TextEdit> {
     let id: Id = id.into();
     let empty = value.is_empty();
-    let edit = text_input(ui, id, value);
+    let edit = text_edit(ui, id, value, TextOpts::default());
     let mut body_layers = vec![edit.el.radius(0.).no_fill().w(Len::Pct(100.))];
     if empty {
         let hint = caption(hint.to_owned()).fill(secondary()).lines(1);
@@ -427,6 +424,9 @@ pub fn list_row(
     }
 }
 
+/// The most rows a menu shows at once; a longer one scrolls.
+const MENU_ROWS: f64 = 18.;
+
 /// A popup menu of `items`, `columns` to a row (one for words, more for a
 /// grid of short picks); the index of the one picked. `current` is raised.
 pub fn menu(
@@ -437,19 +437,24 @@ pub fn menu(
     current: Option<usize>,
 ) -> Response<Option<usize>> {
     let mut picked = None;
+    let longest = items.iter().map(|i| i.chars().count()).max().unwrap_or(0);
+    // A grid's cells all fit its longest pick: short picks run wider than
+    // a list's 0.6 em a letter ("Omni"), plus the button's own padding.
+    let cell_w = (longest as f64 * TEXT * 0.75 + SPACE * 3.).max(TEXT * 3.);
     let mut cells: Vec<El> = items
         .iter()
         .enumerate()
         .map(|(n, item)| {
-            let r = button(ui, format!("{id}-{n}"), item, current == Some(n));
+            let (cell, on) = (format!("{id}-{n}"), current == Some(n));
+            // A row of words reads to the menu's edge; a grid keeps cells.
+            let r = match columns {
+                1 => list_row(ui, cell, (item, ""), None, on),
+                _ => button(ui, cell, item, on),
+            };
             if r.changed {
                 picked = Some(n);
             }
-            if columns == 1 {
-                r.el.justify(Justify::Start).w(Len::Pct(100.))
-            } else {
-                r.el.w(TEXT * 3.)
-            }
+            if columns == 1 { r.el } else { r.el.w(cell_w) }
         })
         .collect();
     let mut rows = Vec::new();
@@ -458,12 +463,54 @@ pub fn menu(
         rows.push(row(std::mem::replace(&mut cells, rest)).gap(1).shrink(0));
     }
     // Floats are sized by the space around their parent; a menu takes its
-    // own height so a long one is never squeezed.
+    // own height so a long one is never squeezed. A longer one (a library's
+    // hundreds of presets) scrolls within MENU_ROWS: the wheel moves it,
+    // never what lies under it.
     let tall = rows.len() as f64 * (CONTROL + 1.);
-    let list = col(rows)
-        .gap(1)
-        .min_h(tall)
-        .when(columns == 1, |e| e.w(TEXT * 16.));
+    let most = MENU_ROWS * (CONTROL + 1.);
+    // A list of words is as wide as its longest, within 16 to 32 em: a
+    // long preset name reads whole.
+    let wide = (longest as f64 * TEXT * 0.6 + SPACE * 2.).clamp(TEXT * 16., TEXT * 32.);
+    let list = col(rows).gap(1).when(columns == 1, |e| e.w(wide));
+    let list_id = format!("{id}-list");
+    let list = match tall > most {
+        true => col![list.scroll().h(most).id(list_id.clone())].h(most),
+        false => list.min_h(tall),
+    };
+    // Up and Down move the focus a row, from the anchor into the list, and
+    // a scrolling list follows it.
+    let step = |keys: &[KeyPress]| {
+        keys.iter().fold(0_isize, |at, k| match k.key {
+            Key::Down => at + 1,
+            Key::Up => at - 1,
+            _ => at,
+        })
+    };
+    let per_row = columns.max(1);
+    let mut to = (step(ui.keys(id)) != 0).then(|| current.unwrap_or(0));
+    for n in 0..items.len() {
+        let by = step(ui.keys(format!("{id}-{n}")));
+        if by != 0 {
+            let next = n.saturating_add_signed(by.saturating_mul(per_row.cast_signed()));
+            to = Some(next.min(items.len().saturating_sub(1)));
+        }
+    }
+    if let Some(n) = to {
+        ui.focus(format!("{id}-{n}"));
+        let row_h = CONTROL + 1.;
+        let top = (n / per_row) as f64 * row_h;
+        let at = ui.scroll(list_id.as_str())[1];
+        let y = if top < at {
+            top
+        } else if top + row_h > at + most {
+            top + row_h - most
+        } else {
+            at
+        };
+        if tall > most {
+            ui.set_scroll(list_id.as_str(), [0., y]);
+        }
+    }
     Response {
         el: popup(id, list),
         changed: picked,
@@ -471,12 +518,16 @@ pub fn menu(
 }
 
 /// Opens or closes the popup `id` names on `hit`, and closes it on a click
-/// away or Escape; whether it is open. `open` holds the one open popup.
+/// away or Escape (seen whatever holds the focus, as a sheet sees it);
+/// whether it is open. `open` holds the one open popup.
 pub fn toggle(ui: &Ui, open: &mut Option<String>, id: &str, hit: bool) -> bool {
     let was = open.as_deref() == Some(id);
     if hit {
         *open = (!was).then(|| id.to_owned());
-    } else if was && ui.dismissed(&[id, &format!("{id}-popup")]) {
+    } else if was
+        && (ui.dismissed(&[id, &format!("{id}-popup")])
+            || ui.shortcuts().iter().any(|k| k.key == Key::Escape))
+    {
         *open = None;
     }
     open.as_deref() == Some(id)
@@ -514,8 +565,13 @@ pub fn dropdown(
         .focusable()
         .a11y(A11y::Button)
         .named(name.to_owned())
-        .tip(name.to_owned())
         .id(id.to_owned());
+    // The pointer rests on the button it opened: its tip would float over
+    // the menu.
+    let face = match shown {
+        true => face,
+        false => face.tip(name.to_owned()),
+    };
     let mut el = vec![interactive(face)];
     let mut picked = None;
     if shown {
@@ -534,13 +590,16 @@ pub fn dropdown(
 }
 
 /// `content` floated over everything, pinned under the element `anchor`
-/// names, easing in from just above it.
+/// names, easing in from just above it. It keeps the wheel from what lies
+/// under it (a knob, the rack); a node that keeps the wheel does not scroll
+/// itself, so scrolling `content` nests its scroller inside.
 pub fn popup(anchor: &str, content: El) -> El {
     content
         .fill(lift(2))
         .stroke(hairline())
         .stroke_width(1)
         .pad(TIGHT)
+        .captures_wheel()
         .float()
         .pin(
             Pin::to(anchor.to_owned())
@@ -552,10 +611,13 @@ pub fn popup(anchor: &str, content: El) -> El {
 }
 
 /// A panel opened on demand over the view: a title, a close button, then
-/// `content`. Returns whether it was closed this frame.
+/// `content`. Like a popup it keeps the wheel from what lies under it.
+/// Returns whether it was closed this frame.
 pub fn sheet(ui: &mut Ui, id: &str, title_text: &str, content: El) -> Response {
     let close = icon_button(ui, format!("{id}-close"), Icon::Close, "Close", false);
-    let closed = close.changed || ui.keys(id).iter().any(|k| k.key == Key::Escape);
+    // MUI drops focus on Escape before it hands the keys out, so only the
+    // whole stream sees it: the sheet's own `keys` never would.
+    let closed = close.changed || ui.shortcuts().iter().any(|k| k.key == Key::Escape);
     let el = col![
         row![section(title_text), spacer(), close.el].align(Align::Center),
         rule(),
@@ -568,6 +630,7 @@ pub fn sheet(ui: &mut Ui, id: &str, title_text: &str, content: El) -> Response {
     .fill(lift(1))
     .stroke(hairline())
     .stroke_width(1)
+    .captures_wheel()
     .focusable()
     .appear(Appear::Slide(0., TEXT))
     .id(id.to_owned());
@@ -627,5 +690,169 @@ pub fn edges(top: f64, right: f64, bottom: f64, left: f64) -> mui::layout::Inset
         right,
         top,
         bottom,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `under` read of a wheel turned over it for a few frames, with
+    /// a long menu open on top of it or none, and how far the menu scrolled.
+    fn wheel_under(with_menu: bool) -> (Option<Vec2>, f64) {
+        let names: Vec<String> = (0..100).map(|n| format!("p{n}")).collect();
+        let items: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut ui = Ui::default();
+        let mut read = None;
+        for n in 0..8 {
+            read = read.or(ui.wheel("under"));
+            let mut top = vec![block(20., 20.).id("m")];
+            if with_menu {
+                top.push(menu(&mut ui, "m", &items, 1, None).el);
+            }
+            let el = stack![block(900., 900.).id("under"), col(top)];
+            let input = Input {
+                pointer: PointerInput {
+                    pos: Some(Point::new(450., 200.)),
+                    ..Default::default()
+                },
+                wheel: if n >= 2 {
+                    Vec2::new(0., 30.)
+                } else {
+                    Vec2::ZERO
+                },
+                ..Default::default()
+            };
+            assert!(
+                ui.frame(el, Some(Size::new(900., 900.)), input, 1. / 60.)
+                    .is_ok()
+            );
+        }
+        (read, ui.scroll("m-list")[1])
+    }
+
+    /// Down from the anchor walks a long menu past its fold, and the list
+    /// scrolls so the focused row stays in view.
+    #[test]
+    fn down_keys_walk_a_long_menu_and_keep_the_row_in_view() {
+        let names: Vec<String> = (0..100).map(|n| format!("p{n}")).collect();
+        let items: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut ui = Ui::default();
+        ui.focus("m");
+        for n in 0..40 {
+            let m = menu(&mut ui, "m", &items, 1, None);
+            let el = col![block(20., 20.).id("m"), m.el];
+            let keys = if n >= 2 {
+                vec![KeyPress {
+                    key: Key::Down,
+                    mods: Mods::default(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let input = Input {
+                keys,
+                ..Default::default()
+            };
+            assert!(
+                ui.frame(el, Some(Size::new(400., 900.)), input, 1. / 60.)
+                    .is_ok()
+            );
+        }
+        let focused = ui.focus_key().map(str::to_owned).unwrap_or_default();
+        let row: usize = focused.trim_start_matches("m-").parse().unwrap_or(0);
+        assert!(row > MENU_ROWS as usize, "walked past the fold: {focused}");
+        let top = row as f64 * (CONTROL + 1.);
+        let at = ui.scroll("m-list")[1];
+        assert!(
+            at <= top && top < at + MENU_ROWS * (CONTROL + 1.),
+            "{top} in view of {at}"
+        );
+    }
+
+    /// Escape closes a sheet whatever holds the focus (here a field in it).
+    #[test]
+    fn escape_closes_a_sheet() {
+        let mut ui = Ui::default();
+        ui.focus("field");
+        let mut closed = false;
+        for n in 0..4 {
+            let r = sheet(
+                &mut ui,
+                "s",
+                "Settings",
+                block(20., 20.).focusable().id("field"),
+            );
+            closed |= r.changed;
+            let keys = match n {
+                1 => vec![KeyPress {
+                    key: Key::Escape,
+                    mods: Mods::default(),
+                }],
+                _ => Vec::new(),
+            };
+            let input = Input {
+                keys,
+                ..Default::default()
+            };
+            assert!(
+                ui.frame(r.el, Some(Size::new(900., 900.)), input, 1. / 60.)
+                    .is_ok()
+            );
+        }
+        assert!(closed);
+    }
+
+    /// Escape still closes a sheet right after a pick from a menu in it,
+    /// when the focus sat on the picked row that is now gone.
+    #[test]
+    fn escape_closes_a_sheet_after_a_menu_pick() {
+        let mut ui = Ui::default();
+        let mut open = Some("dd".to_owned());
+        let mut closed = false;
+        for n in 0..6 {
+            let d = dropdown(
+                &mut ui,
+                &mut open,
+                "dd",
+                (None, "Fit", "Size"),
+                &["Fit", "200%"],
+                Some(0),
+            );
+            let r = sheet(&mut ui, "s", "Settings", d.el);
+            closed |= r.changed;
+            let key = |key| {
+                vec![KeyPress {
+                    key,
+                    mods: Mods::default(),
+                }]
+            };
+            let keys = match n {
+                1 => {
+                    ui.focus("dd-1");
+                    key(Key::Enter)
+                }
+                3 => key(Key::Escape),
+                _ => Vec::new(),
+            };
+            let input = Input {
+                keys,
+                ..Default::default()
+            };
+            assert!(
+                ui.frame(r.el, Some(Size::new(900., 900.)), input, 1. / 60.)
+                    .is_ok()
+            );
+        }
+        assert_eq!(open, None, "the pick closed the menu");
+        assert!(closed);
+    }
+
+    #[test]
+    fn the_wheel_over_a_popup_scrolls_it_and_never_reaches_what_lies_under_it() {
+        assert!(wheel_under(false).0.is_some(), "without a menu it does");
+        let (read, scrolled) = wheel_under(true);
+        assert_eq!(read, None);
+        assert!(scrolled > 0., "the menu scrolls instead");
     }
 }

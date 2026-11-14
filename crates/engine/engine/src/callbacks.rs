@@ -10,9 +10,9 @@ use contra_vm::{HostValue, Step, Vm};
 use contra_voice::FadeTarget;
 
 use crate::ledger::{NoteRef, Releases};
-use crate::queue::{Exit, Work};
-use crate::script::{Kind, Running, ScriptPlan, micros_to_frames};
-use crate::{Engine, ReleaseZones, Trigger};
+use crate::queue::{Due, Exit, Work};
+use crate::script::{Kind, Running, ScriptPlan};
+use crate::{BLOCK_SCRIPT_TURNS, Engine, ReleaseZones, Trigger};
 
 impl Engine {
     /// The plan of the slot whose callback runs.
@@ -40,6 +40,7 @@ impl Engine {
         let mark = self.forward.len();
         if let Some(mut vm) = self.take_vm(slot) {
             if let Some(co) = start(&mut vm, running.context()) {
+                self.stats.script_starts += 1;
                 #[cfg(feature = "trace")]
                 if let Some(trace) = &mut self.trace {
                     trace.push(crate::TraceEvent::Callback {
@@ -53,7 +54,7 @@ impl Engine {
                         resume: false,
                     });
                 }
-                self.step_script(slot, &mut vm, co);
+                self.step_script(slot, &mut vm, co, Due::at(self.now));
             }
             self.put_vm(slot, vm);
         }
@@ -63,21 +64,53 @@ impl Engine {
         ran
     }
 
+    /// The editor moved widget `n` of script `slot`'s own (Lua) page to `value`.
+    pub fn set_widget(&mut self, slot: u8, n: u32, value: f64, cell: Option<u32>) {
+        let entry = (self.plan.scripts.get(usize::from(slot))).and_then(|s| s.callbacks.widget);
+        if let (Some(entry), Some(vm)) = (entry, self.vm_mut(slot)) {
+            vm.stage_widget(n, value, cell);
+            let mut running = Running::new(Kind::UiControl, None);
+            running.ui = i32::try_from(n).unwrap_or(i32::MAX);
+            self.run_callback(slot, entry, running);
+        }
+    }
+
+    /// A controller's route moved foreign script `slot`'s control `id`
+    /// ([`contra_plan::KnobModPlan`]); the machine runs its `changed` if the
+    /// value moved.
+    pub fn set_control_mod(&mut self, slot: u8, id: i32, saved: f64, ratio: f64, m: f64) {
+        let running = Running::new(Kind::UiControl, None);
+        self.run_with(slot, running, |vm, context| {
+            vm.control_mod(id, saved, ratio, m, context)
+        });
+    }
+
     /// The UI or the host moved control `id` (its UI id) of script `slot` to
     /// `value`: it is stored, then `on ui_controls` runs and then the
     /// control's own `on ui_control`, as in Kontakt; a control without one
     /// still stores and runs `on ui_controls`.
+    /// A foreign script's control (`Foreign::controls`) takes `value` as
+    /// the bits of an `f64` and runs its own callback.
     pub fn set_control(&mut self, slot: u8, id: i32, value: i64) {
         let plan = Arc::clone(&self.plan);
         let Some(script) = plan.scripts.get(usize::from(slot)) else {
             return;
         };
+        if script.foreign.is_some() {
+            let value = f64::from_bits(value as u64);
+            let running = Running::new(Kind::UiControl, None);
+            self.run_with(slot, running, |vm, context| vm.control(id, value, context));
+            return;
+        }
         let own = script.callbacks.ui_control.iter().find(|(i, _)| *i == id);
         let own = own.and_then(|&(_, own)| own);
         let controls = &script.controls;
         let n = self.control_index_in(slot, id);
         let cell = n.and_then(|n| controls.cells.get(n).copied().flatten());
-        if cell.is_none() && own.is_none() {
+        // Any registered control's edit runs `on ui_controls` and `on
+        // ui_update` ("every GUI change", KSP manual), even one with no value
+        // cell (a text edit) and no callback of its own.
+        if n.is_none() && own.is_none() {
             return;
         }
         let len = n.and_then(|n| controls.steps.get(n)).copied().unwrap_or(0);
@@ -91,6 +124,7 @@ impl Engine {
         for (kind, entry) in [
             (Kind::UiControls, script.callbacks.ui_controls),
             (Kind::UiControl, own),
+            (Kind::UiUpdate, script.callbacks.ui_update),
         ] {
             if let Some(entry) = entry {
                 let running = Running {
@@ -149,14 +183,31 @@ impl Engine {
         }
     }
 
-    /// A waiting callback's time has come.
-    pub(crate) fn resume(&mut self, slot: u8, co: contra_vm::CoId, wait: u32) {
+    /// A waiting callback's time, `due`, has come.
+    pub(crate) fn resume(&mut self, slot: u8, co: contra_vm::CoId, wait: u32, due: Due) {
         let mark = self.forward.len();
         if let Some(mut vm) = self.take_vm(slot) {
             if vm.wait_epoch(co) != Some(wait) {
                 // A stopped wait: its callback already went on.
                 return self.put_vm(slot, vm);
             }
+            // What `on init` left waiting (loading, tables, UI) is chunked
+            // work with no deadline: a block runs a share of it, not all.
+            if self.block_end > self.now
+                && vm.context(co).is_some_and(|c| (c >> 32) as u8 == INIT_TYPE)
+            {
+                let left = BLOCK_SCRIPT_TURNS.saturating_sub(self.block_turns);
+                if left == 0
+                    && self
+                        .queue
+                        .push_due(Due::at(self.block_end), Work::Resume(slot, co, wait))
+                {
+                    self.stats.resumes_deferred += 1;
+                    return self.put_vm(slot, vm);
+                }
+                self.fuel = u32::try_from(left).unwrap_or(0);
+            }
+            self.stats.script_resumes += 1;
             self.running = Running {
                 slot,
                 ..Running::resumed(vm.context(co).unwrap_or(0))
@@ -174,7 +225,9 @@ impl Engine {
                     resume: true,
                 });
             }
-            self.step_script(slot, &mut vm, co);
+            let turns = self.stats.script_turns;
+            self.step_script(slot, &mut vm, co, due);
+            self.block_turns += self.stats.script_turns - turns;
             self.put_vm(slot, vm);
         }
         self.running = Running::IDLE;
@@ -220,23 +273,51 @@ impl Engine {
         }
     }
 
-    fn step_script(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId) {
+    /// Runs `co` from time `now` until it ends or waits.
+    fn step_script(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId, now: Due) {
         let plan = Arc::clone(&self.plan);
         let Some(script) = plan.scripts.get(usize::from(slot)) else {
             return;
         };
-        if let Step::Wait(micros) = vm.run(&script.program, co, self) {
-            self.wake(slot, vm, co, micros);
+        vm.set_fuel(std::mem::take(&mut self.fuel));
+        let step = vm.run(&script.program, co, self);
+        self.flush_refresh();
+        self.stats.script_turns += u64::from(vm.last_turns());
+        self.refresh_moved_routes();
+        if let Step::Wait(micros) = step {
+            self.wake(slot, vm, co, micros, now);
+        } else if step == Step::Yield {
+            let wait = vm.wait_epoch(co).unwrap_or(0);
+            if !self
+                .queue
+                .push_due(Due::at(self.block_end), Work::Resume(slot, co, wait))
+            {
+                self.stats.events_refused += 1;
+                vm.cancel(co);
+            }
+        }
+        // A callback started beside this one waits from this one's time.
+        while let Some((spawned, micros)) = vm.spawned() {
+            self.wake(slot, vm, spawned, micros, now);
         }
     }
 
-    /// Queues `co`'s resume `micros` from now; a full queue ends it.
-    fn wake(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId, micros: u64) {
-        let micros = i64::try_from(micros).unwrap_or(i64::MAX);
-        let frames = micros_to_frames(micros, self.rate).max(1);
-        let at = SampleTime(self.now.0.saturating_add(frames));
+    /// Queues `co`'s resume `micros` after `from`; a full queue ends it.
+    /// The wake time keeps its part of a frame, so a wait shorter than a
+    /// frame goes on in the same frame and 10000 × `wait(1)` take 10 ms
+    /// (oracle: `wait_resolution.ksp`). A wait always moves time on: a
+    /// positive one by its microseconds, `wait(0)` by a frame.
+    fn wake(&mut self, slot: u8, vm: &mut Vm, co: contra_vm::CoId, micros: u64, from: Due) {
+        let frame = u128::from(Due::FRAME);
+        let at = u128::from(from.part) + u128::from(micros) * u128::from(self.rate);
+        let at = if micros == 0 { at + frame } else { at };
+        let frames = u64::try_from(at / frame).unwrap_or(u64::MAX);
+        let due = Due {
+            frame: SampleTime(from.frame.0.saturating_add(frames)),
+            part: u32::try_from(at % frame).unwrap_or(0),
+        };
         let wait = vm.wait_epoch(co).unwrap_or(0);
-        if !self.queue.push(at, Work::Resume(slot, co, wait)) {
+        if !self.queue.push_due(due, Work::Resume(slot, co, wait)) {
             self.stats.events_refused += 1;
             vm.cancel(co);
         }
@@ -265,7 +346,8 @@ impl Engine {
             };
             n.pass = slot.saturating_add(1);
             if usize::from(n.pass) == plan.scripts.len() {
-                queued = self.queue_start(note);
+                self.queue_start(note);
+                queued = true;
             }
             if let Some(entry) = script.callbacks.note {
                 self.run_callback(slot, entry, Running::new(Kind::Note, Some(note)));
@@ -276,21 +358,34 @@ impl Engine {
         }
     }
 
-    fn queue_start(&mut self, note: NoteRef) -> bool {
+    /// Queues `note` to start. Never drops it: the note table holds no more
+    /// notes than the list has room for, so a full list holds notes since
+    /// stolen or started, and pruning those makes room.
+    pub(crate) fn queue_start(&mut self, note: NoteRef) {
+        if self.pending.len() == self.pending.capacity() {
+            let notes = &self.notes;
+            self.pending
+                .retain(|&r| notes.get(r).is_some_and(|n| !n.started));
+        }
         if self.pending.len() < self.pending.capacity() {
             self.pending.push(note);
+        } else {
+            self.stats.notes_refused += 1;
         }
-        true
     }
 
-    /// Runs the release callbacks from `note`'s player on (KSP: `note_off`
-    /// triggers `on release`; from the slot after it when it did `note_off`
-    /// it); the slot that ignored it, if one did.
+    /// Runs the release callbacks of the slots after `note`'s player (from
+    /// it when it [hears its own](crate::ScriptPlan::hears_own_releases) and
+    /// did not `note_off` it); the slot that ignored it, if one did.
     pub(crate) fn release_callbacks(&mut self, note: NoteRef) -> Option<u8> {
         let plan = Arc::clone(&self.plan);
         let first = self.notes.get(note).map_or(0, |n| {
             let player = n.first.checked_sub(1);
-            usize::from(if n.noted_off { n.first } else { player.unwrap_or(0) })
+            let hears = !n.noted_off
+                && player
+                    .and_then(|p| plan.scripts.get(usize::from(p)))
+                    .is_none_or(|s| s.hears_own_releases);
+            usize::from(if hears { player.unwrap_or(0) } else { n.first })
         });
         for (slot, script) in (0u8..).zip(&plan.scripts).skip(first) {
             if let Some(entry) = script.callbacks.release
@@ -318,10 +413,14 @@ impl Engine {
             if n.ignored || n.released {
                 continue;
             }
-            let held = self
-                .notes
-                .count(|n| n.started && !n.ignored && !n.is_up() && !n.pedal_held)
-                - 1;
+            // The count scans every note: only zones that start on it ask.
+            let held = if self.zone_index.uses_held() {
+                self.notes
+                    .count(|n| n.started && !n.ignored && !n.is_up() && !n.pedal_held)
+                    - 1
+            } else {
+                0
+            };
             let scripted = self.plan.release_zones == ReleaseZones::WithNote;
             self.start_zones(note, true, |trigger| match trigger {
                 Trigger::Attack => true,
@@ -333,7 +432,7 @@ impl Engine {
                 continue;
             };
             // A stopping fade asked before it started ends it: no release follows.
-            n.released |= n.fade.is_some_and(|(target, _)| target == FadeTarget::End);
+            n.released |= n.fade.is_some_and(|(target, ..)| target == FadeTarget::End);
             if !scripted && n.releases == Releases::AtStart {
                 self.start_zones(note, false, |trigger| trigger == Trigger::Release);
             }
@@ -501,3 +600,6 @@ impl Engine {
         }
     }
 }
+
+/// The callback type number of `on init`, which a resumed `on init` keeps.
+const INIT_TYPE: u8 = 5;

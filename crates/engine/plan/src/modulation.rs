@@ -16,6 +16,9 @@ pub struct Age {
     pub warp: [f32; WARPS],
     /// The voice's chaotic LFOs' levels this span (at the current span).
     pub chaos: [f32; WARPS],
+    /// How much the voice's attack routes stretched the group's first
+    /// [`WARPS`] envelopes' first segment, fixed at note-on (1: as drawn).
+    pub stretch: [f32; WARPS],
 }
 
 /// How many of a group's LFOs a live rate route can move.
@@ -28,6 +31,7 @@ impl Age {
         now: 0.0,
         warp: [0.0; WARPS],
         chaos: [0.0; WARPS],
+        stretch: [1.0; WARPS],
     };
 }
 
@@ -65,6 +69,77 @@ pub type Chaos = [f32; 4];
 /// Where every attractor starts.
 pub const CHAOS_START: Chaos = [1.0, 1.0, 1.0, 0.0];
 
+/// The time the LFO's clock reads at `age`.
+fn clock_time(l: &ir::Lfo, age: Age) -> f32 {
+    match l.clock {
+        ir::Clock::Voice => age.held,
+        ir::Clock::Free => age.now,
+    }
+}
+
+type Shared = Option<((u64, u64, u8, u64, u32, u32), Option<f32>)>;
+
+thread_local! {
+    /// [`smoothed_shared`]'s results by their inputs.
+    static SMOOTHED: [std::cell::Cell<Shared>; 1024] =
+        const { [const { std::cell::Cell::new(None) }; 1024] };
+}
+
+/// `t` smoothed ([`ir::Transfer::smoothed`]) over `l`, a wave that only
+/// the clock decides (sine, triangle, saw, square with no fade-in), shared:
+/// the 20 taps are evaluated once for every voice, rack and span that reads
+/// the same transfer, wave and time. Only an exact repeat of every input hits
+/// (`extra` holds what else the caller scales it by, as bits); anything else
+/// runs `eval`, which must be pure in those inputs.
+pub fn smoothed_shared(
+    t: &ir::Transfer,
+    l: &ir::Lfo,
+    age: Age,
+    tempo: f32,
+    extra: u32,
+    eval: impl FnOnce() -> Option<f32>,
+) -> Option<f32> {
+    let (width, tag) = match l.wave {
+        ir::Wave::Sine => (0, 0),
+        ir::Wave::Triangle => (0, 1),
+        ir::Wave::Saw => (0, 2),
+        ir::Wave::Square { width } => (width.to_bits(), 3),
+        _ => return eval(),
+    };
+    if l.fade_ms > 0.0 || t.smooth_s <= 0.0 {
+        return eval();
+    }
+    let mut table = 0xcbf2_9ce4_8422_2325_u64 ^ t.table.len() as u64;
+    for v in &t.table {
+        table = (table ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3);
+    }
+    let key = (
+        u64::from(clock_time(l, age).to_bits()) << 32 | u64::from(l.phase.to_bits()),
+        u64::from(hz(l, tempo).to_bits()) << 32 | u64::from(width),
+        tag,
+        table,
+        t.smooth_s.to_bits(),
+        extra,
+    );
+    let hash = (key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ key.1.wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+        ^ key.3.wrapping_mul(0x1656_67b1_9e37_79f9))
+        ^ u64::from(key.4 ^ key.5.rotate_left(13));
+    SMOOTHED.with(|cache| {
+        let slot = cache.get((hash >> 40) as usize % cache.len());
+        if let Some(Some((k, v))) = slot.map(std::cell::Cell::get)
+            && k == key
+        {
+            return v;
+        }
+        let v = eval();
+        if let Some(slot) = slot {
+            slot.set(Some((key, v)));
+        }
+        v
+    })
+}
+
 /// An LFO's cycles a second at `tempo`.
 pub fn hz(l: &ir::Lfo, tempo: f32) -> f32 {
     match l.rate {
@@ -76,11 +151,21 @@ pub fn hz(l: &ir::Lfo, tempo: f32) -> f32 {
 
 /// The envelope's level at `age`.
 pub fn envelope(e: &ir::Breakpoints, age: Age) -> f32 {
+    stretched(e, age, 1.0)
+}
+
+/// [`envelope`] with its first segment (the attack) `attack` times as long,
+/// as a voice's attack routes set it at note-on; what follows keeps its own
+/// times, shifted by the change.
+pub fn stretched(e: &ir::Breakpoints, age: Age, attack: f32) -> f32 {
+    let a = e.points.first().map_or(0.0, |p| p.ms.max(0.0) / 1000.0);
+    let s = attack.max(0.0);
+    let unstretch = |t: f32| if t < a * s { t / s } else { t + a * (1.0 - s) };
     let Some((sustain, released)) = e.sustain.zip(age.released) else {
-        return held(e, age.held);
+        return held(e, unstretch(age.held));
     };
     let after = e.points.get(sustain + 1..).unwrap_or_default();
-    walk(held(e, released), after, age.held - released).0
+    walk(held(e, unstretch(released)), after, age.held - released).0
 }
 
 /// The level `t` seconds after the start with the key down: through the
@@ -128,25 +213,29 @@ fn segment(from: f32, to: f32, x: f32, k: f32) -> f32 {
 
 /// The oscillator's output at `age`, −1..=1, faded in.
 pub fn lfo(l: &ir::Lfo, age: Age, seed: u32, tempo: f32) -> f32 {
-    let t = match l.clock {
-        ir::Clock::Voice => age.held,
-        ir::Clock::Free => age.now,
-    };
+    let t = clock_time(l, age);
     let hz = hz(l, tempo);
     let cycles = f64::from(l.phase) + f64::from(hz) * f64::from(t);
-    let p = cycles.rem_euclid(1.0) as f32;
-    let half = (2.0 * cycles).floor();
+    // The fraction, exact and without libm's fmod: truncating is flooring for
+    // a positive count.
+    let fraction = if (0.0..4.0e18).contains(&cycles) {
+        cycles - (cycles as i64) as f64
+    } else {
+        cycles.rem_euclid(1.0)
+    };
+    let p = fraction as f32;
     let random = || {
         // A new draw each half cycle: a hash of the step and the voice.
+        let half = (2.0 * cycles).floor();
         let mut x = (half as i64 as u64) ^ (u64::from(seed) << 32);
         x = (x ^ (x >> 33)).wrapping_mul(0xff51_afd7_ed55_8ccd);
         x = (x ^ (x >> 33)).wrapping_mul(0xc4ce_b9fe_1a85_ec53);
         ((x >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
     };
     let pulse = |width: f32| if p < width { 1.0 } else { -1.0 };
-    let sine = (std::f32::consts::TAU * p).sin();
+    let sine = || (std::f32::consts::TAU * p).sin();
     let v = match l.wave {
-        ir::Wave::Sine => sine,
+        ir::Wave::Sine => sine(),
         ir::Wave::Triangle => 1.0 - 4.0 * ((p + 0.25).fract() - 0.5).abs(),
         ir::Wave::Saw => 1.0 - 2.0 * p,
         ir::Wave::Square { width } => pulse(width),
@@ -164,7 +253,7 @@ pub fn lfo(l: &ir::Lfo, age: Age, seed: u32, tempo: f32) -> f32 {
             } else {
                 4.0 * (0.75 - p)
             };
-            let y = -w0 * sine + w1 * saw + w2 * triangle - w3 * pulse(width)
+            let y = -w0 * sine() + w1 * saw + w2 * triangle - w3 * pulse(width)
                 + w4 * random()
                 + w5 * (1.0 - 2.0 * p);
             let sum = [w0, w1, w2, w3, w4, w5]

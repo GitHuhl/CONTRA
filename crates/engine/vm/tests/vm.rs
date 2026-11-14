@@ -107,6 +107,48 @@ fn a_loop_that_cannot_exit_leaves_early_and_the_callback_continues() {
     );
 }
 
+/// The stuck-loop check reads every cell, so it waits until the loops have
+/// turned as often as there are cells: a short loop in a script with big
+/// tables costs what it costs with small ones (it once cost ms per callback).
+#[test]
+fn a_short_loop_costs_the_same_beside_a_big_table() {
+    // cell0 = 0; while cell0 < 5000 { cell0 += 1 }
+    let code = vec![
+        Op::Int(0),
+        Op::Store(0),
+        Op::LoopCheck { exit: 12 }, // 2
+        Op::Load(0),
+        Op::Int(5_000),
+        Op::ICmp(Cmp::Lt),
+        Op::JumpIfZero(12),
+        Op::Load(0),
+        Op::Int(1),
+        Op::IAdd,
+        Op::Store(0),
+        Op::Jump(2),
+        Op::LoopExit, // 12
+        Op::Exit,
+    ];
+    let time = |cells: usize| {
+        let p = Program {
+            cells,
+            ..program(code.clone())
+        };
+        let mut vm = Instance::new(&p, 4);
+        let co = vm.start(0, 7).unwrap();
+        let t = std::time::Instant::now();
+        assert_eq!(vm.run(&p, co, &mut Host::default()), Step::Done);
+        assert_eq!((vm.cell(0), vm.faults().loop_limits), (Some(5_000), 0));
+        t.elapsed()
+    };
+    let small = (0..3).map(|_| time(16)).min().unwrap();
+    let big = (0..3).map(|_| time(2_000_000)).min().unwrap();
+    assert!(
+        big < 4 * small + std::time::Duration::from_millis(2),
+        "{big:?} vs {small:?}"
+    );
+}
+
 #[test]
 fn wait_suspends_and_resume_continues_where_it_left() {
     let p = program(vec![
@@ -251,7 +293,7 @@ fn reals_compute_and_convert() {
         Op::Int(2),
         Op::IntToReal,
         Op::FMul,
-        Op::RealToInt,
+        Op::RealToInt(0),
         Op::Store(0),
         Op::Real(f64::NAN),
         Op::Real(1.0),
@@ -262,4 +304,47 @@ fn reals_compute_and_convert() {
     let (vm, _) = run(&p, &mut Host::default());
     assert_eq!(vm.cell(0), Some(3));
     assert_eq!(vm.cell(1), Some(1));
+}
+
+/// Fused comparison and mask runs give the cells the plain ops give.
+#[test]
+fn fused_compare_and_mask_runs_match_the_plain_ops() {
+    // cell3 = 1 & (cell0 < 5); cell4 = (3 < cell0) cmp-and 6 ...; branches on `and`.
+    let code = vec![
+        Op::Int(6),
+        Op::Store(0),
+        Op::Int(1),
+        Op::Load(0),
+        Op::Int(5),
+        Op::ICmp(Cmp::Lt), // 1 cmp-top
+        Op::IAnd,
+        Op::Store(3), // 1 & 0 = 0
+        Op::Int(7),
+        Op::Load(0),
+        Op::Int(5),
+        Op::ICmp(Cmp::Gt),
+        Op::IAnd,
+        Op::Store(4), // 7 & 1 = 1
+        Op::Load(0),
+        Op::Int(2),
+        Op::IAnd,
+        Op::JumpIfZero(21),
+        Op::Int(9),
+        Op::Store(5),
+        Op::Exit,
+        Op::Int(8), // 21: not reached
+        Op::Store(5),
+        Op::Exit,
+    ];
+    let plain = program(code.clone());
+    let fused = program(contra_vm::fuse(&code));
+    assert_ne!(plain.code, fused.code);
+    let (a, _) = run(&plain, &mut Host::default());
+    let (b, _) = run(&fused, &mut Host::default());
+    for cell in 0..8 {
+        assert_eq!(a.cell(cell), b.cell(cell), "cell {cell}");
+    }
+    assert_eq!(b.cell(3), Some(0));
+    assert_eq!(b.cell(4), Some(1));
+    assert_eq!(b.cell(5), Some(9));
 }

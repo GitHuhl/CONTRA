@@ -59,6 +59,13 @@ pub fn route(kind: ModKind) -> Value {
         } => {
             json!({"target":"eq_gain", "source":source(s), "insert":insert, "band":band, "depth_db":depth_db, "limit_db":limit_db, "span_db":span_db})
         }
+        ModKind::Wavetable {
+            source: s,
+            value,
+            depth,
+        } => {
+            json!({"target":"wavetable", "source":source(s), "value":format!("{value:?}"), "depth":depth})
+        }
         ModKind::SampleStart { source: s, depth } => {
             json!({"target":"sample_start", "source":source(s), "depth":depth})
         }
@@ -66,8 +73,9 @@ pub fn route(kind: ModKind) -> Value {
             source: s,
             intensity,
             floor_ms,
+            envelope,
         } => {
-            json!({"target":"attack", "source":source(s), "intensity":intensity, "floor_ms":floor_ms})
+            json!({"target":"attack", "source":source(s), "intensity":intensity, "floor_ms":floor_ms, "envelope":envelope})
         }
         ModKind::Release {
             source: s,
@@ -98,6 +106,11 @@ pub fn route(kind: ModKind) -> Value {
         } => {
             json!({"target":"lfo_hz", "source":source(s), "lfo":lfo, "depth":depth, "range_hz":range_hz})
         }
+        ModKind::LfoDivision {
+            source: s,
+            lfo,
+            depth,
+        } => json!({"target":"lfo_division", "source":source(s), "lfo":lfo, "depth":depth}),
         ModKind::Intensity {
             source: s,
             of,

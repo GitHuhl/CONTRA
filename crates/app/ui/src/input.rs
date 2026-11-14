@@ -13,6 +13,7 @@ use mui::prelude::*;
 
 use crate::kit;
 use crate::theme::TEXT;
+pub use contra_ui_view::{surface, takes_input};
 
 /// One control set by the user, and the modifier keys held at the click
 /// (a script reads them as `$CONTROL_PAR_KEY_*`).
@@ -51,47 +52,6 @@ pub struct Gesture {
 /// (Kontakt 8.13, measured: 12 steps in about 2 s).
 const REPEAT_DELAY: f64 = 0.4;
 const REPEAT_STEP: f64 = 0.15;
-
-/// The id of widget `n`'s surface on face `face` (a rack part): every
-/// face's ids are its own, so two open parts never share one.
-pub fn surface(face: usize, n: usize) -> String {
-    format!("contra-w-{face}-{n}")
-}
-
-/// Whether a widget of `kind` takes the pointer.
-pub(crate) fn takes_input(w: &model::Widget) -> bool {
-    w.enabled
-        && matches!(
-            w.kind,
-            Kind::Knob { .. }
-                | Kind::Slider { .. }
-                | Kind::ValueEdit { .. }
-                | Kind::Button { .. }
-                | Kind::Switch
-                | Kind::Menu { .. }
-                | Kind::Table { .. }
-                | Kind::TextEdit
-        )
-}
-
-/// A widget's value as a number.
-pub fn value(w: &model::Widget) -> f64 {
-    match w.value {
-        Some(model::Value::Integer(v)) => f64::from(v),
-        Some(model::Value::Real(v)) => v,
-        _ => w.initial_value,
-    }
-}
-
-/// Cell `k` of a table's value.
-fn cell(w: &model::Widget, k: u32) -> Option<f64> {
-    let k = k as usize;
-    match &w.value {
-        Some(model::Value::Integers(v)) => v.get(k).map(|&v| f64::from(v)),
-        Some(model::Value::Reals(v)) => v.get(k).copied(),
-        _ => None,
-    }
-}
 
 /// Which way a continuous control drags, and how many view points sweep
 /// its range. A source that sets no [`model::Drag`] gets the renderer's: a
@@ -220,7 +180,7 @@ pub fn read(
             }
             continue;
         }
-        let now = value(w);
+        let now = w.number();
         let before = edits.len();
         let mut set = |v: f64| {
             if v != now {
@@ -304,10 +264,13 @@ pub fn read(
         }
         match &w.kind {
             Kind::Button { momentary: true } => {
+                // Its release always reports: a press can rebuild it at 0
+                // (a native page re-rendering), and the release still runs
+                // the source's own callback (a tab switching its page).
                 if r.pressed {
                     set(1.);
                 } else if r.released {
-                    set(0.);
+                    edits.push(edit(Set::Value(0.)));
                 }
             }
             Kind::Button { .. } | Kind::Switch => {
@@ -387,7 +350,7 @@ fn cells(
                 first - step
             };
             let v = height(from.y + (pos.y - from.y) * k);
-            (cell(w, c) != Some(v)).then(|| edit(Set::Cell(c, v)))
+            (w.cell(c) != Some(v)).then(|| edit(Set::Cell(c, v)))
         })
         .collect()
 }
@@ -412,7 +375,7 @@ fn menu(
     }
     let shown: Vec<&model::MenuItem> = items.iter().filter(|i| i.visible).collect();
     let labels: Vec<&str> = shown.iter().map(|i| i.text.as_str()).collect();
-    let now = value(w) as i32;
+    let now = w.number() as i32;
     let current = shown.iter().position(|i| i.value == now);
     let menu = kit::menu(ui, &id, &labels, 1, current);
     if let Some(item) = menu.changed.and_then(|k| shown.get(k)) {

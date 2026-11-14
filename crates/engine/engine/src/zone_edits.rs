@@ -1,0 +1,193 @@
+//! `set_zone_par`: a script moves a zone to another group, key or velocity
+//! range. KSP manual: in `on init` at once (answers -1); elsewhere an async
+//! id, the edits of a callback applied together after it, then `on
+//! async_complete`. The host applies them to a copy of the plan off the
+//! audio thread; [`Engine::swap_plan`] puts it in between blocks.
+
+use std::sync::Arc;
+
+use contra_ir::ZonePar;
+
+use crate::queue::Exit;
+use crate::{Action, Engine, Plan};
+
+/// Edits waiting for the host, at most (Conflux sets 297 per selection).
+pub(crate) const ZONE_EDITS: usize = 1024;
+
+/// One `set_zone_par` waiting for the host.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneEdit {
+    pub zone: u32,
+    pub par: ZonePar,
+    pub value: i32,
+    pub script: u8,
+    pub id: i32,
+}
+
+/// A `purge_group(group, 1)` of a group nothing of is loaded, waiting for the
+/// host to load it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unpurge {
+    pub group: u32,
+    pub script: u8,
+    pub id: i32,
+}
+
+impl Engine {
+    /// Un-purges `group`: at once when it is loaded (KSP `purge_group`);
+    /// when it is dormant ([`Plan::dormant`]) the host loads it and the
+    /// async id completes then, so the first note after it plays the group.
+    pub(crate) fn unpurge(&mut self, group: u32) -> i32 {
+        let dormant = self.plan.dormant.iter().any(|d| d.group == group);
+        if !dormant || self.building {
+            if let Some(g) = self.groups.get_mut(group as usize) {
+                g.purged = false;
+            }
+            return self.start_async(Exit::Done);
+        }
+        if self.unpurges.len() >= 16 {
+            return self.start_async(Exit::Failed);
+        }
+        let id = self.next_async_id();
+        let script = self.running.slot;
+        self.unpurges.push(Unpurge { group, script, id });
+        id
+    }
+
+    /// Hands each waiting un-purge to `f`; one it cannot take fails its
+    /// async. Audio thread, between blocks.
+    pub fn drain_unpurges(&mut self, mut f: impl FnMut(Unpurge) -> bool) {
+        let mut n = 0;
+        while let Some(&u) = self.unpurges.get(n) {
+            if !f(u) {
+                self.queue_async(u.script, u.id, Exit::Failed);
+            }
+            n += 1;
+        }
+        self.unpurges.clear();
+    }
+
+    /// The host loaded `group` (or could not): it plays from the next note
+    /// and the script's async completes.
+    pub fn unpurged(&mut self, u: Unpurge, took: bool) {
+        if took && let Some(g) = self.groups.get_mut(u.group as usize) {
+            g.purged = false;
+        }
+        self.queue_async(u.script, u.id, Exit::from(took));
+    }
+
+    pub(crate) fn set_zone_par(&mut self, zone: u32, par: ZonePar, value: i32) -> i32 {
+        let carried = matches!(
+            par,
+            ZonePar::Group
+                | ZonePar::LowKey
+                | ZonePar::HighKey
+                | ZonePar::LowVelocity
+                | ZonePar::HighVelocity
+        );
+        if !carried {
+            self.count_unhandled(Action::SetZonePar);
+        }
+        if self.building {
+            // The engine under construction (`on init`, its first
+            // `persistence_changed`) runs on the control thread, before it
+            // plays: the edit lands at once. A zone the instrument lacks is
+            // the script's no-op, not a gap. Every other run queues, a
+            // recall's too (it runs on the audio thread).
+            if carried {
+                Arc::make_mut(&mut self.plan).edit_zone(zone, par, value);
+            }
+            return -1;
+        }
+        if !carried {
+            return self.start_async(Exit::Done);
+        }
+        let script = self.running.slot;
+        // Every carried edit queues, unchanged ones too: the plan here lags
+        // the edits awaiting a swap, so comparing with it could drop the
+        // later of two edits that undo each other.
+        if self.zone_edits.len() >= ZONE_EDITS {
+            self.refuse_zone_edit(script);
+            return self.start_async(Exit::Failed);
+        }
+        let id = self.next_async_id();
+        let edit = ZoneEdit {
+            zone,
+            par,
+            value,
+            script,
+            id,
+        };
+        self.zone_edits.push(edit);
+        id
+    }
+
+    /// Hands each queued edit to `f`; one it cannot take fails its async.
+    /// Audio thread, between blocks.
+    pub fn drain_zone_edits(&mut self, mut f: impl FnMut(ZoneEdit) -> bool) {
+        let mut n = 0;
+        while let Some(&e) = self.zone_edits.get(n) {
+            if !f(e) {
+                self.refuse_zone_edit(e.script);
+                self.queue_async(e.script, e.id, Exit::Failed);
+            }
+            n += 1;
+        }
+        self.zone_edits.clear();
+    }
+
+    /// Swaps `plan` (this plan with `edits` applied, each with whether it
+    /// took) in, leaving the old one in `plan`, and completes their async
+    /// ids. Kontakt 8.13.1 (render rig, probes/zonepar): a sounding voice
+    /// whose zone changes group stops, a short fade; one whose keys change
+    /// plays on. A plan whose zones differ in number is refused and stays in
+    /// `plan`. No allocation.
+    pub fn swap_plan(&mut self, plan: &mut Arc<Plan>, edits: &[(ZoneEdit, bool)]) {
+        // Zones only ever join at the end (a group loaded), so every index a
+        // voice holds still names its zone.
+        let same = plan.zones.len() >= self.plan.zones.len();
+        if same {
+            let fade = self.fade_frames();
+            let group = |p: &Plan, zone: usize| p.zones.get(zone).map(|z| z.group);
+            for i in 0..self.voices.len() {
+                let moved = self.voices.get(i).is_some_and(|s| {
+                    s.voice.is_active() && group(&self.plan, s.zone) != group(plan, s.zone)
+                });
+                if moved {
+                    self.steal(i, fade);
+                }
+            }
+            std::mem::swap(&mut self.plan, plan);
+            Arc::make_mut(&mut self.zone_index).refresh(&self.plan.zones);
+            self.release_zones = self
+                .plan
+                .zones
+                .iter()
+                .any(|z| z.trigger == crate::Trigger::Release);
+        }
+        for &(e, took) in edits {
+            self.queue_async(e.script, e.id, Exit::from(same && took));
+        }
+    }
+
+    /// The plan the engine plays: the host's, with any `on init` zone edits.
+    #[must_use]
+    pub fn plan(&self) -> &Arc<Plan> {
+        &self.plan
+    }
+
+    /// Per script slot, the zone edits refused because the queue was full.
+    #[must_use]
+    pub fn zone_edits_refused(&self) -> &[u32] {
+        &self.zone_refused
+    }
+
+    /// A full queue fails the edit's async and counts it, with the refused
+    /// events and per script ([`Self::zone_edits_refused`]).
+    fn refuse_zone_edit(&mut self, script: u8) {
+        self.stats.events_refused += 1;
+        if let Some(n) = self.zone_refused.get_mut(usize::from(script)) {
+            *n = n.saturating_add(1);
+        }
+    }
+}

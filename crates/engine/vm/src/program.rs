@@ -14,6 +14,30 @@ pub enum Cmp {
     Ge,
 }
 
+/// An integer operand a fused op reads in place of the op that pushed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Src {
+    /// Instance cell `n` ([`Op::Load`]).
+    Cell(u32),
+    /// Per-callback cell `n` ([`Op::LoadPoly`]).
+    Poly(u16),
+    /// A constant ([`Op::Int`]).
+    Int(i32),
+}
+
+/// An integer op that never faults, as a fused op runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bin {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
 /// What a host call leaves on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Returns {
@@ -25,7 +49,9 @@ pub enum Returns {
 
 /// One instruction. Integers are 32-bit and wrap (KSP); reals are f64 stored
 /// as bits in the same 64-bit stack slots; texts live on a separate text stack.
+/// A plain one-byte tag: the interpreter dispatches on it directly.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
 pub enum Op {
     Int(i32),
     Real(f64),
@@ -75,7 +101,9 @@ pub enum Op {
     IAdd,
     ISub,
     IMul,
-    /// Division by zero gives 0 and is counted.
+    /// Division by zero gives 0 and is counted; so does `mod 0`, and the
+    /// callback goes on, as in Kontakt (oracle probe, Kontakt 8,
+    /// 2026-11-14; a real `7.0 / 0.0` gives inf there too).
     IDiv,
     IMod,
     IAnd,
@@ -96,8 +124,9 @@ pub enum Op {
     /// Logical not: 0 → 1, anything else → 0.
     Not,
     IntToReal,
-    /// Truncates toward zero; NaN → 0.
-    RealToInt,
+    /// Truncates toward zero, saturating at the integer range; NaN gives
+    /// the operand (the front end's measured value).
+    RealToInt(i32),
 
     Jump(u32),
     /// Pops; jumps when 0.
@@ -121,6 +150,120 @@ pub enum Op {
         ints: u8,
         texts: u8,
         returns: Returns,
+    },
+
+    // Fused runs ([`crate::fuse`]): each stands for its first `width` plain
+    // ops, which follow it in the code, and continues after them.
+    /// `a b ⊕ store`.
+    BinTo {
+        bin: Bin,
+        a: Src,
+        b: Src,
+        /// A [`Src::Cell`] or [`Src::Poly`].
+        to: Src,
+    },
+    /// `a b cmp jump_if_zero(to)`.
+    Branch {
+        cmp: Cmp,
+        a: Src,
+        b: Src,
+        to: u32,
+    },
+    /// `a b ⊕`.
+    Bin {
+        bin: Bin,
+        a: Src,
+        b: Src,
+    },
+    /// `b cmp jump_if_zero(to)`, against the value on the stack.
+    BranchTop {
+        cmp: Cmp,
+        b: Src,
+        to: u32,
+    },
+    /// `b ⊕`, on the value on the stack.
+    BinTop {
+        bin: Bin,
+        b: Src,
+    },
+    /// `load(i) load_at`.
+    LoadAtCell {
+        base: u32,
+        len: u32,
+        i: u32,
+    },
+    /// `a b ⊕ load_at`.
+    LoadAtBin {
+        base: u32,
+        len: u32,
+        bin: Bin,
+        a: Src,
+        b: Src,
+    },
+    /// `b ⊕ load_at`, on the value on the stack.
+    LoadAtTop {
+        base: u32,
+        len: u32,
+        bin: Bin,
+        b: Src,
+    },
+    /// `cmp jump_if_zero(to)`.
+    CmpJump {
+        cmp: Cmp,
+        to: u32,
+    },
+    /// `⊕ store`.
+    BinStore {
+        bin: Bin,
+        to: Src,
+    },
+    /// `inner outer`: two binary ops on the top three values.
+    BinBin {
+        inner: Bin,
+        outer: Bin,
+    },
+    /// `jump(top)` onto `loop_check(exit)`: the check, then the loop body.
+    LoopJump {
+        top: u32,
+        exit: u32,
+    },
+    /// `x k ⊕ store(x) jump(top)` with ⊕ an add or subtract: a loop's
+    /// counter steps `by`, then the loop goes round, through its
+    /// `loop_check(exit)` when `top` is one.
+    NextTurn {
+        x: Src,
+        by: i32,
+        top: u32,
+        check: Option<u32>,
+    },
+    /// `b icmp`, on the value on the stack: pushes the comparison.
+    CmpTop {
+        cmp: Cmp,
+        b: Src,
+    },
+    /// `icmp iand`: `p & (a cmp b)` from the top three values.
+    CmpAnd {
+        cmp: Cmp,
+    },
+    /// `b icmp iand`: `p & (a cmp b)`, `b` read in place, `a` and `p` on the stack.
+    CmpTopAnd {
+        cmp: Cmp,
+        b: Src,
+    },
+    /// `iand jump_if_zero(to)`.
+    AndJump {
+        to: u32,
+    },
+    /// `b iand jump_if_zero(to)`, on the value on the stack.
+    AndTopJump {
+        b: Src,
+        to: u32,
+    },
+    /// `v store_at`, the index on the stack.
+    StoreAtSrc {
+        base: u32,
+        len: u32,
+        v: Src,
     },
 }
 

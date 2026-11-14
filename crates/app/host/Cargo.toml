@@ -14,6 +14,7 @@ contra-prepare = { path = "../../engine/prepare" }
 contra-format = { path = "../../format/common" }
 contra-format-kontakt = { path = "../../format/kontakt" }
 contra-ksp = { path = "../../script/ksp" }
+contra-face = { path = "../face" }
 contra-library = { path = "../library" }
 contra-protocol = { path = "../../model/protocol" }
 contra-stream = { path = "../../engine/stream" }
@@ -25,7 +26,19 @@ contra-align = { path = "../align", optional = true }
 
 [features]
 align = ["dep:contra-align"]
+heap-profile = ["contra-lua/system-allocator"]
 
 [[example]]
 name = "align"
 required-features = ["align"]
+
+[[example]]
+name = "fuzz"
+required-features = ["heap-profile"]
+
+[[example]]
+name = "heap"
+required-features = ["heap-profile"]
+
+[dev-dependencies]
+backtrace = "0.3"

@@ -1,0 +1,13 @@
+[package]
+name = "contra-kontakt-effects"
+version = "0.0.0"
+edition.workspace = true
+license = "Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+contra-ir = { path = "../../model/ir" }
+contra-law = { path = "../../base/law" }

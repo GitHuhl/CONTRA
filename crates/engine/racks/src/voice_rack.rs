@@ -13,12 +13,13 @@
 
 use std::sync::Arc;
 
-use contra_dsp::drive::{Crush, Overdrive, Reduction, Shaper, Voicing};
+use contra_dsp::delay::{Comb, line_frames};
+use contra_dsp::drive::{Core, Crush, Outer, Overdrive};
 use contra_dsp::filter::{Formant, Svf, VowelSet, Vowels};
 use contra_ir as ir;
 use contra_plan::route_depth;
 
-use contra_effects::processors::{curve, shaper};
+use contra_effects::processors::{reduction, shaper, voicing};
 
 use contra_effects::summed::{VoiceEq, shape};
 
@@ -41,9 +42,17 @@ const TICK: u32 = 32;
 pub struct Unit {
     pub insert: u8,
     pub kind: Kind,
+    /// A shaper's base-rate filters; its oversampled core is the kind (the
+    /// two together outgrow the other kinds).
+    pub outer: Outer,
+    /// Which of the voice's delay lines a comb runs on ([`lines`]).
+    pub line: usize,
     /// A drive unit's settings now and at the next refresh, `left` frames
     /// away; it steps between them every [`TICK`] frames.
     pub ramp: Option<Ramp>,
+    /// The effect settings the unit last took, when no ramp moved it since:
+    /// the same again changes nothing, so a refresh skips it.
+    pub tuned: Option<ir::EffectKind>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,14 +68,20 @@ pub enum Kind {
     Filter(Svf),
     Eq(VoiceEq),
     Formant(Formant),
-    Shaper(Shaper),
+    Shaper(Core),
     Crush(Crush),
     Overdrive(Overdrive),
+    Comb(Comb),
 }
 
-/// The unit for an insert, at its saved settings.
-fn unit(kind: ir::EffectKind, rate: u32) -> Option<Kind> {
-    Some(match kind {
+/// The unit for an insert, at its saved settings, and a shaper's base-rate
+/// filters.
+fn unit(kind: ir::EffectKind, rate: u32) -> Option<(Kind, Outer)> {
+    if let ir::EffectKind::Shaper(s) = kind {
+        let s = shaper(s, rate);
+        return Some((Kind::Shaper(s.core), s.outer));
+    }
+    let kind = match kind {
         ir::EffectKind::Filter(f) => {
             let mut svf = Svf::new(shape(&f));
             svf.set_cutoff(f.hz, rate);
@@ -74,11 +89,12 @@ fn unit(kind: ir::EffectKind, rate: u32) -> Option<Kind> {
         }
         ir::EffectKind::Eq(bells) => Kind::Eq(VoiceEq::new(bells, rate)),
         ir::EffectKind::Formant(f) => Kind::Formant(Formant::new(vowels(f), rate)),
-        ir::EffectKind::Shaper(s) => Kind::Shaper(shaper(s, rate)),
         ir::EffectKind::Crush(c) => Kind::Crush(Crush::new(reduction(c, rate), 1)),
         ir::EffectKind::Overdrive(o) => Kind::Overdrive(Overdrive::new(voicing(o), rate)),
+        ir::EffectKind::Comb(c) => Kind::Comb(Comb::new(c.hz, c.feedback, c.forward, rate)),
         _ => return None,
-    })
+    };
+    Some((kind, Outer::empty()))
 }
 
 fn vowels(f: ir::Formant) -> Vowels {
@@ -93,41 +109,20 @@ fn vowels(f: ir::Formant) -> Vowels {
     }
 }
 
-fn voicing(o: ir::Overdrive) -> Voicing {
-    Voicing {
-        split_hz: o.split_hz,
-        smooth_hz: o.smooth_hz,
-        drive: o.drive,
-        mix: o.mix,
-        level: o.level,
-        curve: o.curve,
-    }
-}
-
-fn reduction(c: ir::Crush, rate: u32) -> Reduction {
-    let hold = if c.rate < 1.0 {
-        (1.0 / c.rate.max(1e-6)).min(rate as f32 / 50.0) + 1.0
-    } else {
-        1.0
-    };
-    Reduction {
-        hold,
-        bits: (c.bits < 16.0).then_some(c.bits.max(1.0)),
-        noise: c.noise,
-        noise_tone: c.noise_tone,
-    }
-}
-
 /// A group's per-voice units in slot order; empty when all of it is shared.
 pub fn template(group: &contra_plan::Group, rate: u32) -> Arc<[Unit]> {
     let last_drive = group.inserts.iter().rposition(|e| {
         e.as_ref().is_some_and(|e| {
             matches!(
                 e.kind,
-                ir::EffectKind::Shaper(_) | ir::EffectKind::Crush(_) | ir::EffectKind::Overdrive(_)
+                ir::EffectKind::Shaper(_)
+                    | ir::EffectKind::Crush(_)
+                    | ir::EffectKind::Overdrive(_)
+                    | ir::EffectKind::Comb(_)
             )
         })
     });
+    let mut combs = 0;
     group
         .inserts
         .iter()
@@ -135,13 +130,44 @@ pub fn template(group: &contra_plan::Group, rate: u32) -> Arc<[Unit]> {
         .filter(|&(n, _)| last_drive.is_some_and(|l| n <= l) || route_depth::moved(&group.mods, n))
         .filter_map(|(n, e)| {
             let e = e.as_ref()?;
+            let (kind, outer) = unit(e.kind, rate)?;
+            let line = combs;
+            combs += usize::from(matches!(kind, Kind::Comb(_)));
             Some(Unit {
                 insert: u8::try_from(n).ok()?,
-                kind: unit(e.kind, rate)?,
+                kind,
+                outer,
+                line,
                 ramp: None,
+                tuned: None,
             })
         })
         .collect()
+}
+
+/// Frames of delay line each comb of a voice needs.
+#[must_use]
+pub fn comb_line(rate: u32) -> usize {
+    line_frames(rate, ir::COMB_LOWEST_HZ)
+}
+
+/// How many combs a template has.
+#[must_use]
+pub fn combs(units: &[Unit]) -> usize {
+    units
+        .iter()
+        .filter(|u| matches!(u.kind, Kind::Comb(_)))
+        .count()
+}
+
+/// Starts a voice's combs: their positions and delay lines cleared.
+pub fn start(rack: &mut [Unit], lines: &mut [[f32; 2]]) {
+    lines.fill([0.0; 2]);
+    for u in rack {
+        if let Kind::Comb(c) = &mut u.kind {
+            c.reset();
+        }
+    }
 }
 
 /// Runs a voice's rack on `io` (before its envelope and gain), skipping
@@ -152,8 +178,10 @@ pub fn process(
     inserts: &[Option<ir::Effect>],
     io: &mut [[f32; 2]],
     spare: &mut [[f32; 2]],
+    lines: &mut [[f32; 2]],
     rate: u32,
 ) {
+    let each = comb_line(rate);
     for u in rack {
         let Some(e) = inserts.get(usize::from(u.insert)).and_then(Option::as_ref) else {
             continue;
@@ -172,9 +200,21 @@ pub fn process(
                 Kind::Filter(f) => f.process(chunk),
                 Kind::Eq(q) => q.process(chunk),
                 Kind::Formant(f) => f.process(chunk),
-                Kind::Shaper(s) => drive(chunk, spare, e, |io| s.process(io)),
+                Kind::Shaper(s) => drive(chunk, spare, e, |io| {
+                    u.outer.before(io);
+                    s.process(io);
+                    u.outer.after(io);
+                }),
                 Kind::Crush(c) => drive(chunk, spare, e, |io| c.process(io)),
                 Kind::Overdrive(o) => drive(chunk, spare, e, |io| o.process(io)),
+                Kind::Comb(c) => {
+                    let line = lines.get_mut(u.line * each..(u.line + 1) * each);
+                    drive(chunk, spare, e, |io| {
+                        if let Some(line) = line {
+                            c.process(io, line);
+                        }
+                    });
+                }
             }
             if let Some(r) = &mut u.ramp
                 && r.at < r.len
@@ -182,7 +222,7 @@ pub fn process(
                 r.at += n as u32;
                 if r.at.is_multiple_of(TICK) || r.at >= r.len {
                     let k = route_depth::lerp(r.from, r.to, (r.at as f32 / r.len as f32).min(1.0));
-                    tune(&mut u.kind, Tune::Effect(k), rate);
+                    tune(&mut u.kind, &mut u.outer, Tune::Effect(&k), rate);
                 }
             }
             rest = tail;
@@ -213,29 +253,48 @@ fn drive(
     }
 }
 
-pub fn tune_unit(u: &mut Unit, t: Tune, ramp: Option<Ramp>, rate: u32) {
+pub fn tune_unit(u: &mut Unit, t: Tune<'_>, ramp: Option<Ramp>, rate: u32) {
+    let effect = match t {
+        Tune::Effect(e) => Some(*e),
+        _ => None,
+    };
+    let unchanged = ramp.is_none() && u.ramp.is_none() && effect.is_some() && u.tuned == effect;
     u.ramp = ramp;
-    tune(&mut u.kind, t, rate);
+    if unchanged {
+        return;
+    }
+    u.tuned = effect.filter(|_| ramp.is_none());
+    tune(&mut u.kind, &mut u.outer, t, rate);
 }
 
-fn tune(kind: &mut Kind, t: Tune, rate: u32) {
+fn tune(kind: &mut Kind, outer: &mut Outer, t: Tune<'_>, rate: u32) {
     match (kind, t) {
         (Kind::Filter(f), Tune::Filter(hz, k)) => {
             f.set_cutoff(hz, rate);
             f.set_damping(k);
         }
         (Kind::Eq(q), Tune::Eq(bells)) => q.retune(bells, rate),
-        (Kind::Formant(f), Tune::Effect(ir::EffectKind::Formant(v))) => f.set(vowels(v), rate),
-        (Kind::Shaper(s), Tune::Effect(ir::EffectKind::Shaper(v))) => s.set_curve(curve(v.curve)),
-        (Kind::Crush(c), Tune::Effect(ir::EffectKind::Crush(v))) => c.set(reduction(v, rate)),
-        (Kind::Overdrive(o), Tune::Effect(ir::EffectKind::Overdrive(v))) => o.set(voicing(v), rate),
+        (Kind::Comb(c), Tune::Comb(hz, feedback)) => c.set(hz, feedback, rate),
+        (Kind::Formant(f), Tune::Effect(ir::EffectKind::Formant(v))) => f.set(vowels(*v), rate),
+        (Kind::Shaper(s), Tune::Effect(ir::EffectKind::Shaper(v))) => {
+            let new = shaper(*v, rate);
+            s.retune(&new.core);
+            outer.retune(&new.outer);
+        }
+        (Kind::Crush(c), Tune::Effect(ir::EffectKind::Crush(v))) => c.set(reduction(*v, rate)),
+        (Kind::Overdrive(o), Tune::Effect(ir::EffectKind::Overdrive(v))) => {
+            o.set(voicing(*v), rate)
+        }
         _ => {}
     }
 }
 
 /// A moved unit's new settings.
-pub enum Tune {
+pub enum Tune<'a> {
     Filter(f32, [f32; 3]),
     Eq([ir::Bell; 4]),
-    Effect(ir::EffectKind),
+    /// A comb's pitch in Hz and feedback.
+    Comb(f32, f32),
+    /// Borrowed: an effect's settings outweigh the other moves.
+    Effect(&'a ir::EffectKind),
 }

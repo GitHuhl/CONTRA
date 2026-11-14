@@ -172,9 +172,13 @@ fn note_controller_and_ui_callbacks_do_not_allocate_for_pgs() {
             ..Controls::default()
         },
         engine_pars: EnginePars::default(),
+        view: None,
         links: vec![],
         reverb_laws: ir::ReverbControls::from_fn(|_| ir::Law::Linear { lo: 0.0, hi: 1.0 }),
         reverb_networks: vec![],
+        lfo_units: vec![],
+        warp_modes: vec![],
+        mod_kinds: vec![],
         knobs: vec![],
         files: None,
         arrays: vec![],

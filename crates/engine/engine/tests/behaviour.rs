@@ -38,7 +38,7 @@ fn region(store: &mut Store, level: f32, frames: u64) -> std::io::Result<Region>
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     })
 }
@@ -76,7 +76,7 @@ fn sine(store: &mut Store) -> Region {
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     }
 }
@@ -184,6 +184,7 @@ fn sequential_round_robin_cycles_and_mic_layers_agree() {
         enabled: true,
         mods: Vec::new(),
         blends: Vec::new(),
+        lfos: Vec::new(),
     });
     let mut e = engine(&store, plan);
     let mut steps = Vec::new();
@@ -400,7 +401,8 @@ fn a_cc_crossfade_moves_sounding_voices() {
         end: 48_000,
         crossfade: 0,
         ..Default::default()
-    }];
+    }]
+    .into();
     z.region = looped;
     let mut e = engine(&store, Plan::new(vec![z], 8));
     let quiet = level(&mut e, &[cc(1, 10), on(60, 1.0)])[0];
@@ -429,6 +431,7 @@ fn a_disabled_mic_bus_starts_no_voices() {
         enabled: true,
         mods: Vec::new(),
         blends: Vec::new(),
+        lfos: Vec::new(),
     });
     let mut e = engine(&store, plan);
     e.set_bus_enabled(1, false);
@@ -465,6 +468,7 @@ fn a_bus_sends_before_its_fader() {
         enabled: true,
         mods: Vec::new(),
         blends: Vec::new(),
+        lfos: Vec::new(),
     });
     plan.buses.push(Bus {
         name: "Aux".into(),
@@ -476,6 +480,7 @@ fn a_bus_sends_before_its_fader() {
         enabled: true,
         mods: Vec::new(),
         blends: Vec::new(),
+        lfos: Vec::new(),
     });
     let mut e = engine(&store, plan);
     assert!(close(level(&mut e, &[on(60, 1.0)])[0], 0.25));
@@ -492,6 +497,7 @@ fn a_controller_scales_a_send_level_live() {
         input: ir::Transfer {
             source: ir::Source::Controller(1),
             table: Vec::new(),
+            ..Default::default()
         },
         depth: 0.75,
     };
@@ -501,6 +507,7 @@ fn a_controller_scales_a_send_level_live() {
             input: ir::Transfer {
                 source: ir::Source::Constant,
                 table: Vec::new(),
+                ..Default::default()
             },
             amount: 1.0,
             factors: vec![factor],
@@ -516,6 +523,7 @@ fn a_controller_scales_a_send_level_live() {
         enabled: true,
         mods,
         blends,
+        lfos: Vec::new(),
     };
     let send = ir::BusSend {
         bus: 2,
@@ -534,6 +542,112 @@ fn a_controller_scales_a_send_level_live() {
     let mut e = engine(&store, plan);
     assert!(close(level(&mut e, &[cc(1, 0), on(60, 1.0)])[0], 0.125));
     assert!(close(level(&mut e, &[cc(1, 127)])[0], 0.5));
+}
+
+#[test]
+fn a_free_lfo_scales_a_send_level_live() {
+    use contra_engine::ir;
+    // A square LFO at 1 Hz: high (read 1) the first half cycle, low (0) the
+    // second; the send runs at 1 − 0.75 + 0.75·x of the zone's 0.5. One
+    // engine runs through the boundary, no new note.
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.5)], 8);
+    plan.groups[0].bus = 1;
+    let factor = ir::Factor {
+        input: ir::Transfer {
+            source: ir::Source::Lfo(0),
+            table: Vec::new(),
+            ..Default::default()
+        },
+        depth: 0.75,
+    };
+    let blend = ir::Blend {
+        base: 0.0,
+        terms: vec![ir::Term {
+            input: ir::Transfer {
+                source: ir::Source::Constant,
+                table: Vec::new(),
+                ..Default::default()
+            },
+            amount: 1.0,
+            factors: vec![factor],
+        }],
+    };
+    let lfo = ir::Lfo {
+        wave: ir::Wave::Square { width: 0.5 },
+        rate: ir::Rate::Hz(1.0),
+        phase: 0.0,
+        fade_ms: 0.0,
+        clock: ir::Clock::Free,
+    };
+    plan.buses.push(Bus {
+        name: "Bus".into(),
+        gain: 0.0,
+        pan: 0.0,
+        inserts: Vec::new(),
+        sends: vec![ir::BusSend {
+            bus: 2,
+            level: 1.0,
+            post_fader: false,
+        }],
+        to_main: true,
+        enabled: true,
+        mods: vec![ir::ModKind::Send {
+            source: ir::Source::Blend(0),
+            send: 0,
+        }],
+        blends: vec![blend],
+        lfos: vec![lfo],
+    });
+    plan.buses.push(Bus {
+        name: "Aux".into(),
+        gain: 1.0,
+        pan: 0.0,
+        inserts: Vec::new(),
+        sends: Vec::new(),
+        to_main: true,
+        enabled: true,
+        mods: Vec::new(),
+        blends: Vec::new(),
+        lfos: Vec::new(),
+    });
+    let mut e = engine(&store, plan);
+    assert!(close(level(&mut e, &[on(60, 1.0)])[0], 0.5), "first half");
+    // The second half cycle starts at 0.5 s (94 spans); the zone sounds for 1 s.
+    let mut seen = Vec::new();
+    for _ in 0..150 {
+        let l = level(&mut e, &[])[0];
+        if seen.last().is_none_or(|p: &f32| (p - l).abs() > 0.01) {
+            seen.push(l);
+        }
+    }
+    assert!(seen.iter().any(|l| close(*l, 0.125)), "{seen:?}");
+}
+
+#[test]
+fn a_comb_insert_runs_on_each_voice_and_rings_at_its_feedback() {
+    use contra_engine::ir;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 0.25)], 8);
+    // A constant 0.25 through a comb with feedback 0.5 settles at 0.25/(1 − 0.5).
+    plan.groups[0].inserts = vec![Some(ir::Effect {
+        kind: ir::EffectKind::Comb(ir::Comb {
+            hz: 480.0,
+            feedback: 0.5,
+            forward: false,
+            octaves: 9.97,
+        }),
+        bypass: false,
+        output: 1.0,
+        dry: 0.0,
+    })];
+    let mut e = engine(&store, plan);
+    level(&mut e, &[on(60, 1.0)]);
+    let mut last = 0.0;
+    for _ in 0..8 {
+        last = level(&mut e, &[])[0];
+    }
+    assert!(close(last, 0.5), "settled at {last}");
 }
 
 #[test]
@@ -628,6 +742,46 @@ fn pitch_bend_moves_sounding_voices_by_its_route() {
 }
 
 #[test]
+fn a_mapped_bend_bends_pitch_by_its_table_as_is() {
+    // A UVI mapper emits its table in the route's domain: -1..=2 of 2 st.
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = Plan::new(vec![zone(&mut store, 1.0)], 8);
+    plan.groups[0].shapers = vec![ir::Transfer {
+        source: ir::Source::PitchBend,
+        table: vec![-1.0, 0.0, 1.0, 2.0],
+        ..Default::default()
+    }];
+    plan.groups[0].mods = vec![ir::Mod {
+        name: String::new(),
+        slot: 0,
+        target: 0,
+        bypass: false,
+        kind: ir::ModKind::Pitch {
+            source: ir::Source::Shaped(0),
+            semitones: 2.0,
+            depth: 1.0,
+            tau_ms: 0.0,
+        },
+    }];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let bend = |lsb, msb| Timed {
+        at: SampleTime(0),
+        body: Event::midi1(0xE0, lsb, msb),
+    };
+    let semitones = |e: &mut Engine, events: &[Timed<Event>]| {
+        let at = |e: &Engine| e.voices().next().map(|(_, p, _)| p).unwrap();
+        let from = at(e);
+        level(e, events);
+        12.0 * ((at(e) - from) / 256.0).log2()
+    };
+    level(&mut e, &[on(60, 1.0)]);
+    let down = semitones(&mut e, &[bend(0, 0)]);
+    assert!((down + 2.0).abs() < 1e-3, "{down}");
+    let up = semitones(&mut e, &[bend(0x7F, 0x7F)]);
+    assert!((up - 4.0).abs() < 2e-3, "{up}");
+}
+
+#[test]
 fn a_sample_start_route_moves_the_start_within_its_range() {
     use contra_engine::ir::{Mod, ModKind, Source};
     let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
@@ -656,7 +810,7 @@ fn a_sample_start_route_moves_the_start_within_its_range() {
             sample,
             start: 0,
             end: frames,
-            loops: vec![],
+            loops: Default::default(),
             reverse: false,
         },
         60,
@@ -725,6 +879,7 @@ fn a_shaped_controller_reads_its_start_until_a_message_arrives() {
     plan.groups[0].shapers = vec![Transfer {
         source: Source::ControllerFrom { cc: 1, start: 127 },
         table: (0..128).map(|k| k as f32 / 254.0).collect(),
+        ..Default::default()
     }];
     plan.groups[0].mods = vec![Mod {
         name: String::new(),
@@ -761,6 +916,7 @@ fn a_blended_macro_moves_one_cell_of_a_sounding_voices_matrix() {
     let through = |source| Transfer {
         source,
         table: Vec::new(),
+        ..Default::default()
     };
     // Wheel × CC 2, read straight through: the left cell only.
     plan.groups[0].blends = vec![Blend {
@@ -1141,6 +1297,7 @@ fn a_velocity_attack_route_shortens_soft_attacks() {
             source: ir::Source::Velocity,
             intensity: 1.0,
             floor_ms: 2.0,
+            envelope: None,
         },
     }];
     let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
@@ -1295,6 +1452,7 @@ fn a_compressor_slot_mixes_its_dry_level_from_the_input() {
                 attack_ms: 0.0,
                 release_ms: 100.0,
                 makeup_db: 0.0,
+                makeup_slope: 0.0,
                 link: true,
                 mix: 1.0,
                 detector: ir::Detector::Input,
@@ -1328,6 +1486,7 @@ fn a_group_waveshaper_clips_each_voice_not_their_sum() {
             curve: DriveCurve::Soft(1.0),
             lowpass_hz: None,
             highpass_hz: None,
+            sections: ir::Sections::NONE,
         }),
         bypass: false,
         output: 1.0,
@@ -1389,6 +1548,7 @@ fn a_route_moves_a_group_waveshapers_amount_per_voice() {
                 curve: DriveCurve::Soft(0.0),
                 lowpass_hz: None,
                 highpass_hz: None,
+                sections: ir::Sections::NONE,
             }),
             bypass: false,
             output: 1.0,
@@ -1476,6 +1636,7 @@ fn an_lfo_on_a_group_waveshaper_retunes_it_every_32_frames() {
             curve: DriveCurve::Soft(0.0),
             lowpass_hz: None,
             highpass_hz: None,
+            sections: ir::Sections::NONE,
         }),
         bypass: false,
         output: 1.0,
@@ -1937,7 +2098,8 @@ fn a_controller_moves_a_bus_eq_band_while_it_plays() {
         end: 48_000,
         crossfade: 0,
         ..Default::default()
-    }];
+    }]
+    .into();
     let mut plan = Plan::new(vec![z], 8);
     plan.groups[0].bus = 1;
     let bell = ir::Bell {
@@ -1968,6 +2130,7 @@ fn a_controller_moves_a_bus_eq_band_while_it_plays() {
             unipolar: false,
         }],
         blends: Vec::new(),
+        lfos: Vec::new(),
     });
     let mut e = engine(&store, plan);
     let peak = |e: &mut Engine, events: &[Timed<Event>]| {
@@ -2102,6 +2265,54 @@ fn release_route_trace_uses_the_key_held_time() {
     assert!((source - 0.5).abs() < 0.001, "{source}");
 }
 
+/// A shaper over the release-trigger counter (Pacific and Dolce move their
+/// release samples' start this way) reads the held time like a bare route.
+#[cfg(feature = "trace")]
+#[test]
+fn shaped_release_counter_reads_the_key_held_time() {
+    use contra_engine::TraceEvent;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut z = zone(&mut store, 0.5);
+    z.trigger = Trigger::Release;
+    z.start_mod = 1000;
+    let mut plan = Plan::new(vec![z], 8);
+    plan.groups[0].shapers = vec![ir::Transfer {
+        source: ir::Source::HeldTime { span_ms: 1000 },
+        table: vec![0.2, 1.0],
+        ..Default::default()
+    }];
+    plan.groups[0].mods = vec![ir::Mod {
+        name: "held".into(),
+        slot: 7,
+        target: 0,
+        bypass: false,
+        kind: ir::ModKind::SampleStart {
+            source: ir::Source::Shaped(0),
+            depth: 1.0,
+        },
+    }];
+    let mut engine = Engine::new_traced(Arc::new(plan), store.client(), RATE, 128);
+    let mut output = vec![[0.0; 2]; 24_000];
+    engine.process(&mut output, &[on(60, 1.0)]);
+    level(&mut engine, &[off(60)]);
+    let source = engine
+        .trace_events()
+        .iter()
+        .find_map(|event| match event {
+            TraceEvent::RouteOnset {
+                mod_slot: 7,
+                source,
+                ..
+            } => *source,
+            _ => None,
+        })
+        .expect("the shaped counter has a value at the release voice's start");
+    // Held 0.5 s of a 1 s span: counter 0.5, through 0.2..1.0 is 0.6.
+    assert!((source - 0.6).abs() < 0.01, "{source}");
+}
+
+/// A shaper keeps its source's polarity: pitch bend at rest through a flat
+/// 0.5 table (Pacific's release start route) is 0, not half the depth.
 #[cfg(feature = "trace")]
 #[test]
 fn voice_snapshot_reports_the_playing_envelope_and_pitch() {
@@ -2283,6 +2494,7 @@ fn onset_route_trace_records_sample_and_envelope_values() {
                 source: ir::Source::Controller(1),
                 intensity: 1.0,
                 floor_ms: 0.0,
+                envelope: None,
             },
         },
     ];
@@ -2361,9 +2573,13 @@ fn script_controller_callback_links_indirect_route_evaluations() {
         restore_texts: vec![],
         controls: Controls::default(),
         engine_pars: EnginePars::default(),
+        view: None,
         links: vec![],
         reverb_laws: ir::ReverbControls::from_fn(|_| ir::Law::Linear { lo: 0.0, hi: 1.0 }),
         reverb_networks: vec![],
+        lfo_units: vec![],
+        warp_modes: vec![],
+        mod_kinds: vec![],
         knobs: vec![],
         files: None,
         arrays: Vec::new(),
@@ -2377,4 +2593,129 @@ fn script_controller_callback_links_indirect_route_evaluations() {
         && !v.direct_controller_source
         && !v.controller_can_affect
         && matches!(v.unit, RouteUnit::GainMultiplier)));
+}
+
+/// An attack route into a modulation envelope stretches that envelope's
+/// attack per voice with the amplitude attack's law: velocity 0.5 at
+/// intensity 1 halves a 100 ms rise, so 60 ms in its pitch route is at the
+/// top (an octave) while a full-velocity voice is still rising.
+/// One zone whose envelope 0 rises over 100 ms and bends pitch up an octave,
+/// its attack timed by `source`.
+fn a_rise_timed_by(store: &mut Store, source: contra_engine::ir::Source) -> Plan {
+    use contra_engine::ir::{Breakpoint, Breakpoints, Mod, ModKind, Source};
+    let route = |kind| Mod {
+        name: String::new(),
+        slot: 0,
+        target: 0,
+        bypass: false,
+        kind,
+    };
+    let mut plan = Plan::new(vec![zone(store, 1.0)], 8);
+    plan.groups[0].envelopes = vec![Breakpoints {
+        start: 0.0,
+        points: vec![Breakpoint {
+            ms: 100.0,
+            level: 1.0,
+            curve: 0.0,
+        }],
+        sustain: Some(0),
+        loop_from: None,
+        stages: false,
+    }];
+    plan.groups[0].mods = vec![
+        route(ModKind::Pitch {
+            source: Source::Envelope(0),
+            semitones: 12.0,
+            depth: 1.0,
+            tau_ms: 0.0,
+        }),
+        route(ModKind::Attack {
+            source,
+            intensity: 1.0,
+            floor_ms: 0.0,
+            envelope: Some(0),
+        }),
+    ];
+    plan
+}
+
+/// Runs `e` to `ms` and returns each sounding voice's bend over one block,
+/// semitones above its key's own pitch (`keys` in voice order).
+fn bends_at(e: &mut Engine, ms: u64, keys: &[u8]) -> Vec<f64> {
+    while e.now().0 < u64::from(RATE) * ms / 1000 {
+        level(e, &[]);
+    }
+    let from: Vec<f64> = e.voices().map(|(_, p, _)| p).collect();
+    level(e, &[]);
+    let to = e.voices().map(|(_, p, _)| p);
+    (from.iter().zip(to).zip(keys))
+        .map(|((a, b), &k)| 12.0 * ((b - a) / 256.0).log2() - (f64::from(k) - 60.0))
+        .collect()
+}
+
+#[test]
+fn an_attack_route_stretches_a_modulation_envelopes_attack() {
+    let semitones_at_60_ms = |velocity| {
+        let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+        let plan = a_rise_timed_by(&mut store, contra_engine::ir::Source::Velocity);
+        let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+        level(&mut e, &[on(60, velocity)]);
+        bends_at(&mut e, 60, &[60])[0]
+    };
+    let soft = semitones_at_60_ms(0.5);
+    assert!(
+        (soft - 12.0).abs() < 0.1,
+        "a 50 ms rise is at the top: {soft}"
+    );
+    let hard = semitones_at_60_ms(1.0);
+    assert!((hard - 7.2).abs() < 0.5, "a 100 ms rise is at 0.6: {hard}");
+}
+
+#[test]
+fn a_controller_times_the_next_attack_not_the_rising_one() {
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let plan = a_rise_timed_by(&mut store, contra_engine::ir::Source::Controller(1));
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    level(&mut e, &[cc(1, 127), on(60, 1.0)]);
+    bends_at(&mut e, 30, &[60]);
+    level(&mut e, &[cc(1, 64), on(72, 1.0)]);
+    // Read 3,072..3,328 frames in: the first voice is 64 ms into its
+    // 100 ms rise; the next started at 1,792 (37.3 ms), so 26.7 ms into
+    // 50.4 ms. Re-timed live, the first would sit at the top (12).
+    let [first, next] = bends_at(&mut e, 60, &[60, 72])[..] else {
+        panic!("two voices");
+    };
+    assert!(
+        (first - 12.0 * 0.64).abs() < 0.3,
+        "the rising voice keeps its 100 ms: {first}"
+    );
+    let x = (3072.0 - 1792.0) / 48.0 / (100.0 * 64.0 / 127.0);
+    assert!(
+        (next - 12.0 * x).abs() < 0.3,
+        "the next note rises over 50 ms: {next}"
+    );
+}
+
+#[test]
+fn an_envelope_timing_its_own_attack_renders() {
+    use contra_engine::ir::{ModKind, Source};
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let mut plan = a_rise_timed_by(&mut store, Source::Envelope(0));
+    // A second envelope and the first time each other's attack too.
+    let rise = plan.groups[0].envelopes[0].clone();
+    plan.groups[0].envelopes.push(rise);
+    let mut cross = plan.groups[0].mods[1].clone();
+    cross.kind = ModKind::Attack {
+        source: Source::Envelope(1),
+        intensity: 1.0,
+        floor_ms: 0.0,
+        envelope: Some(0),
+    };
+    plan.groups[0].mods.push(cross);
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    level(&mut e, &[on(60, 1.0)]);
+    // Read at note-on, an envelope is its start level (0 here), which
+    // shortens the rise to nothing: the bend is at the top at once.
+    let bend = bends_at(&mut e, 10, &[60])[0];
+    assert!((bend - 12.0).abs() < 0.1, "{bend}");
 }

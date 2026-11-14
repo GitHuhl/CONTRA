@@ -16,6 +16,7 @@ use contra_ui::app::{self, Action, App, Face, Part};
 use contra_ui::{Pictures, layout};
 use contra_ui_model::Interface;
 use moose::mui::MuiEditor;
+use moose::mui::window::{WheelAcceleration, WheelPolicy};
 use moose::prelude::*;
 
 use crate::readout::Readout;
@@ -31,6 +32,9 @@ struct PartView {
     /// Which load of the part this is.
     generation: u64,
     path: Option<PathBuf>,
+    /// The instrument file its pictures are found near: a user preset's
+    /// base, not the preset in CONTRA's own folder.
+    source: Option<PathBuf>,
     /// Its library's interface; copied when the part loads and whenever
     /// its script changes it ([`contra_host::view::View::revision`]).
     tree: Option<Arc<Interface>>,
@@ -41,6 +45,10 @@ struct PartView {
     name: String,
     /// Its library's name in the browser, if the browser lists it.
     library: String,
+    /// The preset it plays, as its library's preset index, found by path.
+    preset: Option<usize>,
+    /// The player changed it since the preset loaded.
+    modified: bool,
     mix: Mix,
     solo: bool,
     mute: bool,
@@ -56,12 +64,15 @@ pub struct Snapshot {
     libraries: (u64, Arc<Vec<app::Library>>),
     recent: Vec<(usize, usize)>,
     folders: Vec<String>,
+    snapshot_folder: (String, Option<bool>),
     /// [`contra_library::Prefs::next_channel`] and `own_output`.
     new_parts: (bool, bool),
     level: f32,
     stats: Stats,
     readout: Readout,
     report: Vec<String>,
+    /// A file a part's script asks the player to pick, by the part's row.
+    pick: Option<app::FilePick>,
 }
 
 impl Snapshot {
@@ -69,7 +80,6 @@ impl Snapshot {
     /// whether any of it changed, so an idle editor draws no frames.
     pub fn refresh(&mut self, rack: &Rack, browser: &Browser, report: Vec<String>) -> bool {
         let before = self.shown();
-        let reported = !report.is_empty();
         let rescanned = self.libraries.0 != browser.generation;
         if rescanned {
             self.libraries = (browser.generation, Arc::new(libraries(browser)));
@@ -78,6 +88,10 @@ impl Snapshot {
                 .map(|r| r.path.display().to_string())
                 .collect();
             self.new_parts = (browser.prefs.next_channel, browser.prefs.own_output);
+            self.snapshot_folder = match browser.kontakt() {
+                Some(f) => (f.display().to_string(), Some(f.is_dir())),
+                None => (String::new(), None),
+            };
         }
         let meters = rack.meters();
         let level = |slot: usize| {
@@ -100,23 +114,28 @@ impl Snapshot {
                     Some(v) if v.sounds.0 == p.sounds.revision => v.sounds.clone(),
                     _ => (p.sounds.revision, Arc::new(sounds(&p.sounds))),
                 };
-                let library = match same {
-                    Some(v) if !rescanned => v.library.clone(),
-                    _ => (p.path.as_deref())
-                        .and_then(|path| browser.find(path))
-                        .and_then(|(l, _)| browser.catalog.libraries.get(l))
-                        .map(|l| l.name.clone())
-                        .unwrap_or_default(),
+                // A recall changes the path, not the load.
+                let (library, preset) = match same {
+                    Some(v) if !rescanned && v.path == p.path => (v.library.clone(), v.preset),
+                    _ => {
+                        let found = p.path.as_deref().and_then(|path| browser.find(path));
+                        let library = found.and_then(|(l, _)| browser.catalog.libraries.get(l));
+                        let name = library.map(|l| l.name.clone()).unwrap_or_default();
+                        (name, found.map(|(_, n)| n))
+                    }
                 };
                 Some(PartView {
                     slot,
                     generation,
                     path: p.path.clone(),
+                    source: p.source.clone().or_else(|| p.path.clone()),
                     tree,
                     revision,
                     sounds,
                     name: p.name.clone(),
                     library,
+                    preset,
+                    modified: p.modified,
                     mix: p.mix,
                     solo: p.solo,
                     mute: p.mute,
@@ -124,15 +143,30 @@ impl Snapshot {
                 })
             })
             .collect();
+        self.pick = rack.pick().and_then(|pick| {
+            let part = self.parts.iter().position(|v| v.slot == pick.part)?;
+            Some(app::FilePick {
+                part,
+                save: pick.save,
+                names: pick.names,
+            })
+        });
         self.level = meters.master[0].max(meters.master[1]);
         if let Some(s) = rack.stats() {
+            self.readout.peak(&s, rack.rate());
             self.stats = s;
         }
         self.readout.sample(&self.stats, rack);
+        self.report(report) | (self.shown() != before)
+    }
+
+    /// Adds this tick's `report`; whether it held anything.
+    pub fn report(&mut self, report: Vec<String>) -> bool {
+        let reported = !report.is_empty();
         self.report.extend(report);
         let over = self.report.len().saturating_sub(REPORT);
         self.report.drain(..over);
-        reported || self.shown() != before
+        reported
     }
 
     /// What a frame draws of this, as it reads on screen: the CPU load in
@@ -155,6 +189,8 @@ impl Snapshot {
                     p.revision,
                     p.name.clone(),
                     p.library.clone(),
+                    p.preset,
+                    p.modified,
                     mix,
                 )
             })
@@ -165,6 +201,7 @@ impl Snapshot {
             self.level.to_bits(),
             self.readout.shown(),
             self.stats.voices,
+            self.pick.clone(),
         )
     }
 
@@ -186,6 +223,7 @@ impl Snapshot {
             app.libraries = fresh.clone();
             app.recent.clone_from(&self.recent);
             app.folders.clone_from(&self.folders);
+            app.snapshot_folder.clone_from(&self.snapshot_folder);
             (app.next_channel, app.own_output) = self.new_parts;
             shown.browser = self.libraries.0;
         }
@@ -223,12 +261,14 @@ impl Snapshot {
                         f
                     })
                 }
-                _ => p.tree.as_deref().map(|tree| face(tree, p.path.clone())),
+                _ => p.tree.as_deref().map(|tree| face(tree, p.source.clone())),
             };
             Part {
                 face,
                 name: p.name.clone(),
                 library: p.library.clone(),
+                preset: p.preset,
+                modified: p.modified,
                 channel: p.mix.channel,
                 output: p.mix.output + 1,
                 volume: f64::from(linear_to_db(p.mix.gain)),
@@ -260,6 +300,7 @@ impl Snapshot {
         let r = &self.readout;
         app.stats = app::Stats {
             cpu: r.cpu,
+            peak: r.peak,
             voices: self.stats.voices,
             ram_mb: r.process_mb.unwrap_or(0),
             samples_mb: r.samples_mb,
@@ -267,6 +308,7 @@ impl Snapshot {
             cache_mb: r.cache_mb,
         };
         app.report.clone_from(&self.report);
+        app.pick.clone_from(&self.pick);
     }
 }
 
@@ -280,17 +322,91 @@ struct Shown {
     browser: u64,
 }
 
+/// Saves, renames or deletes the player's preset `part` plays, under the
+/// browser's presets folder, and lists the user presets again.
+fn edit_preset(
+    rack: &mut Rack,
+    browser: &mut Browser,
+    part: usize,
+    edit: app::PresetEdit,
+) -> std::io::Result<()> {
+    use contra_host::presets::{self, Overwrite};
+    let folder = browser
+        .user
+        .clone()
+        .ok_or_else(|| std::io::Error::other("no presets folder"))?;
+    let playing = rack.parts().get(part).and_then(Option::as_ref);
+    let path = playing.and_then(|p| p.path.clone());
+    let library = (path.as_deref().and_then(|p| browser.find(p)))
+        .and_then(|(l, _)| browser.catalog.libraries.get(l))
+        .map(|l| l.name.clone())
+        .ok_or_else(|| std::io::Error::other("not in a listed library"))?;
+    match (edit, path) {
+        (app::PresetEdit::Save(name), _) => {
+            let saved = rack.save_preset(part, &folder, &library, &name, Overwrite::Create);
+            if let Err(e) = saved {
+                // The list was stale: read again, Save preset as… offers Replace.
+                browser.user_changed();
+                return Err(match e.kind() {
+                    std::io::ErrorKind::AlreadyExists => std::io::Error::new(
+                        e.kind(),
+                        format!("\"{name}\" exists: Save preset as… again to replace it"),
+                    ),
+                    _ => e,
+                });
+            }
+        }
+        (app::PresetEdit::Replace(name), _) => {
+            rack.save_preset(part, &folder, &library, &name, Overwrite::Replace)?;
+        }
+        (app::PresetEdit::Rename(name), Some(path)) => {
+            let to = presets::rename(&folder, &path, &name)?;
+            rack.preset_moved(&path, Some(&to));
+        }
+        // What plays stays; it is its base instrument, changed, from now on.
+        (app::PresetEdit::Delete, Some(path)) => {
+            presets::delete(&folder, &path)?;
+            rack.preset_moved(&path, None);
+        }
+        _ => return Err(std::io::Error::other("the part plays no user preset")),
+    }
+    browser.user_changed();
+    Ok(())
+}
+
 /// The catalog as the browser lists it: presets by path inside their
 /// library, without the extension.
-fn libraries(browser: &Browser) -> Vec<app::Library> {
+pub(crate) fn libraries(browser: &Browser) -> Vec<app::Library> {
+    // Kontakt's user snapshots, read only: `User Content/<instrument>/<name>`.
+    let kontakt = browser.kontakt();
+    let user_content = kontakt.as_deref().and_then(std::path::Path::parent);
     (browser.catalog.libraries.iter())
         .map(|l| app::Library {
             name: l.name.clone(),
+            format: match l.format {
+                contra_library::Format::Kontakt => app::Format::Kontakt,
+                contra_library::Format::Uvi => app::Format::Uvi,
+            },
+            recalls: (l.presets.iter().enumerate())
+                .filter_map(|(n, p)| is_preset(p).then_some(n))
+                .collect(),
             presets: (l.presets.iter())
-                .map(|p| {
-                    let p = p.strip_prefix(&l.dir).unwrap_or(p).with_extension("");
-                    p.to_string_lossy().into_owned()
-                })
+                .map(
+                    |p| match browser.user.as_deref().filter(|u| p.starts_with(u)) {
+                        // The player's own, in a folder of their own.
+                        Some(_) => format!(
+                            "{}{}",
+                            app::USER,
+                            p.file_stem().unwrap_or_default().display()
+                        ),
+                        None => {
+                            let from = user_content.filter(|k| p.starts_with(k));
+                            let from = from.unwrap_or(&l.dir);
+                            let p = p.strip_prefix(from).unwrap_or(p).with_extension("");
+                            p.to_string_lossy().into_owned()
+                        }
+                    },
+                )
                 .collect(),
             starred: browser.prefs.starred(&l.dir),
             art: art(&l.art),
@@ -363,13 +479,22 @@ const COVER_BYTES: u64 = 32 << 20;
 /// Carries out a browser action: a preset loads into the first free part.
 pub fn browse(rack: &mut Rack, browser: &mut Browser, action: Action, report: &mut Vec<String>) {
     match action {
-        Action::Load { library, preset } => {
+        Action::Load {
+            library,
+            preset,
+            into,
+        } => {
             let Some(path) = browser.preset(library, preset) else {
                 return;
             };
-            let loaded = match rack.free() {
-                Some(part) => rack.load(part, &path).map(|()| place(rack, browser, part)),
-                None => Err("every part is in use".into()),
+            // A preset recalls into the part named; anything else adds one.
+            let into = into
+                .filter(|_| is_preset(&path))
+                .filter(|&p| rack.parts().get(p).is_some_and(Option::is_some));
+            let loaded = match (into, rack.free()) {
+                (Some(part), _) => rack.load(part, &path),
+                (None, Some(part)) => rack.load(part, &path).map(|()| place(rack, browser, part)),
+                (None, None) => Err("every part is in use".into()),
             };
             match loaded {
                 Ok(()) => browser.loaded(&path),
@@ -428,9 +553,25 @@ pub fn browse(rack: &mut Rack, browser: &mut Browser, action: Action, report: &m
             let switch = Action::Switch { part, preset };
             browse(rack, browser, switch, report);
         }
+        Action::Preset { part, edit } => {
+            if let Err(e) = edit_preset(rack, browser, part, edit) {
+                report.push(format!("preset: {e}"));
+            }
+        }
         Action::Star(library, on) => browser.star(library, on),
         Action::Refresh => browser.rescan(),
+        Action::Relink(line) => {
+            if let Some(o) = rack.take_offer(&line) {
+                browser.relink(o.from, o.to);
+                rack.know(browser);
+                let scripts = rack.saved_scripts(o.part);
+                if let Err(e) = rack.load_saved(o.part, &o.path, &scripts, &[], &[]) {
+                    report.push(format!("{}: {e}", o.path.display()));
+                }
+            }
+        }
         Action::RemoveFolder(n) => browser.remove_root(n),
+        Action::Picked(name) => rack.picked(name.as_deref()),
         Action::NewParts {
             next_channel,
             own_output,
@@ -577,10 +718,24 @@ fn part_of(action: &Action) -> Option<usize> {
     }
 }
 
+/// The size the editor is designed at, in logical points.
+const SIZE: (u32, u32) = (1180, 780);
+
 pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
+    #[expect(
+        clippy::expect_used,
+        reason = "the shared notch scale is a positive compile-time constant"
+    )]
+    let wheel = WheelPolicy::new(
+        moose::mui::mui::host::NOTCH_LINES as f32,
+        WheelAcceleration::Fling,
+    )
+    .expect("the shared notch scale must be finite and positive");
     let p = Arc::clone(&params);
     let watched = Arc::clone(&params);
     let dropping = Arc::clone(&params);
+    let owner = Arc::clone(&params);
+    let closing = Arc::clone(&params);
     let mut app = App {
         build: crate::BUILD.into(),
         ..App::default()
@@ -592,7 +747,27 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
     // Where the last load the editor asked for lands.
     let mut target = app::Loading::New;
     let mut buttons = None;
-    MuiEditor::new(params, contra_ui::ui(), (1180, 780), move |ui, bridge| {
+    // Between builds: the frame before's paint and submit, and any idle wait.
+    let mut last: Option<std::time::Instant> = None;
+    // Escape reaches the host when no field is focused; noted here, it
+    // still closes the open menu or sheet.
+    let escape = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pressed = Arc::clone(&escape);
+    MuiEditor::new(params, contra_ui::ui(), SIZE, move |ui, bridge| {
+        let start = std::time::Instant::now();
+        if escape.swap(false, Ordering::AcqRel) {
+            app.view.dismiss();
+        }
+        if let Some(t) = last.replace(start) {
+            crate::frames::note("between", start - t);
+        }
+        // Opening: one tick here brings the copy a closed editor let lapse
+        // up to date, though the host runs no audio to spawn one (a load
+        // in progress shows on its own tick).
+        if !p.shared.shown.swap(true, Ordering::AcqRel) && !p.shared.holding.load(Ordering::Acquire)
+        {
+            crate::Tick.run(&p);
+        }
         // On opening, and whenever the host loads a state: its view.
         let now = p.shared.restored.load(Ordering::Acquire);
         if restored != Some(now) {
@@ -609,7 +784,9 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
         crate::look::parts(&mut app, &slots, &mut waiting);
         app.master = f64::from(p.volume.value());
         app.loading = p.shared.loading().then_some(target);
-        let response = contra_ui::app::view(ui, &mut app);
+        app.load_progress = p.shared.progress.snapshot();
+        crate::frames::note("fill", start.elapsed());
+        let response = crate::frames::time("view", || contra_ui::app::view(ui, &mut app));
         // A frame reads its input as it builds, so what a press or release
         // changes (a switch applied to the face, a row selected) shows in
         // the frame after it: ask for that one, or it waits for more input.
@@ -619,6 +796,15 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
         }
         for action in response.changed {
             let asked = match action {
+                Action::Load {
+                    library,
+                    preset,
+                    into: Some(n),
+                } if (app.libraries.get(library))
+                    .is_some_and(|l| l.recalls.binary_search(&preset).is_ok()) =>
+                {
+                    Some(app::Loading::Part(n))
+                }
                 Action::Load { .. } => Some(app::Loading::New),
                 Action::Replace { part, .. }
                 | Action::Switch { part, .. }
@@ -630,6 +816,12 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
                 target = t;
                 p.shared.dirty.store(true, Ordering::Release);
             }
+            if let Action::Scale(percent) = action {
+                // The tree scales to fit its window: a size is a window size.
+                let [w, h] = [SIZE.0, SIZE.1].map(|n| n * percent / 100);
+                let _ = bridge.context().is_some_and(|c| c.request_resize(w, h));
+                continue;
+            }
             if let Action::Master(db) = action {
                 bridge.drag_gesture(P::Volume, db);
                 continue;
@@ -637,7 +829,11 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
             if action == Action::AddFolder {
                 // The browser's first folder, from the editor's own copy.
                 let from = app.folders.first().map(PathBuf::from);
-                p.shared.folder.ask(from);
+                p.shared.folder.ask(crate::folder::Wanted::Libraries, from);
+                continue;
+            }
+            if action == Action::ChooseSnapshotFolder {
+                p.shared.folder.ask(crate::folder::Wanted::Snapshots, None);
                 continue;
             }
             if let Some(event) = played(&action) {
@@ -646,13 +842,30 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
                 }
                 continue;
             }
+            // The browser names the focused part by its row: the rack's slot.
+            if let Action::Load {
+                library,
+                preset,
+                into,
+            } = action
+            {
+                let into = into.and_then(|n| slots.get(n).copied());
+                let load = Action::Load {
+                    library,
+                    preset,
+                    into,
+                };
+                p.shared.request(Request::Browse(load));
+                continue;
+            }
             if matches!(
                 action,
-                Action::Load { .. }
-                    | Action::Star(..)
+                Action::Star(..)
                     | Action::Refresh
+                    | Action::Relink(_)
                     | Action::RemoveFolder(_)
                     | Action::NewParts { .. }
+                    | Action::Picked(_)
             ) {
                 p.shared.request(Request::Browse(action));
                 continue;
@@ -664,6 +877,10 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
                     row(part).map(|part| Action::Switch { part, preset })
                 }
                 Action::Step { part, by } => row(part).map(|part| Action::Step { part, by }),
+                Action::Preset { part, ref edit } => row(part).map(|part| Action::Preset {
+                    part,
+                    edit: edit.clone(),
+                }),
                 Action::Replace {
                     part,
                     library,
@@ -680,6 +897,28 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
                 continue;
             }
             let slot = part_of(&action).and_then(|n| slots.get(n).copied());
+            // A panel control moved: its host macro records the move,
+            // taking the next free one the first time.
+            if let (
+                Action::Control {
+                    part,
+                    widget,
+                    value,
+                    cell: None,
+                    ..
+                },
+                Some(slot),
+            ) = (&action, slot)
+            {
+                let shown = app.parts.get(*part);
+                let title = shown.map_or("", |s| s.name.as_str());
+                let face = shown.and_then(|p| p.face.as_ref());
+                let w = face.and_then(|f| f.tree.widgets.get(*widget));
+                let touched = w.and_then(|w| crate::macros::touch(&p, slot, title, w, *value));
+                if let Some((id, value)) = touched {
+                    bridge.drag_gesture(id, value);
+                }
+            }
             p.shared.request(Request::Ui(Edit { slot, action }));
         }
         // Parts not loaded yet keep how they were saved.
@@ -692,6 +931,14 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
         response.el
     })
     .resizable((900, 600))
+    .wheel_policy(wheel)
+    .on_key(move |_, k| {
+        use moose::mui::mui::host::NativeKey;
+        if k.down && k.key == NativeKey::Named(moose::mui::mui::input::Key::Escape) {
+            pressed.store(true, Ordering::Release);
+        }
+        false
+    })
     .on_files(move |_, _, paths, dropped| {
         let instruments: Vec<_> = paths.iter().filter(|p| is_instrument(p)).cloned().collect();
         let folders: Vec<_> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
@@ -708,12 +955,26 @@ pub fn editor(params: Arc<ContraParams>) -> Box<dyn Editor> {
         }
         !instruments.is_empty() || !folders.is_empty()
     })
-    .changed(move || {
-        // Only events draw: a change the tick or the view marked, or a
-        // picture that arrived. Nothing polled (pictures pending, a load
-        // under way) asks for frames, so nothing stuck can spin them.
-        watched.shared.dirty.swap(false, Ordering::AcqRel) | contra_ui::pictures::arrived()
+    .changed({
+        let previous = std::sync::atomic::AtomicU64::new(u64::MAX);
+        move || {
+            let progress = watched.shared.progress.snapshot();
+            let visible = ((progress.stage as u64) << 56)
+                | (u64::from(progress.percent) << 48)
+                | (progress.bytes / 1_000_000).min((1 << 48) - 1);
+            let changed =
+                watched.shared.loading() && previous.swap(visible, Ordering::Relaxed) != visible;
+            // Only events draw: a change the tick or the view marked, or a
+            // picture that arrived. Nothing polled (pictures pending, a load
+            // under way) asks for frames, so nothing stuck can spin them.
+            changed
+                | watched.shared.dirty.swap(false, Ordering::AcqRel)
+                | contra_ui::pictures::arrived()
+        }
     })
+    // Add folder's picker is owned by the host's window (Windows).
+    .on_win32_parent(move |hwnd| owner.shared.folder.set_owner(hwnd))
+    .on_close(move || closing.shared.shown.store(false, Ordering::Release))
     .into_editor()
 }
 
@@ -753,19 +1014,33 @@ fn played(action: &Action) -> Option<Event> {
     })
 }
 
+/// Whether `path` is a preset of an instrument rather than one: a Kontakt
+/// snapshot or the player's own preset.
+fn is_preset(path: &std::path::Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str());
+    ext.is_some_and(|e| {
+        e.eq_ignore_ascii_case("nksn") || e.eq_ignore_ascii_case(contra_host::presets::EXTENSION)
+    })
+}
+
 /// Whether a dropped file is an instrument the rack loads: a Kontakt
-/// instrument or snapshot, or a UVI program inside its bank (`bank.ufs/Name.uvip`).
+/// instrument or snapshot, an SFZ file, or a UVI program in its bank.
 fn is_instrument(path: &std::path::Path) -> bool {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
-    matches!(ext.as_deref(), Some("nki" | "nksn" | "uvip"))
+    matches!(ext.as_deref(), Some("nki" | "nksn" | "uvip" | "sfz"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sfz_files_can_be_dropped_into_the_player() {
+        assert!(super::is_instrument(std::path::Path::new("instrument.SFZ")));
+    }
 
     #[test]
     fn the_keyboard_and_wheels_play_midi() {

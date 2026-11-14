@@ -34,7 +34,7 @@ fn region(store: &mut Store, name: &str, frames: u64) -> std::io::Result<Region>
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     })
 }
@@ -182,7 +182,8 @@ fn the_pedal_holds_released_notes_until_it_lifts() {
         end: 1000,
         crossfade: 0,
         ..Default::default()
-    }];
+    }]
+    .into();
     let mut engine = Engine::new(plan(vec![z], 8), store.client(), RATE);
     render(
         &mut engine,
@@ -204,7 +205,8 @@ fn a_script_owned_pedal_does_not_hold_released_notes() {
         end: 1000,
         crossfade: 0,
         ..Default::default()
-    }];
+    }]
+    .into();
     let mut p = (*plan(vec![z], 8)).clone();
     p.sustain_pedal = contra_engine::SustainPedal::ToScripts;
     let mut engine = Engine::new(Arc::new(p), store.client(), RATE);
@@ -344,8 +346,8 @@ fn a_burst_of_512_events_in_one_block_loses_no_note() {
         (0, 0),
         "{stats:?}"
     );
-    // Only the voice limit steals; a burst past the fade reserve ends some
-    // of those fades early (voices_cut), never a note still owed a voice.
+    // Only the voice limit steals; a burst stealing more than the limit within
+    // one fade ends some fades early (voices_cut), never a note owed a voice.
     assert_eq!(stats.voices_stolen, 256 - 64, "{stats:?}");
     assert_eq!(engine.playing_voices(), 64);
 }
@@ -378,4 +380,141 @@ fn the_note_table_follows_the_instruments_voice_limit() {
         "{stats:?}"
     );
     assert_eq!(engine.playing_voices(), 300);
+}
+
+/// The cost gate, as ratios so any machine can hold it: a settled idle block
+/// (its notes and its effect's tail long gone) costs a fraction of a block
+/// with one voice, and sixteen voices cost no more than sixteen times one.
+/// Something running every block regardless of sound, or per-voice work
+/// growing with the voice count, fails it.
+#[test]
+fn idle_costs_a_fraction_of_a_voice_and_voices_add_up_linearly() {
+    use std::time::{Duration, Instant};
+    const BLOCK: usize = 512;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let diagonal = |g| [[g, 0.0], [0.0, g]];
+    let chorus = contra_engine::ir::Effect {
+        kind: contra_engine::ir::EffectKind::Delay(contra_engine::ir::Delay {
+            time: contra_engine::ir::DelayTime::Ms(15.0),
+            depth_ms: 5.0,
+            second_head: true,
+            input: diagonal(1.0),
+            feedback: diagonal(0.3),
+            output: diagonal(1.0),
+            damping_hz: 8_000.0,
+            low_cut_hz: 0.0,
+            steep_low_cut: false,
+            high_shelf: None,
+            spread_ms: 1.0,
+            rate: contra_engine::ir::Rate::Hz(0.9),
+            phase: 0.25,
+        }),
+        bypass: false,
+        output: 1.0,
+        dry: 1.0,
+    };
+    let frames = 4 * u64::from(RATE);
+    let mut plan = Plan {
+        notes: 64,
+        queue: 256,
+        ..Plan::new(
+            vec![zone(region(&mut store, "a", frames).unwrap(), 0.0)],
+            32,
+        )
+    };
+    plan.main = vec![Some(chorus)];
+    let mut e = Engine::new(Arc::new(plan), store.client(), RATE);
+    let mut out = vec![[0.0; 2]; BLOCK];
+    // The median of `n` blocks, the first with `events` at now.
+    let mut median = |e: &mut Engine, events: &[(bool, u8)], n: usize| {
+        let at = e.now().0;
+        let events: Vec<_> = (events.iter())
+            .map(|&(down, key)| if down { on(at, key) } else { off(at, key) })
+            .collect();
+        e.process(&mut out, &events);
+        let mut times: Vec<Duration> = (0..n)
+            .map(|_| {
+                let t = Instant::now();
+                e.process(&mut out, &[]);
+                t.elapsed()
+            })
+            .collect();
+        times.sort_unstable();
+        times[n / 2]
+    };
+    let keys: Vec<u8> = (48..64).collect();
+    let one = median(&mut e, &[(true, 60)], 80);
+    // Released, then six seconds for the release and the chorus to fall silent.
+    median(&mut e, &[(false, 60)], 6 * RATE as usize / BLOCK);
+    let idle = median(&mut e, &[], 80);
+    let downs: Vec<_> = keys.iter().map(|&k| (true, k)).collect();
+    let sixteen = median(&mut e, &downs, 80);
+    assert_eq!(e.active_voices(), 16);
+    eprintln!("idle {idle:?}, one voice {one:?}, sixteen {sixteen:?}");
+    assert!(idle * 4 < one, "idle {idle:?} vs one voice {one:?}");
+    assert!(sixteen < one * 16, "sixteen {sixteen:?} vs one {one:?}");
+}
+
+/// A per-note expression reaches its own voice only: of two held notes,
+/// the one tuned up an octave reads its sample twice as fast; the other
+/// keeps its pace. As MPE's member-channel bend and pressure do, by note.
+#[test]
+fn a_note_expression_tunes_only_its_own_voice() {
+    use contra_events::NoteExpression;
+    let mut store = Store::new(StoreConfig::DEFAULT).unwrap();
+    let frames = 4 * u64::from(RATE);
+    let mut zones = Vec::new();
+    for (name, key) in [("low", 60u8), ("high", 64u8)] {
+        let mut z = zone(region(&mut store, name, frames).unwrap(), 0.0);
+        z.keys = key..=key;
+        z.root = key;
+        zones.push(z);
+    }
+    let mut engine = Engine::new(plan(zones, 8), store.client(), RATE);
+    // Positions per zone after `events` and 0.1 s.
+    let step = (RATE / 10) as usize;
+    let mut at = 0u64;
+    let mut run = |engine: &mut Engine, events: &[Timed<Event>]| {
+        let shifted: Vec<_> = events
+            .iter()
+            .map(|e| Timed {
+                at: SampleTime(at),
+                body: e.body,
+            })
+            .collect();
+        let mut out = vec![[0.0; 2]; step];
+        for (i, chunk) in out.chunks_mut(512).enumerate() {
+            let input: Vec<_> = shifted.iter().copied().filter(|_| i == 0).collect();
+            engine.process(chunk, &input);
+        }
+        at += step as u64;
+        let mut pos = [0.0f64; 2];
+        for (zone, position, _) in engine.voices() {
+            if let Some(p) = pos.get_mut(zone) {
+                *p = position;
+            }
+        }
+        pos
+    };
+    let a = run(&mut engine, &[on(0, 60), on(0, 64)]);
+    let b = run(&mut engine, &[]);
+    let tune = Timed {
+        at: SampleTime(0),
+        body: Event::Expression(
+            HostPattern {
+                port: 0,
+                channel: 0,
+                key: 60,
+                id: -1,
+                clap: true,
+            },
+            NoteExpression::Tune(12.0),
+        ),
+    };
+    let c = run(&mut engine, &[tune]);
+    let d = run(&mut engine, &[]);
+    let pace = |x: [f64; 2], y: [f64; 2], n: usize| y[n] - x[n];
+    let (low, high) = (pace(c, d, 0) / pace(a, b, 0), pace(c, d, 1) / pace(a, b, 1));
+    assert!((low - 2.0).abs() < 0.05, "the tuned note's pace {low}");
+    assert!((high - 1.0).abs() < 0.01, "the other note's pace {high}");
 }

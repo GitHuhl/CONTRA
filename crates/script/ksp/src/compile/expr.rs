@@ -297,6 +297,20 @@ impl<'a> Compiler<'a> {
             args.get(i)
                 .ok_or_else(|| Error::new(span, "missing argument"))
         };
+        // An array loaded in `on init` is implicitly persistent (KSP manual,
+        // load_array): its saved values land at the end of init, unless
+        // read_persistent_var reloaded it first.
+        // ponytail: a load in a function init calls is not seen.
+        if self.in_init && matches!(b, Builtin::LoadArray | Builtin::LoadArrayStr) {
+            let (v, _) = self.named(arg(0)?)?;
+            if let Some(var) = self
+                .vars
+                .get_mut(v)
+                .filter(|v| v.persistence == Persistence::None)
+            {
+                var.persistence = Persistence::Snapshot;
+            }
+        }
         match b {
             Builtin::Exit => {
                 self.emit(Op::Exit);
@@ -343,7 +357,7 @@ impl<'a> Compiler<'a> {
             Builtin::RealToInt | Builtin::Int => {
                 let got = self.expr(arg(0)?)?;
                 self.convert(got, Ty::Real, span)?;
-                self.emit(Op::RealToInt);
+                self.emit(Op::RealToInt(crate::builtins::NAN_INT));
                 return Ok(Some(Ty::Int));
             }
             Builtin::ShLeft | Builtin::ShRight => {
@@ -478,8 +492,17 @@ impl<'a> Compiler<'a> {
                     texts += 1;
                 }
                 Arg::V => {
-                    let (v, control) = self.named(e)?;
-                    control.ok_or_else(|| Error::new(e.span, "not a UI control"))?;
+                    // Every declaration has a UI id, control or not (KSP
+                    // manual, get_ui_id(): "Even regular variables and
+                    // constants (those that are not UI widgets) get a UI ID
+                    // assigned"), and the arguments these commands document are
+                    // variable names, not controls: hide_part()'s first is
+                    // "<variable> ... the variable name of the widget". Kontakt
+                    // compiles `hide_part($plainvar, $HIDE_PART_BG)` — ten
+                    // corpus instruments do it — and with no widget behind the
+                    // id there is nothing for the host to hide, so the id is
+                    // passed and the engine finds no control for it.
+                    let (v, _) = self.named(e)?;
                     self.emit(Op::Int(ui_id(v)));
                     ints += 1;
                 }

@@ -1,7 +1,8 @@
-//! Saturation, Distortion, Lo-Fi and Skreamer onto the engine's waveshaper and
+//! Saturation, Distortion, Lo-Fi, Skreamer and Tape Saturator onto the engine's waveshaper and
 //! reducer: their saved records (readers 0x140d02c30, 0x140d00c60,
 //! 0x140d01f20, via v2 sampler-kontakt effects/mod.rs) and knob laws.
-//! Group racks only: the engine runs these on each voice.
+//! Any rack: the engine runs them on each voice in a group rack and on the
+//! sum in a bus or instrument rack.
 
 use contra_format::Notes;
 use contra_ir as ir;
@@ -22,9 +23,6 @@ pub(crate) fn effect(
     at: &str,
     notes: &mut Notes,
 ) -> Option<ir::EffectKind> {
-    if !at.starts_with("group") {
-        return None;
-    }
     let f = |n: usize| {
         let bytes = public.get(n..n + 4)?.try_into().ok()?;
         Some(f32::from_le_bytes(bytes)).filter(|v| v.is_finite())
@@ -47,6 +45,7 @@ pub(crate) fn effect(
             f(12)?,
             f(16)?,
         )),
+        0x42 => Some(crate::tape::tape(f(0)?, f(4)?, f(8)?)),
         _ => None,
     }
 }
@@ -64,6 +63,7 @@ fn saturation(shape: f32, algorithm: i32, at: &str, notes: &mut Notes) -> Option
         curve: ir::DriveCurve::Soft(shape.clamp(-1.0, 1.0)),
         lowpass_hz: None,
         highpass_hz: None,
+        sections: ir::Sections::NONE,
     }))
 }
 
@@ -80,6 +80,7 @@ fn distortion(mode: i32, drive: f32, damping: f32) -> Option<ir::EffectKind> {
         curve,
         lowpass_hz: Some(damping_hz(damping)),
         highpass_hz: Some(DC_HZ),
+        sections: ir::Sections::NONE,
     }))
 }
 
@@ -185,6 +186,19 @@ pub(crate) fn unmoved(inserts: &[Option<ir::Effect>], mods: &[ir::Mod], notes: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skreamer_is_carried_in_any_rack() {
+        let public: Vec<u8> = [0.5f32; 5].iter().flat_map(|v| v.to_le_bytes()).collect();
+        for at in [
+            "groups/0/inserts/0",
+            "bus 0/inserts/2",
+            "instrument/inserts/1",
+        ] {
+            let kind = effect(0x21, 0, &public, at, &mut Notes::default());
+            assert!(matches!(kind, Some(ir::EffectKind::Overdrive(_))), "{at}");
+        }
+    }
 
     #[test]
     fn the_damping_corner_reproduces_kontakts_poles() {

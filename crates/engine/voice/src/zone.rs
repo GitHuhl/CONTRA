@@ -4,6 +4,11 @@ use std::sync::Arc;
 
 use contra_stream::{Mix, Sample};
 
+/// A region's loops, held inline: starting a voice copies its region, and
+/// the audio thread never allocates. Eight is the most any format writes
+/// (Kontakt's loop array); a ninth would spill to the heap.
+pub type Loops = smallvec::SmallVec<[Loop; 8]>;
+
 /// A loop over source frames `start..end`, inside the region.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Loop {
@@ -69,7 +74,7 @@ pub struct Region {
     /// end; a loop ending before the playhead or past the region is skipped.
     // ponytail: a release inside a crossfade drops the blend at once; fade the
     // blend out when a library's release clicks.
-    pub loops: Vec<Loop>,
+    pub loops: Loops,
     /// Plays `end - 1` down to `start`; loops are ignored.
     pub reverse: bool,
     /// How the sample's channels reach the voice's left and right; `None`
@@ -156,6 +161,13 @@ impl Region {
     /// start, so loops and reversal change only the mapping to source frames,
     /// never the cursor. `None` once the region has ended. `released` is the
     /// logical position of the note's release, if it came.
+    /// The sample frame the cursor plays `logical` frames into the region,
+    /// through its loops and reverse; `None` past its end.
+    #[must_use]
+    pub fn frame_at(&self, logical: u64, released: Option<u64>) -> Option<u64> {
+        self.locate(logical, released).map(|run| run.first)
+    }
+
     fn locate(&self, logical: u64, released: Option<u64>) -> Option<Run> {
         if self.reverse {
             if logical >= self.end.saturating_sub(self.start) {
@@ -298,7 +310,7 @@ mod tests {
             sample,
             start,
             end,
-            loops,
+            loops: loops.into(),
             reverse,
             mix: None,
             table: None,
@@ -355,6 +367,8 @@ mod tests {
             false,
         );
         assert_eq!(collect(&r, 15, 12), vec![(0, 15, 5), (5, 10, 7)]);
+        // The play position of a looped voice is in the sample, not elapsed.
+        assert_eq!(r.frame_at(25, None), Some(15));
         assert!(!r.finished(1e9, None));
     }
 
@@ -362,6 +376,7 @@ mod tests {
     fn reverse_runs_descend_from_the_end() {
         let r = region(10, 20, vec![], true);
         assert_eq!(collect(&r, 0, 4), vec![(0, 19, 4)]);
+        assert_eq!(r.frame_at(3, None), Some(16));
         assert_eq!(collect(&r, 8, 5), vec![(0, 11, 2)]);
         assert!(r.finished(10.0, None));
     }

@@ -44,7 +44,7 @@ fn plan_of(store: &mut Store, level: f32) -> Plan {
         sample,
         start: 0,
         end: frames,
-        loops: vec![],
+        loops: Default::default(),
         reverse: false,
     };
     let mut zone = Zone::new(region, 60, RATE);
@@ -73,6 +73,8 @@ fn part(name: &str) -> Part {
         view: None,
         slot_types: Vec::new(),
         slot_responses: Vec::new(),
+        modified: false,
+        named: Default::default(),
         sounds: Default::default(),
     }
 }
@@ -356,6 +358,13 @@ fn a_legato_waits_its_own_hold_and_a_legato_script_keeps_the_order() {
 /// A DC part whose script loads a high-pass into insert 0 in `on init`
 /// and empties the slot again from `on note`, as Shreddage loads an EQ.
 fn effect_loading(store: &mut Store) -> Box<Engine> {
+    let plan = effect_plan(store, 7, 0);
+    Box::new(Engine::new(Arc::new(plan), store.client(), RATE))
+}
+
+/// A part's plan whose script loads effect type `init` (7, a high-pass;
+/// 0 empties) into insert slot 0 in `on init` and `note` on each note.
+fn effect_plan(store: &mut Store, init: u16, note: u16) -> Plan {
     use contra_engine::ir;
     let mut plan = plan_of(store, 0.5);
     plan.inserts = vec![None];
@@ -373,8 +382,10 @@ fn effect_loading(store: &mut Store) -> Box<Engine> {
         id,
         subtype: false,
         reads: 0,
+        kind: id,
         effect,
         laws: Vec::new().into(),
+        model: None,
     };
     let effect = ir::Effect {
         kind: ir::EffectKind::Filter(high),
@@ -384,18 +395,62 @@ fn effect_loading(store: &mut Store) -> Box<Engine> {
     };
     plan.slot_shapes.types = vec![ty(0, None), ty(7, Some(effect))];
     let script = contra_ksp::compile(
-        "on init
-            declare $a
-            $a := set_engine_par($ENGINE_PAR_EFFECT_TYPE, 7, -1, 0, 1)
-        end on
-        on note
-            $a := set_engine_par($ENGINE_PAR_EFFECT_TYPE, 0, -1, 0, 1)
-        end on",
+        &format!(
+            "on init
+                declare $a
+                $a := set_engine_par($ENGINE_PAR_EFFECT_TYPE, {init}, -1, 0, 1)
+            end on
+            on note
+                $a := set_engine_par($ENGINE_PAR_EFFECT_TYPE, {note}, -1, 0, 1)
+            end on"
+        ),
         &[],
     )
     .unwrap();
     plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
-    Box::new(Engine::new(Arc::new(plan), store.client(), RATE))
+    plan
+}
+
+/// A preset recalled by restarting the part's engine keeps the effects its
+/// script loaded since the part loaded: the restart's plan has them.
+#[test]
+fn a_restarted_recall_keeps_the_effects_a_script_loaded_after_init() {
+    let (mut rack, mut audio) = rack();
+    let plan = Arc::new(effect_plan(rack.store_mut(), 0, 7));
+    let engine = Box::new(Engine::new(
+        Arc::clone(&plan),
+        rack.store_mut().client(),
+        RATE,
+    ));
+    let base = Some(std::path::PathBuf::from("dc.nki"));
+    let p = Part {
+        path: base.clone(),
+        source: base,
+        plan: Some(plan),
+        ..part("a")
+    };
+    rack.install(0, engine, p);
+    play(&mut audio, &[(0, note(0))]);
+    rack.tick();
+    let high = |rack: &Rack| {
+        let p = rack.parts()[0].as_ref().unwrap();
+        let slot = p
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.inserts.first().cloned());
+        (p.slot_types.clone(), slot.flatten().is_some())
+    };
+    // Type 7 is the plan's second slot type.
+    let loaded = vec![(contra_engine::ir::RackAt::Inserts, 0, 1)];
+    assert_eq!(high(&rack).0, loaded, "the note's load is recorded");
+    let preset = contra_host::instrument::Preset {
+        name: "b".into(),
+        base: "dc.nki".into(),
+        saved: Vec::new(),
+        effects: false,
+    };
+    assert!(rack.recall(0, &preset, None));
+    assert_eq!(high(&rack), (loaded, true), "the restart's plan has it");
 }
 
 #[test]
@@ -456,6 +511,7 @@ fn loading_response(wav: &[u8], name: &str) -> (Rack, RackAudio) {
         cuts: None,
         envelope: None,
         mix: None,
+        size: [1.0, 1.0],
     };
     plan.impulse_laws = vec![("room".into(), law)];
     let sample = ir::Sample {
@@ -687,6 +743,107 @@ fn a_sound_tab_decay_edit_is_heard_from_the_next_note() {
     );
 }
 
+/// A Lua script's state comes back on reload even when restoring it waits:
+/// `onLoad` here, as UVI's layer loads do, finishes in a task after a
+/// `wait`. The save must hold what the task set, not what was there before.
+#[test]
+fn a_lua_state_restored_after_a_wait_saves_as_restored() {
+    use contra_engine::ir;
+    let source = r#"
+        local layer = "default"
+        function onSave() return {layer = layer} end
+        function onLoad(data) run(function() wait(50) layer = data.layer end) end
+    "#;
+    let instrument = |saved: Vec<String>| ir::Instrument {
+        scripts: vec![ir::Script {
+            name: "state".into(),
+            slot: 0,
+            dialect: ir::Dialect::Lua,
+            source: source.into(),
+            saved,
+            data: Vec::new(),
+            links: Vec::new(),
+        }],
+        ..ir::Instrument::DEFAULT
+    };
+    let state = |rack: &Rack| {
+        let saved = rack.saved_scripts(0);
+        saved[0].iter().find(|s| s.starts_with("__state=")).cloned()
+    };
+    let saved = vec![r#"__state={["layer"]="chosen",}"#.to_owned()];
+    let (mut rack, mut audio) = rack();
+    rack.load_ir(0, instrument(saved.clone()), None).unwrap();
+    // A save asked for every block, over 200 ms: the wait ends inside it.
+    for _ in 0..40 {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+    }
+    rack.tick();
+    assert_eq!(state(&rack), Some(saved[0].clone()));
+}
+
+/// A million-cell persistent array is captured a budget of cells a block,
+/// never all in one; an idle script is not read again, and what a callback
+/// wrote reaches the save once the next capture is read.
+#[test]
+fn a_big_persistent_array_is_captured_over_blocks_and_saves_what_changed() {
+    use contra_engine::ir;
+    let source = "on init
+            declare %big[100000]
+            make_persistent(%big)
+            %big[99999] := 7
+        end on
+        on note
+            %big[99999] := %big[99999] + 1
+        end on";
+    let instrument = ir::Instrument {
+        scripts: vec![ir::Script {
+            name: "big".into(),
+            slot: 0,
+            dialect: ir::Dialect::Ksp,
+            source: source.into(),
+            saved: Vec::new(),
+            data: Vec::new(),
+            links: Vec::new(),
+        }],
+        ..ir::Instrument::DEFAULT
+    };
+    let (mut rack, mut audio) = rack();
+    rack.load_ir(0, instrument, None).unwrap();
+    let last = |rack: &Rack| {
+        let saved = rack.saved_scripts(0).concat();
+        let big = saved.into_iter().find(|s| s.starts_with("%big "));
+        big.and_then(|b| b.rsplit(' ').next().map(str::to_owned))
+    };
+    // Blocks until a capture is back: 100,000 cells at 128 a frame of a
+    // 256-frame block take four.
+    let captured = |rack: &mut Rack, audio: &mut RackAudio| {
+        rack.tick();
+        let before = last(rack);
+        (1..=20)
+            .find(|_| {
+                audio.process(BLOCK, &[]);
+                rack.tick();
+                last(rack) != before
+            })
+            .unwrap_or(0)
+    };
+    assert_eq!(captured(&mut rack, &mut audio), 4);
+    assert_eq!(last(&rack).as_deref(), Some("7"));
+    // Idle, the next capture reads nothing: back after one block.
+    rack.tick();
+    audio.process(BLOCK, &[]);
+    rack.tick();
+    assert_eq!(last(&rack).as_deref(), Some("7"));
+    audio.process(BLOCK, &[(0, note(0))]);
+    for _ in 0..8 {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+    }
+    rack.tick();
+    assert_eq!(last(&rack).as_deref(), Some("8"), "the note's write");
+}
+
 /// An instrument read from "a.nki" whose one script keeps `$knob` and
 /// counts, in `$marker`, init (5) and each persistence-changed (+1); its
 /// snapshot type is `kind`, its saved values `saved`.
@@ -712,6 +869,7 @@ fn snapshot_of(kind: u8, saved: &[&str]) -> contra_engine::ir::Instrument {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
+            dialect: ir::Dialect::Ksp,
             source,
             saved: saved.iter().map(|&s| s.to_owned()).collect(),
             data: Vec::new(),
@@ -723,16 +881,19 @@ fn snapshot_of(kind: u8, saved: &[&str]) -> contra_engine::ir::Instrument {
 
 /// Part 0's saved script values, as of a capture taken now.
 fn saved_now(rack: &mut Rack, audio: &mut RackAudio) -> Vec<String> {
-    rack.tick();
-    audio.process(BLOCK, &[]);
+    // A recall lends the engine and takes it back over a round of its own.
+    for _ in 0..2 {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+    }
     rack.tick();
     rack.saved_scripts(0).concat()
 }
 
 /// KSP manual, `set_snapshot_type`: type 1 recalls without `on init` (the
 /// running script keeps its state), type 0 runs `on init` again; both run
-/// `on persistence_changed` after the values land. Neither reads or
-/// prepares the instrument again.
+/// `on persistence_changed` after the values land, and both stop the part
+/// (a new generation). Neither reads or prepares the instrument again.
 #[test]
 fn a_snapshot_recalls_into_the_loaded_instrument_as_its_type_asks() {
     for (kind, marker, rebuilt) in [(1, "$marker 7", false), (0, "$marker 6", true)] {
@@ -746,6 +907,7 @@ fn a_snapshot_recalls_into_the_loaded_instrument_as_its_type_asks() {
             name: "b".into(),
             base: "a.nki".into(),
             saved: vec![vec!["$knob 42".into()]],
+            effects: false,
         };
         assert!(rack.recall(0, &preset, Some(std::path::Path::new("b.nksn"))));
         let saved = saved_now(&mut rack, &mut audio);
@@ -756,13 +918,168 @@ fn a_snapshot_recalls_into_the_loaded_instrument_as_its_type_asks() {
         );
         assert!(saved.contains(&marker.to_owned()), "type {kind}: {saved:?}");
         assert_eq!(p.path.as_deref(), Some(std::path::Path::new("b.nksn")));
-        assert_eq!(p.script.generation() != generation, rebuilt, "type {kind}");
+        assert_ne!(p.script.generation(), generation, "type {kind}");
         // The plan is kept or copied, never prepared again from the file.
         let same = Arc::ptr_eq(p.plan.as_ref().unwrap(), &plan);
         assert_eq!(same, !rebuilt, "type {kind}");
         // The next snapshot recalls as well.
         assert!(rack.recall(0, &preset, None), "type {kind}: second recall");
     }
+}
+
+/// A snapshot that saves effects is rebuilt off the rack and installed
+/// with them (here an instrument in the repo stands in for its file: its
+/// effects are what a recall reads), and any later recall supersedes one
+/// still being made: the part ends on the later pick.
+#[test]
+fn a_native_recall_installs_its_effects_and_a_later_recall_supersedes_it() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tools/kontakt-reference/scenarios/cutoff_mod.nki"
+    );
+    let fixture = std::path::Path::new(fixture);
+    let preset = |knob: &str, effects| contra_host::instrument::Preset {
+        name: "b".into(),
+        base: "a.nki".into(),
+        saved: vec![vec![format!("$knob {knob}")]],
+        effects,
+    };
+    let inserts = |rack: &Rack| {
+        let p = rack.parts()[0].as_ref().unwrap();
+        p.plan.as_ref().unwrap().inserts.iter().flatten().count()
+    };
+    // Waits up to a second of ticks for the part's generation to move.
+    let settled = |rack: &mut Rack, audio: &mut RackAudio, from: u64| {
+        for _ in 0..200 {
+            rack.tick();
+            audio.process(BLOCK, &[]);
+            if rack.parts()[0].as_ref().unwrap().script.generation() != from {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    };
+    let (mut rack, mut audio) = self::rack();
+    rack.load_ir(0, snapshot_of(1, &[]), Some("a.nki".into()))
+        .unwrap();
+    audio.process(BLOCK, &[]);
+    assert_eq!(inserts(&rack), 0);
+    let generation = rack.parts()[0].as_ref().unwrap().script.generation();
+    assert!(rack.recall(0, &preset("11", true), Some(fixture)));
+    assert!(settled(&mut rack, &mut audio, generation), "it installs");
+    assert!(inserts(&rack) > 0, "with the snapshot's effects");
+    assert!(saved_now(&mut rack, &mut audio).contains(&"$knob 11".to_owned()));
+    // A native recall, then a script-only one before it lands.
+    let (mut rack, mut audio) = self::rack();
+    rack.load_ir(0, snapshot_of(1, &[]), Some("a.nki".into()))
+        .unwrap();
+    audio.process(BLOCK, &[]);
+    let generation = rack.parts()[0].as_ref().unwrap().script.generation();
+    assert!(rack.recall(0, &preset("11", true), Some(fixture)));
+    assert!(rack.recall(
+        0,
+        &preset("42", false),
+        Some(std::path::Path::new("c.nksn"))
+    ));
+    // The script-only recall lands; the first never does.
+    assert!(settled(&mut rack, &mut audio, generation));
+    for _ in 0..50 {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(inserts(&rack), 0, "the first never lands");
+    let p = rack.parts()[0].as_ref().unwrap();
+    assert_eq!(p.path.as_deref(), Some(std::path::Path::new("c.nksn")));
+    assert!(saved_now(&mut rack, &mut audio).contains(&"$knob 42".to_owned()));
+}
+
+/// What a snapshot's effects report reaches the part they are installed
+/// in: here a snapshot whose file cannot be read lands its values and says
+/// why its effects are the base's.
+#[test]
+fn a_native_recall_reports_what_its_effects_could_not_carry() {
+    let (mut rack, mut audio) = self::rack();
+    rack.load_ir(0, snapshot_of(1, &[]), Some("a.nki".into()))
+        .unwrap();
+    audio.process(BLOCK, &[]);
+    let generation = rack.parts()[0].as_ref().unwrap().script.generation();
+    let preset = contra_host::instrument::Preset {
+        name: "b".into(),
+        base: "a.nki".into(),
+        saved: vec![vec!["$knob 9".into()]],
+        effects: true,
+    };
+    assert!(rack.recall(0, &preset, Some(std::path::Path::new("/nowhere/b.nksn"))));
+    for _ in 0..200 {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+        if rack.parts()[0].as_ref().unwrap().script.generation() != generation {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let p = rack.parts()[0].as_ref().unwrap();
+    assert_ne!(p.script.generation(), generation, "it installs");
+    let unread = p
+        .diagnostics
+        .iter()
+        .any(|d| d.feature == "snapshot effects unread");
+    assert!(unread, "{:?}", p.diagnostics);
+}
+
+/// A preset the player changed is saved as changed; picking a preset
+/// again (a recall) makes it the preset as saved.
+#[test]
+fn a_changed_preset_saves_as_changed_until_a_preset_is_picked() {
+    let (mut rack, mut audio) = rack();
+    rack.load_ir(0, snapshot_of(1, &[]), Some("a.nki".into()))
+        .unwrap();
+    audio.process(BLOCK, &[]);
+    assert!(!rack.save().parts[0].modified, "a fresh load is the preset");
+    rack.set_modified(0);
+    assert!(rack.save().parts[0].modified);
+    let preset = contra_host::instrument::Preset {
+        name: "b".into(),
+        base: "a.nki".into(),
+        saved: vec![vec!["$knob 42".into()]],
+        effects: false,
+    };
+    assert!(rack.recall(0, &preset, Some(std::path::Path::new("b.nksn"))));
+    assert!(
+        !rack.save().parts[0].modified,
+        "a picked preset is unchanged"
+    );
+}
+
+/// A user preset renamed or deleted moves every part that plays it, by
+/// one path: renamed, they keep their changed mark; deleted, they play on
+/// as their base instrument, changed.
+#[test]
+fn a_renamed_or_deleted_user_preset_moves_every_part_playing_it() {
+    use std::path::Path;
+    let (mut rack, _audio) = rack();
+    for part in [0, 1] {
+        let instrument = snapshot_of(1, &[]);
+        (rack.load_ir(part, instrument, Some("u/Mine.contra".into()))).unwrap();
+    }
+    rack.set_modified(1);
+    let playing = |rack: &Rack| {
+        (rack.parts().iter().flatten())
+            .map(|p| (p.path.clone().unwrap(), p.name.clone(), p.modified))
+            .collect::<Vec<_>>()
+    };
+    rack.preset_moved(
+        Path::new("u/Mine.contra"),
+        Some(Path::new("u/Yours.contra")),
+    );
+    let yours = |modified| ("u/Yours.contra".into(), "Yours".to_owned(), modified);
+    assert_eq!(playing(&rack), [yours(false), yours(true)]);
+    rack.preset_moved(Path::new("u/Yours.contra"), None);
+    // They keep the sound, named by their instrument, changed.
+    let base = ("a.nki".into(), "a".to_owned(), true);
+    assert_eq!(playing(&rack), [base.clone(), base]);
 }
 
 /// A folder of this test process alone, removed when dropped (also when
@@ -852,6 +1169,7 @@ fn an_array_saved_by_path_loads_back_and_a_file_of_another_array_does_not() {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
+            dialect: ir::Dialect::Ksp,
             source,
             saved: Vec::new(),
             data: Vec::new(),
@@ -876,6 +1194,123 @@ fn an_array_saved_by_path_loads_back_and_a_file_of_another_array_does_not() {
     );
     // Saved 1; loaded back 123; wrong name 0; unwritable 0; huge 0; dir 0.
     assert!(saved.contains(&"$result 11230000".to_owned()), "{saved:?}");
+}
+
+/// Some blocks and ticks, for a script's waits and the control side.
+fn run(rack: &mut Rack, audio: &mut RackAudio, blocks: usize) {
+    for _ in 0..blocks {
+        rack.tick();
+        audio.process(BLOCK, &[]);
+    }
+}
+
+/// An instrument at `source` with one script.
+fn scripted(
+    source: &std::path::Path,
+    dialect: contra_engine::ir::Dialect,
+    code: &str,
+) -> contra_engine::ir::Instrument {
+    use contra_engine::ir;
+    ir::Instrument {
+        source_path: Some(source.to_owned()),
+        scripts: vec![ir::Script {
+            name: "s".into(),
+            slot: 0,
+            dialect,
+            source: code.to_owned(),
+            saved: Vec::new(),
+            data: Vec::new(),
+            links: Vec::new(),
+        }],
+        ..ir::Instrument::DEFAULT
+    }
+}
+
+/// `save_array(%a, 0)` and `load_array(%a, 0)` ask for a file: the editor
+/// asks the player ([`Rack::pick`]) among the instrument's own saves, and
+/// the answer goes on as a save or load by path under them.
+#[test]
+fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
+    use contra_engine::ir;
+    let scratch = Scratch::new("array-dialog");
+    let saves = scratch.0.join("saves");
+    let source = scratch.0.join("lib/x.nki");
+    let code = "on init
+            declare %perf[2] := (4, 5)
+            declare $step
+            declare $id
+            declare $result
+            make_persistent($result)
+        end on
+        on note
+            $id := save_array(%perf, 0)
+        end on
+        on async_complete
+            if ($step = 0)
+                %perf[0] := 0
+                $id := load_array(%perf, 0)
+            else
+                $result := $NI_ASYNC_EXIT_STATUS * 100 + %perf[0] * 10 + %perf[1]
+            end if
+            inc($step)
+        end on";
+    let (mut rack, mut audio) = rack();
+    rack.set_saves(saves.clone());
+    rack.load_ir(0, scripted(&source, ir::Dialect::Ksp, code), None)
+        .unwrap();
+    audio.process(BLOCK, &[(0, note(0))]);
+    run(&mut rack, &mut audio, 4);
+    let pick = rack.pick().expect("the save asks for a file");
+    assert!(pick.save && pick.names.is_empty(), "{pick:?}");
+    rack.picked(Some("Mine"));
+    run(&mut rack, &mut audio, 4);
+    let pick = rack.pick().expect("the load asks for a file");
+    assert_eq!((pick.save, pick.names), (false, vec!["Mine".to_owned()]));
+    rack.picked(Some("Mine"));
+    let saved = saved_now(&mut rack, &mut audio);
+    let own = saves.join(source.strip_prefix("/").unwrap_or(&source));
+    let written = std::fs::read_to_string(own.join("Mine.nka"));
+    assert_eq!(written.unwrap(), "%perf\n4\n5\n");
+    assert!(saved.contains(&"$result 145".to_owned()), "{saved:?}");
+}
+
+/// A UVI script's own presets: `browseForFile` asks the editor, `saveState`
+/// is written under the instrument's saves, and a later load of the
+/// instrument reads it back as the bank's own file.
+#[test]
+fn a_script_preset_saved_to_disk_loads_after_a_reload() {
+    use contra_engine::ir;
+    let scratch = Scratch::new("script-presets");
+    let saves = scratch.0.join("saves");
+    let source = scratch.0.join("lib/x.uvip");
+    let code = r#"
+        local air = Knob('air', 0, 0, 100)
+        function onNote(e)
+            browseForFile('save', 'Save', '', '*.VHFPreset', function(t)
+                air.value = 40
+                saveState(t.result)
+            end)
+        end"#;
+    let (mut rack, mut audio) = rack();
+    rack.set_saves(saves.clone());
+    rack.load_ir(0, scripted(&source, ir::Dialect::Lua, code), None)
+        .unwrap();
+    audio.process(BLOCK, &[(0, note(0))]);
+    run(&mut rack, &mut audio, 4);
+    let pick = rack.pick().expect("browseForFile asks for a file");
+    assert!(pick.save, "{pick:?}");
+    rack.picked(Some("Mine"));
+    run(&mut rack, &mut audio, 40);
+    let own = saves.join(source.strip_prefix("/").unwrap_or(&source));
+    let written = std::fs::read_to_string(own.join("Mine.VHFPreset")).expect("written");
+    assert!(written.contains(r#"["air"]=40"#), "{written}");
+    // Loaded again, the script opens the preset it saved.
+    let reload =
+        "local air = Knob('air', 0, 0, 100)\nfunction onInit() loadState('Mine.VHFPreset') end";
+    rack.load_ir(0, scripted(&source, ir::Dialect::Lua, reload), None)
+        .unwrap();
+    let saved = saved_now(&mut rack, &mut audio);
+    assert!(saved.iter().any(|e| e == "air=40"), "{saved:?}");
 }
 
 /// An install fades out the engine it replaces instead of cutting its
@@ -925,6 +1360,7 @@ fn a_rack_without_a_save_folder_writes_nothing() {
         scripts: vec![ir::Script {
             name: "s".into(),
             slot: 0,
+            dialect: ir::Dialect::Ksp,
             source,
             saved: Vec::new(),
             data: Vec::new(),
@@ -942,4 +1378,490 @@ fn a_rack_without_a_save_folder_writes_nothing() {
     let saved = saved_now(&mut rack, &mut audio);
     assert!(saved.contains(&"$status 0".to_owned()), "{saved:?}");
     assert!(!at.exists(), "nothing written next to the path");
+}
+/// KSP manual (`load_array`): an array loaded in `on init` is implicitly
+/// persistent, so it saves; a text array saves each value on a line ended
+/// by a newline, as Kontakt writes it.
+#[test]
+fn an_array_loaded_in_init_saves_one_ended_line_per_value() {
+    use contra_engine::ir;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::write(dir.join("init_names.nka"), "!names\nfirst\nsecond\n").unwrap();
+    let source = format!(
+        "on init
+            declare !names[2]
+            declare $n
+            $n := load_array_str(!names, \"{}/init_names.nka\")
+        end on",
+        dir.display()
+    );
+    let instrument = ir::Instrument {
+        scripts: vec![ir::Script {
+            name: "s".into(),
+            slot: 0,
+            dialect: ir::Dialect::Ksp,
+            source,
+            saved: Vec::new(),
+            data: Vec::new(),
+            links: Vec::new(),
+        }],
+        ..ir::Instrument::DEFAULT
+    };
+    let (mut rack, mut audio) = rack();
+    rack.load_ir(0, instrument, None).unwrap();
+    audio.process(BLOCK, &[]);
+    let saved = saved_now(&mut rack, &mut audio);
+    assert!(
+        saved.contains(&"!names first\nsecond\n".to_owned()),
+        "{saved:?}"
+    );
+}
+
+/// A callback's `set_zone_par` calls reach the control side as one batch,
+/// are applied together to the part's plan off the audio thread, and swap
+/// in: the held note's zone left its group and fades, the next note-on plays
+/// the zone through its new group (gain 2) at its new key.
+#[test]
+fn a_callbacks_zone_edits_apply_together_off_audio_and_swap_in() {
+    let (mut rack, mut audio) = rack();
+    let store = rack.store_mut();
+    let mut zones = plan_of(store, 0.5).zones;
+    let mut other = zones[0].clone();
+    (other.id, other.group, other.keys) = (1, 1, 100..=100);
+    zones[0].keys = 60..=60;
+    zones.push(other);
+    let mut plan = Plan::new(zones, 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    plan.groups[1].level.gain = 2.0;
+    let script = contra_ksp::compile(
+        "on note
+            if ($EVENT_NOTE = 60)
+                set_zone_par(0, $ZONE_PAR_GROUP, 1)
+                set_zone_par(0, $ZONE_PAR_LOW_KEY, 72)
+                set_zone_par(0, $ZONE_PAR_HIGH_KEY, 72)
+            end if
+        end on",
+        &[],
+    )
+    .unwrap();
+    plan.scripts = vec![contra_host::script::plan(&script, &[], &[])];
+    let plan = Arc::new(plan);
+    let engine = Box::new(Engine::new(Arc::clone(&plan), store.client(), RATE));
+    rack.install(
+        0,
+        engine,
+        Part {
+            plan: Some(plan),
+            ..part("z")
+        },
+    );
+    let [held, _] = play(&mut audio, &[(0, note(0))]);
+    assert!((held - 0.5).abs() < 1e-3, "{held}");
+    rack.tick();
+    let p = rack.parts()[0].as_ref().unwrap();
+    let zone = &p.plan.as_ref().unwrap().zones[0];
+    assert_eq!((zone.group, zone.keys.clone()), (1, 72..=72));
+    let [gone, _] = play(&mut audio, &[]);
+    assert!(gone.abs() < 1e-4, "{gone}");
+    let at = |key| match note(0) {
+        Event::NoteOn {
+            note,
+            velocity,
+            tune,
+        } => Event::NoteOn {
+            note: HostNote { key, ..note },
+            velocity,
+            tune,
+        },
+        e => e,
+    };
+    let [moved, _] = play(&mut audio, &[(0, at(72))]);
+    assert!((moved - 1.0).abs() < 1e-3, "{moved}");
+}
+
+#[test]
+fn a_note_played_before_its_heads_load_sounds_from_the_stream_and_survives_their_arrival() {
+    let (mut rack, mut audio) = rack();
+    rack.store_mut().defer_heads(true);
+    let a = engine(rack.store_mut(), 0.5);
+    let heads = rack
+        .store_mut()
+        .take_heads()
+        .expect("the heads are deferred");
+    rack.install(0, a, part("a"));
+    // The note starts with no head in: it is silent until its pages stream in,
+    // never dropped.
+    audio.process(BLOCK, &[(0, note(0))]);
+    let mut sounded = false;
+    for _ in 0..400 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        audio.process(BLOCK, &[]);
+        if level(&audio, 0) > 0.1 {
+            sounded = true;
+            break;
+        }
+    }
+    assert!(sounded, "the note never sounded before its heads arrived");
+    heads.load(2);
+    // The same voice goes on at the same level once the heads are in.
+    let [on, _] = play(&mut audio, &[]);
+    assert!(
+        (on - 0.5).abs() < 0.05,
+        "the note changed when its heads arrived: {on}"
+    );
+}
+
+/// A part whose one zone plays a ramp sample (frame `n` is `0.1 + n / 100_000`).
+fn ramp_engine(store: &mut Store) -> Box<Engine> {
+    let fmt = SampleFmt {
+        encoding: Encoding::F32,
+        channels: 1,
+    };
+    let frames = 96_000u64;
+    let bytes = (0..frames)
+        .flat_map(|n| (0.1 + n as f32 / 100_000.0).to_le_bytes())
+        .collect();
+    let key = BlobKey {
+        file: "ramp".into(),
+        offset: 0,
+        fmt,
+    };
+    let sample = (store.load(
+        &key,
+        Arc::new(MemSource::new(fmt, bytes)),
+        frames,
+        std::slice::from_ref(&(0..frames)),
+    ))
+    .unwrap();
+    let region = Region {
+        mix: None,
+        table: None,
+        sample,
+        start: 0,
+        end: frames,
+        loops: Default::default(),
+        reverse: false,
+    };
+    let mut zone = Zone::new(region, 60, RATE);
+    zone.keys = 0..=127;
+    let mut plan = Plan::new(vec![zone], 16);
+    for g in &mut plan.groups {
+        g.mods.clear();
+    }
+    Box::new(Engine::new(Arc::new(plan), store.client(), RATE))
+}
+
+/// The left output of a ramp part played from a note-on, block by block.
+fn ramp_output(defer: bool) -> Vec<f32> {
+    let (mut rack, mut audio) = rack();
+    rack.store_mut().defer_heads(defer);
+    let a = ramp_engine(rack.store_mut());
+    // Left unread: the page the note needs has to come from the stream.
+    let _heads = rack.store_mut().take_heads();
+    rack.install(0, a, part("a"));
+    audio.process(BLOCK, &[(0, note(0))]);
+    let mut out: Vec<f32> = audio.output(0, BLOCK).iter().map(|s| s[0]).collect();
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        audio.process(BLOCK, &[]);
+        out.extend(audio.output(0, BLOCK).iter().map(|s| s[0]));
+    }
+    out
+}
+
+#[test]
+fn a_note_before_its_heads_load_starts_from_the_samples_first_frame() {
+    let loaded = ramp_output(false);
+    let waited = ramp_output(true);
+    let first = |v: &[f32]| v.iter().position(|x| x.abs() > 1e-4).unwrap();
+    let (a, b) = (first(&loaded), first(&waited));
+    assert!(
+        waited[b] < 0.12,
+        "the note joined mid-sample at {}",
+        waited[b]
+    );
+    for (x, y) in loaded[a..a + 300].iter().zip(&waited[b..b + 300]) {
+        assert!((x - y).abs() < 1e-3, "the attack differs: {x} vs {y}");
+    }
+}
+
+#[test]
+fn replacing_a_part_frees_the_old_instruments_samples() {
+    let (mut rack, mut audio) = rack();
+    let fmt = SampleFmt {
+        encoding: Encoding::F32,
+        channels: 1,
+    };
+    let key = BlobKey {
+        file: "old".into(),
+        offset: 0,
+        fmt,
+    };
+    let sample = rack
+        .store_mut()
+        .load(
+            &key,
+            Arc::new(MemSource::new(fmt, vec![0; 4 * 1000])),
+            1000,
+            std::slice::from_ref(&(0..1000)),
+        )
+        .unwrap();
+    let weak = Arc::downgrade(&sample);
+    let region = Region {
+        mix: None,
+        table: None,
+        sample,
+        start: 0,
+        end: 1000,
+        loops: Default::default(),
+        reverse: false,
+    };
+    let mut zone = Zone::new(region, 60, RATE);
+    zone.keys = 0..=127;
+    let plan = Arc::new(Plan::new(vec![zone], 4));
+    let old = Box::new(Engine::new(
+        Arc::clone(&plan),
+        rack.store_mut().client(),
+        RATE,
+    ));
+    let mut info = part("old");
+    info.plan = Some(plan);
+    rack.install(0, old, info);
+    audio.process(BLOCK, &[(0, note(0))]);
+    assert!(weak.upgrade().is_some());
+    // The next instrument takes the part; the old one retires and is dropped.
+    let next = engine(rack.store_mut(), 0.5);
+    rack.install(0, next, part("new"));
+    // It fades out first, then retires to the control side, which drops it.
+    for _ in 0..400 {
+        audio.process(BLOCK, &[]);
+        rack.tick();
+    }
+    assert!(
+        weak.upgrade().is_none(),
+        "the replaced instrument's sample is still held"
+    );
+}
+
+#[test]
+fn a_damaged_empty_or_foreign_state_loads_an_empty_rack_and_says_why() {
+    use contra_host::state::{Saved, VERSION};
+    let good = Saved::new(vec![]).write();
+    // A blank state is a new instance: empty, no complaint.
+    assert_eq!(Saved::parse(""), Ok(Saved::new(vec![])));
+    assert_eq!(Saved::parse("  \n"), Ok(Saved::new(vec![])));
+    // Truncated, garbage and mistyped JSON, and other versions: a message.
+    for bad in [
+        &good[..good.len() / 2],
+        "\u{0}\u{1}not json",
+        "[1,2,3]",
+        "{\"version\":1}",
+        &format!("{{\"version\":{},\"parts\":[]}}", VERSION + 1),
+        "{\"version\":0,\"parts\":[]}",
+    ] {
+        let Err(message) = Saved::parse(bad) else {
+            panic!("{bad:?} should not parse");
+        };
+        assert!(message.contains("rack starts empty"), "{message}");
+        // `read` never fails: it is the empty rack.
+        assert_eq!(Saved::read(bad), Saved::new(vec![]));
+    }
+}
+
+#[test]
+fn a_state_with_hostile_values_is_made_safe() {
+    use contra_host::state::Saved;
+    let part = |n: usize, gain: &str, channel: u32| {
+        format!(
+            "{{\"part\":{n},\"path\":\"/x.nki\",\"channel\":{channel},\"output\":255,\"gain\":{gain},\"pan\":9.0,\"solo\":false,\"mute\":false}}"
+        )
+    };
+    // Past the rack, repeated, an enormous gain and an unknown channel.
+    let json = format!(
+        "{{\"version\":1,\"parts\":[{},{},{},{}]}}",
+        part(0, "1e30", 99),
+        part(0, "0.5", 1),
+        part(4096, "1.0", 1),
+        part(3, "-2.0", 2)
+    );
+    let saved = Saved::parse(&json).unwrap();
+    let parts: Vec<_> = saved
+        .parts
+        .iter()
+        .map(|p| (p.part, p.gain, p.channel, p.output))
+        .collect();
+    assert_eq!(parts, vec![(0, 16.0, 0, 15), (3, 0.0, 2, 15)]);
+    assert!(saved.parts.iter().all(|p| p.pan == 1.0));
+}
+
+/// A mono 16-bit WAV of a loud, one-sided tone, for an instrument to play.
+fn tone_wav() -> Vec<u8> {
+    let data: Vec<u8> = (0..4800)
+        .flat_map(|i| (10_000 + (i % 48) as i16 * 100).to_le_bytes())
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend(b"RIFF");
+    wav.extend((36 + data.len() as u32).to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    wav.extend(16u32.to_le_bytes());
+    wav.extend([1, 0, 1, 0]);
+    wav.extend(48_000u32.to_le_bytes());
+    wav.extend(96_000u32.to_le_bytes());
+    wav.extend([2, 0, 16, 0]);
+    wav.extend(b"data");
+    wav.extend((data.len() as u32).to_le_bytes());
+    wav.extend(data);
+    wav
+}
+
+/// The loudest block mean while a note plays.
+fn loudest(audio: &mut RackAudio) -> f32 {
+    audio.process(BLOCK, &[(0, note(0))]);
+    let mut top = level(audio, 0).abs();
+    for _ in 0..8 {
+        audio.process(BLOCK, &[]);
+        top = top.max(level(audio, 0).abs());
+    }
+    top
+}
+
+#[test]
+fn a_moved_library_is_said_once_offered_found_and_plays_once_taken() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("moved-library");
+    let _ = std::fs::remove_dir_all(&dir);
+    let found = dir.join("found/deep/Lib");
+    std::fs::create_dir_all(&found).unwrap();
+    std::fs::create_dir_all(dir.join("inst")).unwrap();
+    std::fs::write(found.join("a.wav"), tone_wav()).unwrap();
+    let sfz = dir.join("inst/x.sfz");
+    std::fs::write(&sfz, "<region> sample=Lib/a.wav key=60\n").unwrap();
+
+    let (mut rack, mut audio) = rack();
+    let mut browser = contra_host::browser::Browser::open(Some(&dir.join("config")), None);
+    browser.add_root(dir.join("found"));
+    rack.know(&browser);
+    rack.load(0, &sfz).unwrap();
+    // Missing: said once in plain text, and the part plays on without it.
+    let said = rack.take_notices();
+    assert!(said[0].contains("1 sample not found in "), "{said:?}");
+    let offer = said[1].clone();
+    assert!(
+        offer.contains("found at ") && offer.ends_with(", use it?"),
+        "{offer}"
+    );
+    assert!(rack.take_notices().is_empty());
+    assert!(loudest(&mut audio) < 1e-6);
+    // Taken: remembered in the settings, and the samples play.
+    let o = rack.take_offer(&offer).unwrap();
+    browser.relink(o.from, o.to);
+    rack.know(&browser);
+    rack.load(o.part, &o.path).unwrap();
+    assert!(rack.take_notices().is_empty());
+    assert_eq!(browser.prefs.moved.len(), 1);
+    let d = &rack.parts()[0].as_ref().unwrap().diagnostics;
+    assert!(d.is_empty(), "{d:?}");
+    assert!(loudest(&mut audio) > 1e-4, "{}", level(&audio, 1));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_relinked_library_folder_is_remembered_by_the_next_session() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("relink-prefs");
+    let _fresh = std::fs::remove_dir_all(&dir);
+    let (config, cache) = (dir.join("config"), dir.join("cache"));
+    let (from, to) = (
+        std::path::PathBuf::from("/old/Lib"),
+        std::path::PathBuf::from("/new/Lib"),
+    );
+    {
+        let mut browser = contra_host::browser::Browser::open(Some(&config), Some(&cache));
+        browser.relink(from.clone(), to.clone());
+    }
+    let browser = contra_host::browser::Browser::open(Some(&config), Some(&cache));
+    assert_eq!(browser.prefs.moved, [(from, to)]);
+    let _clean = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_purged_group_loads_when_a_script_unpurges_it_and_plays_after() {
+    use contra_engine::ir;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("unpurge");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.wav"), tone_wav()).unwrap();
+    std::fs::write(dir.join("b.wav"), tone_wav()).unwrap();
+    let sfz = dir.join("x.sfz");
+    std::fs::write(
+        &sfz,
+        "<region> sample=a.wav key=60\n<region> sample=b.wav key=62\n",
+    )
+    .unwrap();
+    let mut instrument = contra_host::instrument::read(&sfz).unwrap();
+    // The second group is saved purged, and a button un-purges it.
+    let zone = instrument.groups[0].zones.pop().unwrap();
+    let mut second = instrument.groups[0].clone();
+    second.zones = vec![zone];
+    second.purged = true;
+    instrument.groups.push(second);
+    instrument.scripts = vec![ir::Script {
+        name: "s".into(),
+        slot: 0,
+        dialect: ir::Dialect::Ksp,
+        source: "on init
+            declare ui_button $go
+        end on
+        on ui_control ($go)
+            purge_group(1, 1)
+        end on"
+            .into(),
+        saved: Vec::new(),
+        data: Vec::new(),
+        links: Vec::new(),
+    }];
+    let (mut rack, mut audio) = rack();
+    rack.load_ir(0, instrument, Some(sfz)).unwrap();
+    let loudest = |audio: &mut RackAudio, key: u8| {
+        // The sample's 0.1 s tail of the last note, gone.
+        for _ in 0..400 {
+            audio.process(BLOCK, &[]);
+        }
+        let on = Event::NoteOn {
+            note: HostNote {
+                port: 0,
+                channel: 0,
+                key,
+                id: -1,
+                clap: true,
+            },
+            velocity: 1.0,
+            tune: 0.0,
+        };
+        audio.process(BLOCK, &[(0, on)]);
+        let mut top = level(audio, 0).abs();
+        for _ in 0..8 {
+            audio.process(BLOCK, &[]);
+            top = top.max(level(audio, 0).abs());
+        }
+        top
+    };
+    assert!(loudest(&mut audio, 60) > 1e-4, "the resident group plays");
+    assert!(loudest(&mut audio, 62) < 1e-6, "a purged group is silent");
+    rack.control(0, 0, None, 1.0, Default::default());
+    // The group loads off the audio thread; the control side builds, the
+    // audio side swaps in, a thread reads heads.
+    let mut said = Vec::new();
+    for _ in 0..200 {
+        rack.tick();
+        said.extend(rack.take_notices());
+        audio.process(BLOCK, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        said.iter().any(|s| s.contains("loading purged group")),
+        "{said:?}"
+    );
+    assert!(loudest(&mut audio, 62) > 1e-4, "the unpurged group plays");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

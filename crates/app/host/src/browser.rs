@@ -10,6 +10,12 @@ use std::sync::mpsc;
 
 use contra_library::{Cache, Catalog, Prefs, Progress, Root};
 
+/// Whether `path` is a Kontakt instrument file.
+fn nki(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("nki"))
+}
+
 /// Where v3 keeps its own settings, beside v2's `contra`.
 const FOLDER: &str = "contra-v3";
 
@@ -21,6 +27,9 @@ pub struct Browser {
     scan: Option<(Arc<Progress>, mpsc::Receiver<Catalog>)>,
     prefs_path: Option<PathBuf>,
     cache_path: Option<PathBuf>,
+    /// The player's presets folder ([`crate::presets`]), listed after each
+    /// library's own presets.
+    pub user: Option<PathBuf>,
 }
 
 impl Browser {
@@ -43,6 +52,7 @@ impl Browser {
             scan: None,
             prefs_path,
             cache_path: cache.map(|c| c.join(FOLDER).join("library-index.json")),
+            user: None,
         };
         browser.rescan();
         browser
@@ -61,7 +71,10 @@ impl Browser {
             .name("contra-scan".into())
             .spawn(move || {
                 let mut cache = cache_path.as_deref().map(Cache::load).unwrap_or_default();
-                if let Some(catalog) = contra_library::scan(&roots, &scanning, &mut cache) {
+                let programs = |b: &Path| contra_format_uvi::programs(b).map_err(|e| e.to_string());
+                if let Some(catalog) =
+                    contra_library::scan(&roots, &scanning, &mut cache, &programs)
+                {
                     if let Some(path) = &cache_path {
                         let _saved = path.parent().map(std::fs::create_dir_all);
                         let _saved = cache.save(path);
@@ -82,12 +95,75 @@ impl Browser {
             return false;
         };
         self.scan = None;
+        let mut catalog = catalog;
+        self.with_user(&mut catalog);
         if catalog == self.catalog {
             return false;
         }
         self.catalog = catalog;
         self.generation += 1;
         true
+    }
+
+    /// Lists the player's presets from `folder` from now on.
+    pub fn set_user(&mut self, folder: PathBuf) {
+        self.user = Some(folder);
+        self.user_changed();
+    }
+
+    /// Lists the player's presets again, after one was saved, renamed or
+    /// deleted.
+    pub fn user_changed(&mut self) {
+        let mut catalog = std::mem::take(&mut self.catalog);
+        self.with_user(&mut catalog);
+        self.catalog = catalog;
+        self.generation += 1;
+    }
+
+    /// Each library's user presets after its own, then Kontakt's user
+    /// snapshots of its instruments.
+    fn with_user(&self, catalog: &mut Catalog) {
+        let kontakt = self.kontakt();
+        for l in &mut catalog.libraries {
+            let ours = |p: &PathBuf| {
+                [&self.user, &kontakt]
+                    .iter()
+                    .any(|f| f.as_ref().is_some_and(|f| p.starts_with(f)))
+            };
+            l.presets.retain(|p| !ours(p));
+            if let Some(user) = &self.user {
+                l.presets.extend(crate::presets::list(user, &l.name));
+            }
+            if let Some(kontakt) = &kontakt {
+                let instruments = (l.presets.iter()).filter(|p| nki(p)).map(PathBuf::as_path);
+                let snapshots = contra_library::presets::snapshots(kontakt, instruments);
+                l.presets.extend(snapshots);
+            }
+        }
+    }
+
+    /// Kontakt's user snapshot folder: the player's choice, else Kontakt's
+    /// own once the player's presets are listed (never in tests).
+    #[must_use]
+    pub fn kontakt(&self) -> Option<PathBuf> {
+        let own = || {
+            self.user
+                .as_ref()
+                .and_then(|_| contra_library::presets::kontakt_folder())
+        };
+        self.prefs.kontakt_snapshots.clone().or_else(own)
+    }
+
+    /// Every instrument of the catalog, by file ([`crate::rack::Rack::know`]).
+    #[must_use]
+    pub fn instruments(&self) -> Vec<PathBuf> {
+        (self
+            .catalog
+            .libraries
+            .iter()
+            .flat_map(|l| l.presets.iter().filter(|p| nki(p))))
+        .cloned()
+        .collect()
     }
 
     /// Whether a scan is running.
@@ -120,6 +196,13 @@ impl Browser {
         }
     }
 
+    /// Remembers that the library folder `from` is now at `to`.
+    pub fn relink(&mut self, from: PathBuf, to: PathBuf) {
+        self.prefs.moved.retain(|(f, _)| *f != from);
+        self.prefs.moved.push((from, to));
+        self.changed();
+    }
+
     /// Adds a folder the player dropped, and scans again.
     pub fn add_root(&mut self, path: PathBuf) {
         self.prefs.add_root(Root {
@@ -143,6 +226,14 @@ impl Browser {
             self.changed();
             self.rescan();
         }
+    }
+
+    /// Reads Kontakt's user snapshots from `folder` from now on (saved
+    /// with the prefs), and lists them again.
+    pub fn set_kontakt(&mut self, folder: PathBuf) {
+        self.prefs.kontakt_snapshots = Some(folder);
+        self.changed();
+        self.user_changed();
     }
 
     /// Recent instruments as (library, preset) in the catalog.
@@ -207,15 +298,22 @@ mod tests {
         .unwrap();
         let mut b = Browser::open(Some(&dir), None);
         assert_eq!(b.prefs.roots.len(), 1);
-        b.add_root("/nowhere/More".into());
+        b.add_root("/nowhere/UVI".into());
         let again = Browser::open(Some(&dir), None);
         assert_eq!(again.prefs.roots.len(), 2, "v3 keeps its own prefs");
         let v2_after = std::fs::read_to_string(v2.join("settings.json")).unwrap();
-        assert!(!v2_after.contains("More"), "v2's settings are never written");
+        assert!(!v2_after.contains("UVI"), "v2's settings are never written");
         b.remove_root(0);
         let roots = Browser::open(Some(&dir), None).prefs.roots;
         assert_eq!(roots.len(), 1, "a removed folder stays removed");
-        assert_eq!(roots[0].path, Path::new("/nowhere/More"));
+        assert_eq!(roots[0].path, Path::new("/nowhere/UVI"));
+        // Kontakt's snapshot folder, once chosen, is the one read from then on.
+        b.set_kontakt("/nowhere/User Content".into());
+        let again = Browser::open(Some(&dir), None);
+        assert_eq!(
+            again.kontakt().as_deref(),
+            Some(Path::new("/nowhere/User Content"))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

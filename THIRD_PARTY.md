@@ -68,14 +68,14 @@ addressed; attribution alone is insufficient. This is a provenance
 question, not a conclusion that matching format facts require GPL.
 [GPL-3.0 text, sections 5 and 6](https://github.com/maxton/nkxtract/blob/ca40dbf/COPYING).
 
-## Vendored and patched
+## Frameworks and vendored components
 
 | Component | Where | License | Notes |
 |---|---|---|---|
-| MOOSE (fork of truce) | git dependency `Matari-Audio/moose` rev `bffa467`; `vendor/moose-*` | Truce License 1.0 (`LicenseRef-TruceLicense-1.0`): MIT or Apache-2.0 plus a framework rider | See below. Patches: `vendor/MOOSE-PATCHES.md`. |
-| mui-baseview | `vendor/mui-baseview` | MIT | Copyright Matari Audio. |
+| MOOSE (fork of truce) | git dependency `Matari-Audio/moose` rev `7254110` | Truce License 1.0 (`LicenseRef-TruceLicense-1.0`): MIT or Apache-2.0 plus a framework rider | See below. |
+| mui-baseview | MUI git dependency | MIT | Copyright Matari Audio. |
 | MUI | git dependency `Matari-Audio/MUI` | MIT | |
-| vello 0.10.0 | `vendor/vello` | Apache-2.0 OR MIT | linebender/vello; patches in `vendor/vello/PATCHES.md`. |
+| vello 0.11.0 | MUI git dependency | Apache-2.0 OR MIT | linebender/vello. |
 | ncw 0.4.0 | `vendor/ncw` | MIT OR Apache-2.0 | monomadic/ncw `75af0c0`. Test data in `vendor/ncw/tests/data` is part of that crate. |
 | Noto Sans | `assets/NotoSans.ttf` | SIL Open Font License 1.1 | Full text in `assets/OFL.txt`. |
 
@@ -86,7 +86,7 @@ offering truce (or a derivative) **as a commercial plug-in framework or
 framework service to other developers** needs written permission
 (section 2.1). Section 2.2 names audio plug-ins and plug-in suites as
 not covered, so CONTRA, an audio plug-in, has the plain MIT/Apache-2.0
-grant. The rider would matter only if the vendored `moose-*` crates were
+grant. The rider would matter only if the `moose-*` crates were
 split out and sold as a framework. The name "truce" may not be used for
 CONTRA (section 3), and it is not.
 
@@ -162,7 +162,7 @@ and license texts with redistributed material. Linux and Windows nightlies
 consolidate the complete root notices, legal review, dependency notices, MOOSE
 rider and NOTICE, MUI text, and font licenses in `LICENSES.txt`.
 The original paths identify sections of this file rather than separate files.
-The release asset `CONTRA-nightly-covered-source.zip` supplies the MPL dependency
+The release asset `CONTRA-covered-source.zip` supplies the MPL dependency
 source archives; `release-manifest.json` records their checksums. macOS retains
 its license bundle and covered source inside the universal installer. The patched
 `symphonia-format-riff` and `symphonia-bundle-flac` archives contain their

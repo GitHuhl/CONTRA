@@ -13,13 +13,23 @@ use contra_stream::{Mix, StreamClient};
 
 pub use envelope::Ahdsr;
 pub use wavetable::{
-    CYCLE, LEVELS, PERIOD, Read, SIZE, Shape, Shaper, Side, TOP, Table, Warp, shape, warp,
+    CYCLE, Inharmonic, LEVELS, ModKind, ModOsc, Osc, PERIOD, Read, SIZE, Shape, Shaper, Side, TOP,
+    Table, Warp, shape, warp,
 };
-pub use zone::{Loop, Region};
+pub use zone::{Loop, Loops, Region};
 
 use envelope::Envelope;
 use fade::Fade;
-pub use fade::FadeTarget;
+pub use fade::{FadeCurve, FadeTarget};
+
+/// How the host renders: live, where a read never waits, or offline (a
+/// bounce), where a read waits for the sample pages it needs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderMode {
+    #[default]
+    Live,
+    Offline,
+}
 
 /// Source frames decoded per inner chunk. Bounds per-voice memory, not pitch.
 const SCRATCH: usize = 512;
@@ -29,6 +39,14 @@ pub const MAX_STEP: f64 = 64.0;
 pub const LOOKAHEAD: f64 = 8192.0;
 /// One-pole gain smoothing per frame (~2 ms at 48 kHz).
 const GAIN_SMOOTH: f32 = 0.01;
+/// The fastest a stretching voice plays (the stretch law's top).
+const MAX_SPEED: f64 = 8.0;
+/// A stretching voice's grain, output frames (43 ms at 48 kHz).
+/// Output frames a note waits for the pages under its first block (about
+/// 50 ms at 48 kHz); then it starts from its first frame with what is there.
+const HEAD_WAIT: u32 = 2400;
+const GRAIN: u64 = 2048;
+const HALF_GRAIN: u64 = GRAIN / 2;
 
 /// How each output channel (row) takes each source channel (column).
 pub type Gain = [[f32; 2]; 2];
@@ -72,7 +90,10 @@ pub struct VoiceStart {
     pub envelope: Ahdsr,
     /// A fade its event asked for before it started; one up to a gain starts
     /// it from silence.
-    pub fade: Option<(FadeTarget, u32)>,
+    pub fade: Option<(FadeTarget, u32, FadeCurve)>,
+    /// Source time per output frame over the pitch's: 1 plays as recorded;
+    /// otherwise the voice stretches time at its own pitch.
+    pub speed: f64,
 }
 
 /// What a voice does when its key goes up.
@@ -110,24 +131,56 @@ pub struct Voice {
     env: Envelope,
     fade: Fade,
     life: Life,
-    scratch: Box<[[f32; 2]]>,
+    /// The codec block last decoded for the frames read and for the blend.
+    decoded: [Box<contra_stream::Decoded>; 2],
+    /// Cursor position of the note's release, once it came.
+    released: Option<u64>,
+    missing: u64,
+    /// Output frames this note has waited for its first pages.
+    waited: u32,
+    /// See [`VoiceStart::speed`]; the cursor moves at `step · speed`.
+    speed: f64,
+    /// A stretching voice's two read heads, each a pitch-rate cursor that
+    /// restarts at the cursor once a grain, half a grain apart.
+    heads: [f64; 2],
+    /// Frames since the stretch began, which places its grains.
+    grain: u64,
+    #[cfg(feature = "trace")]
+    last_peak: f32,
+    /// A host's offline render: a read waits for its pages.
+    mode: RenderMode,
+    offline_wait_timeouts: u64,
+}
+
+/// The buffers a voice renders through, one set for every voice an engine
+/// renders in turn: none holds anything between one chunk and the next.
+pub struct Scratch {
+    /// Source frames read before interpolation.
+    window: Box<[[f32; 2]]>,
     /// The frames a loop crossfade blends in.
     partner: Box<[[f32; 2]]>,
     /// Interpolated frames before the envelope and gain.
     raw: Box<[[f32; 2]]>,
-    /// Cursor position of the note's release, once it came.
-    released: Option<u64>,
-    missing: u64,
-    #[cfg(feature = "trace")]
-    last_peak: f32,
-    #[cfg(feature = "trace")]
-    offline_wait: bool,
-    #[cfg(feature = "trace")]
-    offline_wait_timeouts: u64,
+    /// Head 0's frames while head 1 reads.
+    head: Box<[[f32; 2]]>,
+}
+
+impl Scratch {
+    /// Allocates the buffers; call at prepare, never on the audio thread.
+    #[must_use]
+    pub fn allocate() -> Self {
+        let buffer = || vec![[0.0; 2]; SCRATCH].into_boxed_slice();
+        Self {
+            window: buffer(),
+            partner: buffer(),
+            raw: buffer(),
+            head: buffer(),
+        }
+    }
 }
 
 impl Voice {
-    /// Allocates the voice's scratch; call at prepare, never on the audio thread.
+    /// Allocates the voice's state; call at prepare, never on the audio thread.
     #[must_use]
     pub fn allocate() -> Self {
         Self {
@@ -142,16 +195,16 @@ impl Voice {
             env: Envelope::new(Ahdsr::GATE),
             fade: Fade::NONE,
             life: Life::Held,
-            scratch: vec![[0.0; 2]; SCRATCH].into_boxed_slice(),
-            partner: vec![[0.0; 2]; SCRATCH].into_boxed_slice(),
-            raw: vec![[0.0; 2]; SCRATCH].into_boxed_slice(),
+            decoded: [contra_stream::Decoded::new(), contra_stream::Decoded::new()],
             released: None,
             missing: 0,
+            waited: 0,
+            speed: 1.0,
+            heads: [0.0; 2],
+            grain: 0,
             #[cfg(feature = "trace")]
             last_peak: 0.0,
-            #[cfg(feature = "trace")]
-            offline_wait: false,
-            #[cfg(feature = "trace")]
+            mode: RenderMode::Live,
             offline_wait_timeouts: 0,
         }
     }
@@ -169,15 +222,23 @@ impl Voice {
         self.lag = start.lag;
         self.env = Envelope::new(start.envelope);
         self.fade = match start.fade {
-            Some((FadeTarget::Hold(level), _)) if level > 0.0 => Fade::SILENT,
+            Some((FadeTarget::Hold(level), ..)) if level > 0.0 => Fade::SILENT,
             _ => Fade::NONE,
         };
         self.life = Life::Held;
-        if let Some((target, frames)) = start.fade {
-            self.fade(target, frames);
+        if let Some((target, frames, curve)) = start.fade {
+            self.fade_along(target, frames, curve);
         }
         self.released = None;
         self.missing = 0;
+        self.waited = 0;
+        self.speed = if start.speed.is_finite() {
+            start.speed.clamp(0.0, MAX_SPEED)
+        } else {
+            1.0
+        };
+        self.heads = [0.0; 2];
+        self.grain = 0;
         #[cfg(feature = "trace")]
         {
             self.last_peak = 0.0;
@@ -206,7 +267,12 @@ impl Voice {
     /// is click-free, and a fade already ending it ends at the sooner.
     /// `true` when this fade first sets it ending.
     pub fn fade(&mut self, target: FadeTarget, frames: u32) -> bool {
-        self.fade.start(target, frames);
+        self.fade_along(target, frames, FadeCurve::Linear)
+    }
+
+    /// As [`Self::fade`], along `curve`.
+    pub fn fade_along(&mut self, target: FadeTarget, frames: u32, curve: FadeCurve) -> bool {
+        self.fade.start(target, frames, curve);
         let first = target == FadeTarget::End && !self.is_ending();
         if target == FadeTarget::End {
             self.life = Life::Ending(self.released_at());
@@ -267,6 +333,15 @@ impl Voice {
         }
     }
 
+    /// Where a wavetable voice reads its table from now on; others ignore it.
+    // ponytail: steps at each control span; Kontakt ramps over 32 frames
+    // (0x102ac): ramp inside `Table::render` if a fast route steps audibly.
+    pub fn set_read(&mut self, read: Read) {
+        if let Some(table) = self.region.as_mut().and_then(|r| r.table.as_mut()) {
+            table.read = read;
+        }
+    }
+
     /// Current gain matrix including its envelope and lag, before sample and effects.
     #[must_use]
     pub fn current_gain(&self) -> Gain {
@@ -298,14 +373,13 @@ impl Voice {
         self.last_peak
     }
 
-    /// Enable blocking page waits for an offline renderer; never call from a live host.
-    #[cfg(feature = "trace")]
-    pub fn set_offline_wait(&mut self, enabled: bool) {
-        self.offline_wait = enabled;
+    /// How the host renders: offline, a read waits for its pages; never
+    /// offline in a live host.
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
     }
 
     /// How many offline page waits timed out, including previous notes in this slot.
-    #[cfg(feature = "trace")]
     #[must_use]
     pub fn offline_wait_timeouts(&self) -> u64 {
         self.offline_wait_timeouts
@@ -329,15 +403,28 @@ impl Voice {
         self.at(0)
     }
 
+    /// The sample frame playing now in `region` (this voice's), through its
+    /// loops and reverse.
+    #[must_use]
+    pub fn sample_frame(&self, region: &Region) -> Option<u64> {
+        region.frame_at(self.at(0).max(0.) as u64, self.released)
+    }
+
     /// Cursor position `ahead` output frames from now.
     fn at(&self, ahead: u64) -> f64 {
-        self.anchor + (self.elapsed + ahead) as f64 * self.step
+        self.anchor + (self.elapsed + ahead) as f64 * self.step * self.speed
     }
 
     /// Mixes the next `out.len()` frames into `out`. `now` is the sample time of
     /// `out[0]`, the deadline for the pages this render asks the store for.
-    pub fn render(&mut self, client: &StreamClient, now: u64, out: &mut [[f32; 2]]) {
-        self.render_through(client, now, out, |_| {});
+    pub fn render(
+        &mut self,
+        scratch: &mut Scratch,
+        client: &StreamClient,
+        now: u64,
+        out: &mut [[f32; 2]],
+    ) {
+        self.render_through(scratch, client, now, out, |_| {});
     }
 
     /// As [`Self::render`], with `insert` run on the interpolated signal
@@ -345,6 +432,7 @@ impl Voice {
     /// most 512 frames.
     pub fn render_through(
         &mut self,
+        scratch: &mut Scratch,
         client: &StreamClient,
         now: u64,
         out: &mut [[f32; 2]],
@@ -354,16 +442,22 @@ impl Voice {
         {
             self.last_peak = 0.0;
         }
-        let Some(region) = self.region.take() else {
+        let Some(mut region) = self.region.take() else {
             return;
         };
         let sample = &region.sample;
         let released = self.released;
-        let ahead = (LOOKAHEAD * self.step) as usize;
-        let step = self.step;
-        let table = region.table.as_ref();
-        let ahead = if table.is_some() { 0 } else { ahead };
-        region.runs(self.at(0) as i64, ahead, released, |offset, run| {
+        let step = self.step * self.speed;
+        // A stretching voice's heads trail or lead the cursor by up to a grain.
+        let from = if self.speed == 1.0 {
+            self.at(0)
+        } else {
+            self.heads.iter().fold(self.at(0), |a, &h| a.min(h))
+        };
+        let ahead = (LOOKAHEAD * step) as usize + (self.at(0) - from) as usize;
+        let table = region.table.is_some();
+        let ahead = if table { 0 } else { ahead };
+        region.runs(from as i64, ahead, released, |offset, run| {
             let low = if run.descending {
                 run.first + 1 - run.count as u64
             } else {
@@ -379,24 +473,51 @@ impl Voice {
             }
         });
 
+        // A note whose first pages are not in yet because their heads are still
+        // loading (a streaming miss keeps time instead) holds still, so its attack plays whole when they land instead of the note
+        // joining mid-sample; the requests above are already queued, due now.
+        if self.elapsed == 0 && !table && self.waited < HEAD_WAIT && sample.heads_pending() {
+            let block = (out.len() as f64 * step) as usize + 4;
+            let mut ready = true;
+            region.runs(from as i64, block, released, |_, run| {
+                let low = if run.descending {
+                    run.first + 1 - run.count as u64
+                } else {
+                    run.first
+                };
+                ready &= sample.is_resident(low, run.count as u64);
+            });
+            if !ready {
+                self.waited += out.len() as u32;
+                self.region = Some(region);
+                return;
+            }
+        }
         let mut done = 0;
         let mut alive = true;
         while done < out.len() && alive {
-            let fit = if table.is_some() {
+            let fit = if table {
                 SCRATCH
             } else {
                 (((SCRATCH - 4) as f64 / self.step).floor() as usize).max(1)
             };
-            let n = fit.min(out.len() - done);
-            let filled = if let Some(table) = table {
+            let mut n = fit.min(out.len() - done);
+            let stretched = self.speed != 1.0;
+            if stretched {
+                // Heads restart only at a chunk's start.
+                n = n.min((HALF_GRAIN - self.grain % HALF_GRAIN) as usize);
+            }
+            let filled = if let Some(table) = region.table.as_mut() {
                 let cursor = (self.at(0), self.step);
-                let raw = self.raw.get_mut(..n).unwrap_or_default();
+                let raw = scratch.raw.get_mut(..n).unwrap_or_default();
                 table.render(cursor, raw);
                 raw.len()
+            } else if stretched {
+                self.read_stretched(scratch, client, &region, n)
             } else {
-                self.read_window(client, &region, n)
+                self.read_window(scratch, client, &region, n, (self.anchor, self.elapsed))
             };
-            let raw = self.raw.get_mut(..filled).unwrap_or_default();
+            let raw = scratch.raw.get_mut(..filled).unwrap_or_default();
             insert(raw);
             for (frame, &[l, r]) in out.iter_mut().skip(done).zip(raw.iter()) {
                 self.lagged += (self.lag.gain - self.lagged) * self.lag.coef;
@@ -425,7 +546,7 @@ impl Voice {
                 }
             }
             self.elapsed += n as u64;
-            if table.is_none() && region.finished(self.at(0), released) {
+            if !table && region.finished(self.at(0), released) {
                 alive = false;
             }
             done += n;
@@ -435,22 +556,70 @@ impl Voice {
         }
     }
 
-    /// Reads the region about the cursor and interpolates `n` frames into
-    /// `raw`; returns how many it filled.
-    fn read_window(&mut self, client: &StreamClient, region: &Region, n: usize) -> usize {
+    /// `n` frames of a stretching voice into `raw`: its two heads read at the
+    /// pitch's rate, each faded in and out over its grain (triangles that sum
+    /// to one), so the cursor moves at `speed` while the pitch holds. Head 0
+    /// plays the note's start in full.
+    // ponytail: a plain two-head overlap at a fixed 2048-frame grain, no
+    // waveform alignment; Kontakt's stretch is smoother on sustained tones.
+    fn read_stretched(
+        &mut self,
+        scratch: &mut Scratch,
+        client: &StreamClient,
+        region: &Region,
+        n: usize,
+    ) -> usize {
+        let at = self.at(0);
+        if self.grain % GRAIN == HALF_GRAIN {
+            self.heads[0] = at;
+        }
+        if self.grain.is_multiple_of(GRAIN) {
+            self.heads[1] = at;
+        }
+        let a = self.read_window(scratch, client, region, n, (self.heads[0], 0));
+        if let (Some(head), Some(raw)) = (scratch.head.get_mut(..a), scratch.raw.get(..a)) {
+            head.copy_from_slice(raw);
+        }
+        let filled = a.min(self.read_window(scratch, client, region, n, (self.heads[1], 0)));
+        let grain = self.grain;
+        let pairs = scratch.raw.iter_mut().zip(scratch.head.iter()).take(filled);
+        for (i, (b, a)) in pairs.enumerate() {
+            let phase = ((grain + HALF_GRAIN + i as u64) % GRAIN) as f32 / GRAIN as f32;
+            let w = 1.0 - (2.0 * phase - 1.0).abs();
+            *b = [w * a[0] + (1.0 - w) * b[0], w * a[1] + (1.0 - w) * b[1]];
+        }
+        for h in &mut self.heads {
+            *h += n as f64 * self.step;
+        }
+        self.grain += n as u64;
+        filled
+    }
+
+    /// Reads the region about a cursor at the pitch's step, frame `i` at
+    /// `base + (frames + i) · step` (one product, so every host block size
+    /// lands on the same positions), and interpolates `n` frames into `raw`;
+    /// returns how many it filled.
+    fn read_window(
+        &mut self,
+        scratch: &mut Scratch,
+        client: &StreamClient,
+        region: &Region,
+        n: usize,
+        (base, frames): (f64, u64),
+    ) -> usize {
         let sample = &region.sample;
         let mix = region.mix.as_ref();
         let released = self.released;
-        let lo = self.at(0).floor() as i64 - 1;
-        let span = (self.at(n as u64 - 1).floor() as i64 + 3 - lo) as usize;
-        let (anchor, elapsed, step) = (self.anchor, self.elapsed, self.step);
-        let partner = &mut self.partner;
-        let Some(window) = self.scratch.get_mut(..span.min(SCRATCH)) else {
+        let step = self.step;
+        let at = |i: u64| base + (frames + i) as f64 * step;
+        let lo = at(0).floor() as i64 - 1;
+        let span = (at(n as u64 - 1).floor() as i64 + 3 - lo) as usize;
+        let partner = &mut scratch.partner;
+        let [main, blend_cache] = &mut self.decoded;
+        let Some(window) = scratch.window.get_mut(..span.min(SCRATCH)) else {
             return 0;
         };
-        window.fill([0.0; 2]);
-        #[cfg(feature = "trace")]
-        if self.offline_wait {
+        if self.mode == RenderMode::Offline {
             region.runs(lo, window.len(), released, |_, run| {
                 let low = if run.descending {
                     run.first + 1 - run.count as u64
@@ -467,21 +636,30 @@ impl Voice {
             }
         }
         let mut missing = 0;
+        // Runs tile the window from the first one's offset; each read writes
+        // all its frames, so only what no run covers needs zeroing.
+        let (mut first, mut end) = (window.len(), 0);
         region.runs(lo, window.len(), released, |offset, run| {
             let count = run.count;
+            first = first.min(offset);
+            end = end.max(offset + count);
             if let Some(dst) = window.get_mut(offset..offset + count) {
                 if run.descending {
                     missing += sample
-                        .read_mixed(client, run.first + 1 - count as u64, dst, mix)
+                        .read_cached(client, run.first + 1 - count as u64, dst, mix, Some(main))
                         .missing;
                     dst.reverse();
                 } else {
-                    missing += sample.read_mixed(client, run.first, dst, mix).missing;
+                    missing += sample
+                        .read_cached(client, run.first, dst, mix, Some(main))
+                        .missing;
                     if let Some((at, from, n, fade_start, fade)) = run.crossfade()
                         && let (Some(blend), Some(head)) =
                             (partner.get_mut(..n), dst.get_mut(at..at + n))
                     {
-                        missing += sample.read_mixed(client, from, blend, mix).missing;
+                        missing += sample
+                            .read_cached(client, from, blend, mix, Some(blend_cache))
+                            .missing;
                         let p0 = run.first + at as u64 - fade_start;
                         for (k, (d, b)) in head.iter_mut().zip(blend.iter()).enumerate() {
                             let w = (p0 + k as u64) as f32 / fade as f32;
@@ -493,10 +671,16 @@ impl Voice {
             }
         });
         self.missing += u64::from(missing);
+        if first >= end {
+            window.fill([0.0; 2]);
+        } else {
+            window.get_mut(..first).unwrap_or_default().fill([0.0; 2]);
+            window.get_mut(end..).unwrap_or_default().fill([0.0; 2]);
+        }
 
         let mut filled = 0;
-        for (i, frame) in self.raw.iter_mut().take(n).enumerate() {
-            let x = anchor + (elapsed + i as u64) as f64 * step - lo as f64;
+        for (i, frame) in scratch.raw.iter_mut().take(n).enumerate() {
+            let x = at(i as u64) - lo as f64;
             let base = x.floor() as usize;
             let t = (x - base as f64) as f32;
             let Some(&[y0, y1, y2, y3]) = window.get(base - 1..base + 3) else {
