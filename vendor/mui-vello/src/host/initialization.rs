@@ -541,6 +541,7 @@ impl GpuInit {
                 .map_err(HostError::Render)?;
             gpu.size = (config.width, config.height);
             gpu.config = config;
+            ready(&gpu.adapter.get_info(), "surface");
             Ok(Host {
                 instance: context.instance.clone(),
                 shared: Some(self.session.clone()),
@@ -588,6 +589,15 @@ impl GpuInit {
         }
         Some(result)
     }
+}
+
+/// Says on stderr which GPU an editor draws with (CONTRA): the host's log
+/// and CONTRA's UI checks tell a GPU editor from a CPU fallback by it.
+fn ready(info: &wgpu::AdapterInfo, path: &str) {
+    eprintln!(
+        "mui-baseview: GPU ready backend={:?} adapter={:?} type={:?} driver={:?} path={path}",
+        info.backend, info.name, info.device_type, info.driver
+    );
 }
 
 pub(super) fn surface_config(
@@ -664,6 +674,7 @@ impl GpuInit {
             renderer.incremental_output();
             let (target, readback, _) = offscreen_target(&context.device, size);
             let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            ready(&context.adapter.get_info(), "offscreen");
             Ok(Some(Offscreen {
                 trial,
                 first_frame: true,
