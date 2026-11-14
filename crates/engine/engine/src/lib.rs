@@ -53,11 +53,6 @@ use contra_stream::StreamClient;
 use contra_time::Frames;
 use contra_voice::{KeyUp, Scratch, Voice, VoiceStart};
 
-pub use fx_types::{EffectRequest, Prepared};
-pub use inspect::{
-    BusRouteObservation, EqRouteObservation, RouteObservation, SharedEffectObservation,
-    VoiceEffectObservation, VoiceObservation,
-};
 pub use contra_effects::response;
 pub use contra_effects::stem;
 pub use contra_events::{Event, HostNote, HostPattern, NoteExpression};
@@ -70,6 +65,11 @@ pub use contra_script_ui::{ControlLook, Key, KeyRange, MenuItem, Page};
 pub use contra_time::SampleTime;
 pub use contra_vm::{Action, Faults, Op, Program, Text, Vm};
 pub use contra_voice::{Ahdsr, Loop, Region, RenderMode};
+pub use fx_types::{EffectRequest, Prepared};
+pub use inspect::{
+    BusRouteObservation, EqRouteObservation, RouteObservation, SharedEffectObservation,
+    VoiceEffectObservation, VoiceObservation,
+};
 pub use ledger::NoteRef;
 pub use pgs::PgsBudget;
 pub use plan::{
@@ -84,8 +84,8 @@ pub use transport::Play;
 pub use zone_edits::{Unpurge, ZoneEdit};
 
 use buses::BusState;
-use group_masks::GroupMasks;
 use contra_behaviour::Behaviour;
+use group_masks::GroupMasks;
 use ledger::{Ledger, Note, Origin, Releases};
 use queue::{EventQueue, Work};
 use script::{Kind, Running};
@@ -363,9 +363,7 @@ impl Engine {
         let vms = plan
             .scripts
             .iter()
-            .map(|s| {
-Some(contra_vm::Vm::new(&s.program, s.coroutines))
-            })
+            .map(|s| Some(contra_vm::Vm::new(&s.program, s.coroutines)))
             .collect();
         let timers = vec![[None; 2]; plan.scripts.len()].into();
         let ui = contra_script_ui::Store::new(plan.scripts.iter().map(|s| s.controls.cells.len()));

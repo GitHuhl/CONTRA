@@ -21,7 +21,8 @@ fn run(setup: &str, results: &[&str]) -> Result<Vec<i32>, String> {
         source.push_str(&format!("  %r[{k}] := {expr}\n"));
     }
     source.push_str("end on\n");
-    let script = contra_ksp::compile(&source, &[]).map_err(|e| format!("compile: {}", e.message))?;
+    let script =
+        contra_ksp::compile(&source, &[]).map_err(|e| format!("compile: {}", e.message))?;
     let base = script
         .variables
         .iter()
@@ -38,7 +39,9 @@ fn run(setup: &str, results: &[&str]) -> Result<Vec<i32>, String> {
     engine.process(&mut [[0.0; 2]; 64], &[]);
     (0..results.len())
         .map(|k| {
-            let cell = engine.script_cell_in(0, base as usize + k).ok_or("no cell")?;
+            let cell = engine
+                .script_cell_in(0, base as usize + k)
+                .ok_or("no cell")?;
             Ok(cell as i32)
         })
         .collect()

@@ -33,9 +33,10 @@ fn performs(faces: &[Option<Face>], engine: &Engine, slot: usize) -> bool {
     let Ok(at) = u8::try_from(slot) else {
         return false;
     };
-    faces.get(slot).and_then(Option::as_ref).is_some_and(|face| {
-        engine.page(at).is_some_and(|page| page.performance) || face.has_view()
-    })
+    faces
+        .get(slot)
+        .and_then(Option::as_ref)
+        .is_some_and(|face| engine.page(at).is_some_and(|page| page.performance) || face.has_view())
 }
 
 /// The slots to try, in the order the editor chooses between them: every slot

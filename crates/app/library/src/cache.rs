@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-
 /// Bumped when what is kept, or how it is read, changes; an older file is
 /// dropped whole.
 const VERSION: u32 = 2;

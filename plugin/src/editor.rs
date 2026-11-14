@@ -1017,13 +1017,13 @@ fn is_preset(path: &std::path::Path) -> bool {
 }
 
 /// Whether a dropped file is an instrument the rack loads: a Kontakt
-/// instrument or snapshot, an SFZ file, or a UVI program in its bank.
+/// instrument or snapshot.
 fn is_instrument(path: &std::path::Path) -> bool {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
-    matches!(ext.as_deref(), Some("nki" | "nksn" | "uvip" | "sfz"))
+    matches!(ext.as_deref(), Some("nki" | "nksn"))
 }
 
 #[cfg(test)]
@@ -1031,8 +1031,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sfz_files_can_be_dropped_into_the_player() {
-        assert!(super::is_instrument(std::path::Path::new("instrument.SFZ")));
+    fn kontakt_files_can_be_dropped_into_the_player() {
+        assert!(super::is_instrument(std::path::Path::new("/a/B.NKI")));
+        assert!(!super::is_instrument(std::path::Path::new(
+            "instrument.sfz"
+        )));
     }
 
     #[test]

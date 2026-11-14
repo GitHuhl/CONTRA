@@ -17,13 +17,11 @@ use moose::core::{ExactAddress, ExactEvent, ExactEventBody, ExactNoteAddress, Ex
 use moose::prelude::*;
 
 use super::tests::{BLOCK, KONTAKT, RATE, activate};
-use crate::{Dsp, Contra, ContraParams, Tick};
+use crate::{Contra, ContraParams, Dsp, Tick};
 
 mod live;
 mod touch;
 mod window;
-
-const UVI: &str = "/data/main/Libraries/UVI";
 
 /// The longest a release tail may ring after a segment's last note-off.
 const TAIL_S: f64 = 20.0;
@@ -39,12 +37,7 @@ const COMMANDS_SHARE: f64 = 0.05;
 /// by part of their name, and why (release, a loaded machine). They are
 /// reported, not failed, until the cause is fixed; [`COMMANDS_SHARE`] holds
 /// for them as for every program.
-const KNOWN_SLOW: [(&str, &str); 1] = [(
-    "W Strings Harmonic",
-    "its own MasterPitchBend `changed` checks 55,872 pitch connections and sets \
-     6,984 route amounts in one callback: ~10 ms, of which the library's loop is \
-     5.3 ms even in bare Luau; UVI runs `changed` as real-time code too",
-)];
+const KNOWN_SLOW: [(&str, &str); 0] = [];
 
 /// Below this in every sample after its note-on, a note never sounded.
 const SILENT: f32 = 1e-5;
@@ -924,10 +917,10 @@ fn perform(path: PathBuf) -> Report {
     }
 }
 
-/// The ten programs the user plays: one per library (legato scripts,
+/// The eight programs the user plays: one per library (legato scripts,
 /// polyphonic variables, pedal and resonance, wheel-driven dynamics, a big
-/// script face, two UVI engines).
-const PROGRAMS: [&str; 10] = [
+/// script face).
+const PROGRAMS: [&str; 8] = [
     "Afflatus Chapter II Brass/Instruments/1. Ensembles/Single Instruments/3 Trumpets/3 Trumpets Legato.nki",
     "Pacific Ensemble Strings/Instruments/10 Cellos/Pacific - Ens Strings - 10 Cellos - Legato Sustains.nki",
     "Audio Imperia CHORUS/Instruments/01 Multi Patches/01 Chorus - Women - Traditional Articulations.nki",
@@ -936,8 +929,6 @@ const PROGRAMS: [&str; 10] = [
     "Una Corda Library/Instruments/Una Corda Felt.nki",
     "ANALOG STRINGS/Instruments/ANALOG STRINGS.nki",
     "Conflux 1.1.0 [Native Instruments]/Instruments/Conflux.nki",
-    "UVI:VWinds - Clarinets/VWinds-AClarinet.ufs/Presets/Clarinet A.uvip",
-    "UVI:UVI - Augmented Orchestra v1.1.2-R2R/Augmented Orchestra.ufs/Presets/00 Orchestra/01 Strings/W Strings Harmonic.uvip",
 ];
 
 #[test]
@@ -948,7 +939,7 @@ fn real_performances_sound_on_time_end_and_never_burst() {
     let only = std::env::var("CONTRA_PLAYTEST").unwrap_or_default();
     let out = std::env::var_os("CONTRA_PLAYTEST_OUT").map(PathBuf::from);
     // CONTRA_PLAYTEST_LIST=<file>: plays the programs it lists, one path a
-    // line, instead of the user's ten; CONTRA_PLAYTEST_SHARD=i/n plays every
+    // line, instead of the user's eight; CONTRA_PLAYTEST_SHARD=i/n plays every
     // nth from the ith, so n processes share a corpus.
     let list = std::env::var_os("CONTRA_PLAYTEST_LIST")
         .map(|f| std::fs::read_to_string(f).expect("CONTRA_PLAYTEST_LIST"));
@@ -970,12 +961,8 @@ fn real_performances_sound_on_time_end_and_never_burst() {
         .filter(|(n, _)| n % shards == shard)
         .map(|(_, p)| p);
     for program in programs {
-        let path = match program.strip_prefix("UVI:") {
-            Some(p) => Path::new(UVI).join(p),
-            None => Path::new(KONTAKT).join(program),
-        };
-        // A .ufs is a file; the program is inside it.
-        if !path.ancestors().any(Path::is_file) {
+        let path = Path::new(KONTAKT).join(program);
+        if !path.is_file() {
             eprintln!("skipped: no {}", path.display());
             continue;
         }
@@ -1000,6 +987,6 @@ fn real_performances_sound_on_time_end_and_never_burst() {
         }
         failed.extend(report.failed);
     }
-    // A corpus run records its rows; the user's ten must pass.
+    // A corpus run records its rows; the user's eight must pass.
     assert!(list.is_some() || failed.is_empty(), "{}", failed.join("\n"));
 }

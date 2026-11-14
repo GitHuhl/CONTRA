@@ -11,12 +11,12 @@ use contra_engine::{EffectRequest, Engine, Prepared};
 
 use crate::persist::Capture;
 use crate::view::Interfaces;
-pub(crate) use files::DiskFiles;
-pub use files::user_saves;
 pub use contra_engine::{Event, HostNote, HostPattern, NoteExpression, Plan, RenderMode, ir};
 use contra_protocol::{MAX_PARTS, MeterCells, Meters, Ring, StatCells, Stats};
 pub use contra_stream::{Store, StoreConfig};
 use contra_ui_model::UiModifiers;
+pub(crate) use files::DiskFiles;
+pub use files::user_saves;
 pub use picks::Pick;
 
 mod audio;
@@ -455,8 +455,8 @@ impl Rack {
         requests::init_tables(&mut engine, &self.store.client());
         // Its library's resources are found near the instrument file.
         let near = source.as_deref().or(path.as_deref());
-        let view = crate::view::View::of(&loaded.faces, &engine, near)
-            .map(|view| view.with_waves(waves));
+        let view =
+            crate::view::View::of(&loaded.faces, &engine, near).map(|view| view.with_waves(waves));
         let sounds = crate::sound::Sounds::new(self.rate, engine.group_sounds());
         let part_info = Part {
             source,
@@ -749,8 +749,7 @@ impl Rack {
                 continue;
             };
             let s = &mut p.script;
-            let nothing =
-                |v: &crate::persist::Vars| v.vars.is_empty();
+            let nothing = |v: &crate::persist::Vars| v.vars.is_empty();
             if s.asked || s.vars.iter().all(nothing) {
                 continue;
             }

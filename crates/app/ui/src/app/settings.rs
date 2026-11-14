@@ -174,10 +174,7 @@ pub(super) fn sheet(ui: &mut Ui, app: &mut App, which: Sheet, out: &mut Vec<Acti
             col![
                 title("CONTRA"),
                 body(app.build.clone()).id("about-build"),
-                caption(
-                    "One engine that plays Kontakt, UVI and SFZ libraries as they were written."
-                )
-                .fill(secondary()),
+                caption("Plays Kontakt libraries as they were written.").fill(secondary()),
             ]
             .gap(SPACE),
         ),

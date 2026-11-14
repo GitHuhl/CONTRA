@@ -34,8 +34,8 @@
 //! Kontakt at 96 kHz runs Tape without oversampling, the engine still at
 //! twice the rate.
 
-use ir::Stage::{In, Out, Post, Pre};
 use contra_ir as ir;
+use ir::Stage::{In, Out, Post, Pre};
 
 /// `num / den` in `s / (2π·hz)`.
 const fn section(hz: f32, num: [f32; 3], den: [f32; 3]) -> ir::Section {

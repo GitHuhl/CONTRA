@@ -66,10 +66,7 @@ impl Vars {
                 })
             })
             .collect();
-        Self {
-            script,
-            vars,
-        }
+        Self { script, vars }
     }
 
     /// What `saved` (in Kontakt's form) writes into these variables' cells,

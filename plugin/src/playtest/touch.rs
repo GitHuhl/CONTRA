@@ -6,7 +6,7 @@ use contra_ui_model::{Kind, Value};
 use moose::prelude::*;
 
 use super::{BLOCK, In, Played, Report, at, block, cc, off, on};
-use crate::{Dsp, ContraParams, Tick};
+use crate::{ContraParams, Dsp, Tick};
 
 /// The most controls one program moves; past it the row says how many were left.
 const MOST: usize = 300;

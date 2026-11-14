@@ -98,14 +98,7 @@ pub(super) fn page<'a>(
             let picture = faces.first().filter(|_| !bare).and_then(|u| picture(u));
             let style = w.style.and_then(|s| tree.styles.get(s.0));
             let position = w.position();
-            let look = stock::Look::of(
-                tree,
-                w,
-                position,
-                readout(w),
-                knob_name(w),
-                bare,
-            );
+            let look = stock::Look::of(tree, w, position, readout(w), knob_name(w), bare);
             let stock = look.is_none() && stock::shows(tree, w, bare);
             let words = if look.is_some() {
                 String::new()

@@ -16,10 +16,10 @@ mod sallen_key;
 
 pub use cascade::{Cascade, CascadeSettings, CascadeStage};
 pub use clocked::{Clocked, ClockedShape};
-pub use formant::{Formant, VowelSet, Vowels};
-pub use huovilainen::Huovilainen;
 pub use contra_dsp_core::Biquad;
 use contra_dsp_core::flush;
+pub use formant::{Formant, VowelSet, Vowels};
+pub use huovilainen::Huovilainen;
 pub use ladder::Ladder;
 pub use notches::{MAX_STAGES, NotchSettings, Notches};
 pub use sallen_key::SallenKey;

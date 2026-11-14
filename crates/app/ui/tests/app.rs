@@ -2,9 +2,7 @@
 //! library, a click on a preset asks to load it, a menu pick lands, and
 //! once motion settles the editor asks for no more frames.
 
-use contra_ui::app::{
-    self, Action, App, Envelope, Face, Library, Param, Part, PartTab, Sound,
-};
+use contra_ui::app::{self, Action, App, Envelope, Face, Library, Param, Part, PartTab, Sound};
 use mui::prelude::{Buttons, Input, Key, KeyPress, Mods, Point, PointerInput, Size, Ui};
 
 fn frame(ui: &mut Ui, app: &mut App, input: Input) -> (Vec<Action>, bool) {

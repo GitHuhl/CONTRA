@@ -9,7 +9,7 @@ use contra_host::state::{Saved, SavedPart};
 use moose::core::{ExactEvent, ExactEventBody, ExactNoteAddress};
 use moose::prelude::*;
 
-use crate::{Dsp, Contra, ContraParams, Tick};
+use crate::{Contra, ContraParams, Dsp, Tick};
 
 pub(super) const RATE: f64 = 48_000.0;
 pub(super) const BLOCK: usize = 512;
@@ -698,149 +698,6 @@ impl Drop for Scratch {
     }
 }
 
-/// UVI's side of the player's own preset (VWinds Clarinet A): two knobs
-/// and a menu moved, saved from the header, and a project reload plays it
-/// with the panel values it saved.
-#[test]
-fn a_uvi_preset_saved_in_the_header_reopens_with_its_panel() {
-    use contra_ui::app::{Action, PresetEdit};
-    const ROOT: &str = "/data/main/Libraries/UVI/VWinds - Clarinets";
-    if !Path::new(ROOT).exists() {
-        eprintln!("skipped: no {ROOT}");
-        return;
-    }
-    let scratch = Scratch::new("uvi-presets");
-    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
-    params
-        .shared
-        .request(crate::Request::AddRoot(PathBuf::from(ROOT)));
-    let t = std::time::Instant::now();
-    let (library, preset) = loop {
-        Tick.run(&params);
-        let guard = crate::lock(&params.shared.browser);
-        let b = guard.as_ref().unwrap();
-        let found = b.catalog.libraries.iter().enumerate().find_map(|(n, l)| {
-            let p = l
-                .presets
-                .iter()
-                .position(|p| p.ends_with("Clarinet A.uvip"))?;
-            Some((n, p))
-        });
-        if let Some(found) = found.filter(|_| !b.scanning()) {
-            break found;
-        }
-        drop(guard);
-        assert!(
-            t.elapsed().as_secs() < 300,
-            "the scan never found Clarinet A"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    crate::lock(&params.shared.browser)
-        .as_mut()
-        .unwrap()
-        .set_user(scratch.0.clone());
-    let browse = |action| {
-        params.shared.request(crate::Request::Browse(action));
-        Tick.run(&params);
-    };
-    browse(Action::Load {
-        library,
-        preset,
-        into: None,
-    });
-    settle(&params, &mut dsp);
-    let moved = move_panel(&params);
-    settle(&params, &mut dsp);
-    settle(&params, &mut dsp);
-    let now = crate::lock(&params.shared.rack)
-        .as_ref()
-        .unwrap()
-        .saved_scripts(0)
-        .concat();
-    for (name, to) in &moved {
-        let entry = now
-            .iter()
-            .find(|e| e.split_once('=').is_some_and(|(n, _)| n == name));
-        let value = entry.and_then(|e| e.split_once('=')?.1.parse::<f64>().ok());
-        assert!(
-            value.is_some_and(|v| (v - to).abs() < 1e-3),
-            "{name} → {to}: {entry:?}"
-        );
-    }
-    browse(Action::Preset {
-        part: 0,
-        edit: PresetEdit::Save("Mine".into()),
-    });
-    let playing = |params: &ContraParams| {
-        let rack = crate::lock(&params.shared.rack);
-        let rack = rack.as_ref().unwrap();
-        let p = rack.parts()[0].as_ref().unwrap();
-        (p.path.clone().unwrap(), p.modified, rack.saved_scripts(0))
-    };
-    let (mine, modified, values) = playing(&params);
-    assert!(mine.ends_with("Mine.contra") && !modified, "{mine:?}");
-    assert!(
-        values.concat().iter().any(|e| e.contains('=')),
-        "no panel values: {values:?}"
-    );
-    params.capture();
-    let state = params.saved.read().unwrap().clone();
-    let (again, mut again_dsp) = activate(&state);
-    settle(&again, &mut again_dsp);
-    assert_eq!(playing(&again), (mine, false, values));
-}
-
-/// Moves part 0's first two persistent knobs a quarter of their range and
-/// its first persistent menu to its third item, by the Lua widget's name;
-/// each name and the value it was set to.
-fn move_panel(params: &ContraParams) -> Vec<(String, f64)> {
-    use contra_ui_model::Kind;
-    let (moves, saved) = {
-        let guard = crate::lock(&params.shared.rack);
-        let rack = guard.as_ref().unwrap();
-        let view = (rack.parts()[0].as_ref().unwrap().view.as_ref()).expect("a panel");
-        let saved = rack.saved_scripts(0).concat();
-        let listed =
-            |name: &str| (saved.iter()).any(|e| e.split_once('=').is_some_and(|(n, _)| n == name));
-        let mut knobs = Vec::new();
-        let mut menu = None;
-        let widgets = view.tree().widgets.iter().enumerate();
-        for (n, w) in widgets.filter(|(_, w)| !w.name.is_empty() && listed(&w.name)) {
-            match &w.kind {
-                Kind::Knob { range, .. } if knobs.len() < 2 && range.max > range.min => {
-                    let to = range.min + (range.max - range.min) * 0.25;
-                    knobs.push((n, w.name.clone(), to));
-                }
-                Kind::Menu { items } if menu.is_none() && items.len() > 2 => {
-                    menu = Some((n, w.name.clone(), 3.0));
-                }
-                _ => {}
-            }
-        }
-        (knobs.into_iter().chain(menu).collect::<Vec<_>>(), saved)
-    };
-    assert_eq!(moves.len(), 3, "two knobs and a menu among {saved:?}");
-    for (widget, _, value) in &moves {
-        params
-            .shared
-            .request(crate::Request::Ui(crate::editor::Edit {
-                slot: Some(0),
-                action: contra_ui::app::Action::Control {
-                    part: 0,
-                    widget: *widget,
-                    value: *value,
-                    cell: None,
-                    keys: Default::default(),
-                },
-            }));
-    }
-    moves
-        .into_iter()
-        .map(|(_, name, value)| (name, value))
-        .collect()
-}
-
 /// The player's own preset of the part playing `preset`: saved into the
 /// presets folder, listed under its library and named by the header,
 /// picked back with the values it saved, renamed, then deleted.
@@ -1133,49 +990,6 @@ fn band(params: &ContraParams, dsp: &mut Dsp) -> f32 {
     (10.0 * (band / all.max(1e-12)).log10()) as f32
 }
 
-/// HOW-TO-TRY-V3's first run, headless: v2's folders and a UVI folder the
-/// player adds are scanned, and a preset of each library loads, plays,
-/// saves and reloads.
-#[test]
-#[ignore = "about 80 s in debug: run with --ignored before offering a build"]
-fn a_first_run_lists_v2s_libraries_and_their_presets_play_and_recall() {
-    const UVI: &str = "/data/main/Libraries/UVI";
-    let v2 = dirs::config_dir().map(|c| c.join("contra").join("settings.json"));
-    let Some(v2) = v2.filter(|p| p.exists() && Path::new(UVI).exists()) else {
-        eprintln!("skipped: no v2 settings or no {UVI}");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("contra-first-run-{}", std::process::id()));
-    // A run that died left its prefs: a first run starts without them.
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("contra")).unwrap();
-    std::fs::copy(&v2, dir.join("contra").join("settings.json")).unwrap();
-    let mut browser = contra_host::browser::Browser::open(Some(&dir), Some(&dir));
-    browser.add_root(UVI.into());
-    let t = std::time::Instant::now();
-    while browser.scanning() && t.elapsed().as_secs() < 300 {
-        browser.poll();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    println!("scanned in {:.1?}", t.elapsed());
-    let mut failed = Vec::new();
-    for name in ["Una Corda", "ANALOG STRINGS", "Augmented Orchestra"] {
-        let libraries = &browser.catalog.libraries;
-        let Some(n) = libraries.iter().position(|l| l.name.contains(name)) else {
-            failed.push(format!("{name}: not listed"));
-            continue;
-        };
-        println!("{name}: {} presets", libraries[n].presets.len());
-        match browser.preset(n, 0).map(recall) {
-            Some(Ok(line)) => println!("{line}"),
-            Some(Err(e)) => failed.push(e),
-            None => failed.push(format!("{name}: no presets")),
-        }
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
-}
-
 #[test]
 fn a_librarys_cover_reads_from_its_resource_container() {
     let Some(nicnt) = library("Una Corda Library/Una Corda.nicnt") else {
@@ -1270,114 +1084,6 @@ fn an_idle_tick_draws_no_frame() {
     assert!(
         params.shared.dirty.load(Ordering::Acquire),
         "a request drew nothing"
-    );
-}
-
-/// A UVI program's own page: a knob moved in the editor runs the script's
-/// `changed`, the note plays louder or softer, and a reload keeps it.
-fn uvi_knob_moves_the_sound_and_survives_reload(program: &str, knob: &str, to: f64) {
-    let path = Path::new("/data/main/Libraries/UVI").join(program);
-    // The program is a member of its bank, a file.
-    if !path.ancestors().any(Path::is_file) {
-        eprintln!("skipped: no {}", path.display());
-        return;
-    }
-    let part = |path: PathBuf| SavedPart {
-        part: 0,
-        path,
-        channel: 0,
-        output: 0,
-        gain: 1.0,
-        pan: 0.0,
-        solo: false,
-        mute: false,
-        scripts: Vec::new(),
-        delays: None,
-        slot_types: Vec::new(),
-        slot_responses: Vec::new(),
-        preset: None,
-        modified: false,
-    };
-    let (params, mut dsp) = activate(&Saved::new(vec![part(path)]).write());
-    settle(&params, &mut dsp);
-    let before = play(&params, &mut dsp);
-    let shown = |params: &ContraParams| {
-        let guard = crate::lock(&params.shared.rack);
-        let part = guard.as_ref()?.parts()[0].as_ref()?;
-        let tree = part.view.as_ref()?.tree();
-        let n = tree.widgets.iter().position(|w| w.name == knob)?;
-        Some((n, tree.widgets[n].value.clone()))
-    };
-    let (widget, _) = shown(&params).unwrap_or_else(|| panic!("{program}: no {knob}"));
-    params
-        .shared
-        .request(crate::Request::Ui(crate::editor::Edit {
-            slot: Some(0),
-            action: contra_ui::app::Action::Control {
-                part: 0,
-                widget,
-                value: to,
-                cell: None,
-                keys: Default::default(),
-            },
-        }));
-    settle(&params, &mut dsp);
-    settle(&params, &mut dsp);
-    let after = play(&params, &mut dsp);
-    let db = |a: f32, b: f32| 20. * (b / a.max(1e-9)).log10();
-    assert!(
-        db(before, after).abs() > 1.,
-        "{knob} → {to} moved {:.2} dB",
-        db(before, after)
-    );
-    assert_eq!(
-        shown(&params).and_then(|s| s.1),
-        Some(contra_ui_model::Value::Real(to))
-    );
-    params.capture();
-    let saved = params.saved.read().unwrap().clone();
-    let entry = format!("{knob}={to}");
-    let state = Saved::read(&saved);
-    assert!(
-        state.parts[0].scripts.iter().flatten().any(|v| *v == entry),
-        "{entry} was not saved"
-    );
-    let (again, mut again_dsp) = activate(&saved);
-    settle(&again, &mut again_dsp);
-    assert_eq!(
-        shown(&again).and_then(|s| s.1),
-        Some(contra_ui_model::Value::Real(to))
-    );
-    // The live note was the program's second: round robins move on per note.
-    play(&again, &mut again_dsp);
-    let reloaded = play(&again, &mut again_dsp);
-    assert!(
-        db(after, reloaded).abs() < 0.5,
-        "{after:.4} live, {reloaded:.4} reloaded"
-    );
-    println!(
-        "{knob} → {to}: {:+.2} dB, kept on reload ({:+.2} dB)",
-        db(before, after),
-        db(after, reloaded)
-    );
-}
-
-#[test]
-fn a_vwinds_knob_moved_on_its_page_changes_the_sound_and_survives_reload() {
-    uvi_knob_moves_the_sound_and_survives_reload(
-        "VWinds - Clarinets/VWinds-BbClarinet.ufs/Presets/Bb Clarinet.uvip",
-        "Air",
-        127.,
-    );
-}
-
-#[test]
-#[ignore = "Augmented Orchestra takes about a minute to load in debug"]
-fn an_augmented_orchestra_knob_moved_on_its_page_changes_the_sound_and_survives_reload() {
-    uvi_knob_moves_the_sound_and_survives_reload(
-        "UVI - Augmented Orchestra v1.1.2-R2R/Augmented Orchestra.ufs/Presets/00 Orchestra/01 Strings/V Strings Bartok.uvip",
-        "PartVolume_0",
-        0.25,
     );
 }
 
@@ -1841,7 +1547,7 @@ fn conflux_edit_tab_switches_the_page() {
 fn a_panic_in_the_render_is_one_silent_block_and_the_next_plays() {
     let scratch = Scratch::new("render-panic");
     std::fs::create_dir_all(&scratch.0).unwrap();
-    // One second of a 440 Hz sine, 16-bit mono at 48 kHz, played by one SFZ region.
+    // One second of a 440 Hz sine, 16-bit mono at 48 kHz, played by one zone.
     let samples: Vec<u8> = (0..48_000)
         .flat_map(|n| {
             let x = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin();
@@ -1861,29 +1567,59 @@ fn a_panic_in_the_render_is_one_silent_block_and_the_next_plays() {
     wav.extend((samples.len() as u32).to_le_bytes());
     wav.extend(samples);
     std::fs::write(scratch.0.join("sine.wav"), wav).unwrap();
-    let sfz = scratch.0.join("sine.sfz");
-    std::fs::write(
-        &sfz,
-        "<region> sample=sine.wav key=60 loop_mode=loop_continuous\n",
-    )
-    .unwrap();
-    let saved = Saved::new(vec![SavedPart {
-        part: 0,
-        path: sfz,
-        channel: 0,
-        output: 0,
-        gain: 1.0,
-        pan: 0.0,
-        solo: false,
-        mute: false,
-        scripts: Vec::new(),
-        delays: None,
-        slot_types: Vec::new(),
-        slot_responses: Vec::new(),
-        preset: None,
-        modified: false,
-    }]);
-    let (params, mut dsp) = activate(&saved.write());
+    // One looping zone on key 60, loaded straight into part 0.
+    let instrument = {
+        use contra_engine::ir;
+        ir::Instrument {
+            name: "sine".into(),
+            source_path: Some(scratch.0.join("sine.nki")),
+            samples: vec![ir::Sample {
+                name: "sine".into(),
+                file: scratch.0.join("sine.wav"),
+                offset: 0,
+                len: None,
+                channels: 1,
+                frames: 48_000,
+                rate: 48_000,
+                keystream: None,
+            }],
+            groups: vec![ir::Group {
+                zones: vec![ir::Zone {
+                    id: 0,
+                    mix: Vec::new(),
+                    sample: 0,
+                    keys: 60..=60,
+                    velocities: 1..=127,
+                    velocity_fade: (0, 0),
+                    key_fade: (0, 0),
+                    root: 60,
+                    tune: 0.0,
+                    volume_db: 0.0,
+                    pan: 0.0,
+                    start: 0,
+                    end: 48_000,
+                    start_mod: 0,
+                    loops: vec![ir::Loop {
+                        start: 0,
+                        end: 48_000,
+                        crossfade: 0,
+                        count: 0,
+                        alternating: false,
+                        until_release: false,
+                    }],
+                    reverse: false,
+                    slot: 0,
+                }],
+                ..ir::Group::DEFAULT
+            }],
+            ..ir::Instrument::DEFAULT
+        }
+    };
+    let (params, mut dsp) = activate(&Saved::new(Vec::new()).write());
+    (crate::lock(&params.shared.rack).as_mut().unwrap())
+        .load_ir(0, instrument, None)
+        .unwrap();
+    settle(&params, &mut dsp);
     let peak = |audio: &[f32]| audio.iter().fold(0.0f32, |m, x| m.max(x.abs()));
     block(&params, &mut dsp, &[note(true, 60)]);
     assert!(

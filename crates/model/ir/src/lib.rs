@@ -18,6 +18,7 @@ mod reverb;
 mod route_names;
 mod wavetable;
 pub use bus::{Bus, BusSend};
+pub use contra_law::{FormulaId, Section, Sections, Stage, common};
 pub use drive::{
     Clipper, Crush, Curve as DriveCurve, EffectParam, KnobModel, KnobTarget, Overdrive, RackAt,
     Shaper, SlotKnob, SlotLaw, SlotShape, SlotShapes, SlotType,
@@ -29,7 +30,6 @@ pub use effects::{
     ScanShape, Transient, VowelSet,
 };
 pub use engine_par::{Drives, EnginePar, ScriptPar, ZonePar};
-pub use contra_law::{FormulaId, Section, Sections, Stage, common};
 pub use link::{CcLink, Linked};
 pub use mods::{Attractor, Blend, Curve, Exp2, Factor, ModKind, Source, Term, Transfer, Wave};
 pub use output::{Balance, Output, OutputControllers};

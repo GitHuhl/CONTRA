@@ -348,7 +348,11 @@ impl Engine {
         let plan = Arc::clone(&self.plan);
         let first = self.notes.get(note).map_or(0, |n| {
             let player = n.first.checked_sub(1);
-            usize::from(if n.noted_off { n.first } else { player.unwrap_or(0) })
+            usize::from(if n.noted_off {
+                n.first
+            } else {
+                player.unwrap_or(0)
+            })
         });
         for (slot, script) in (0u8..).zip(&plan.scripts).skip(first) {
             if let Some(entry) = script.callbacks.release

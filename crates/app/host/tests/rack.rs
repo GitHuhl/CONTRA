@@ -743,7 +743,6 @@ fn a_sound_tab_decay_edit_is_heard_from_the_next_note() {
     );
 }
 
-
 /// A million-cell persistent array is captured a budget of cells a block,
 /// never all in one; an idle script is not read again, and what a callback
 /// wrote reaches the save once the next capture is read.
@@ -1209,8 +1208,7 @@ fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
         end on";
     let (mut rack, mut audio) = rack();
     rack.set_saves(saves.clone());
-    rack.load_ir(0, scripted(&source, code), None)
-        .unwrap();
+    rack.load_ir(0, scripted(&source, code), None).unwrap();
     audio.process(BLOCK, &[(0, note(0))]);
     run(&mut rack, &mut audio, 4);
     let pick = rack.pick().expect("the save asks for a file");
@@ -1226,7 +1224,6 @@ fn an_array_saved_by_dialog_loads_back_from_the_file_picked() {
     assert_eq!(written.unwrap(), "%perf\n4\n5\n");
     assert!(saved.contains(&"$result 145".to_owned()), "{saved:?}");
 }
-
 
 /// An install fades out the engine it replaces instead of cutting its
 /// sound dead, a second install before that fade ends keeps it fading, and
@@ -1629,6 +1626,61 @@ fn tone_wav() -> Vec<u8> {
     wav
 }
 
+/// An instrument playing each WAV file in `files` (as [`tone_wav`] writes
+/// them) on its key, one group, as a Kontakt instrument read into the IR.
+fn toned(
+    source: &std::path::Path,
+    files: &[(std::path::PathBuf, u8)],
+) -> contra_engine::ir::Instrument {
+    use contra_engine::ir;
+    let samples = files
+        .iter()
+        .map(|(file, _)| ir::Sample {
+            name: file.file_stem().unwrap().to_string_lossy().into_owned(),
+            file: file.clone(),
+            offset: 0,
+            len: None,
+            channels: 1,
+            frames: 4800,
+            rate: 48_000,
+            keystream: None,
+        })
+        .collect();
+    let zones = files
+        .iter()
+        .enumerate()
+        .map(|(n, &(_, key))| ir::Zone {
+            id: n as u32,
+            mix: Vec::new(),
+            sample: n,
+            keys: key..=key,
+            velocities: 1..=127,
+            velocity_fade: (0, 0),
+            key_fade: (0, 0),
+            root: key,
+            tune: 0.0,
+            volume_db: 0.0,
+            pan: 0.0,
+            start: 0,
+            end: 4800,
+            start_mod: 0,
+            loops: Vec::new(),
+            reverse: false,
+            slot: 0,
+        })
+        .collect();
+    ir::Instrument {
+        name: "x".into(),
+        source_path: Some(source.to_owned()),
+        samples,
+        groups: vec![ir::Group {
+            zones,
+            ..ir::Group::DEFAULT
+        }],
+        ..ir::Instrument::DEFAULT
+    }
+}
+
 /// The loudest block mean while a note plays.
 fn loudest(audio: &mut RackAudio) -> f32 {
     audio.process(BLOCK, &[(0, note(0))]);
@@ -1648,14 +1700,15 @@ fn a_moved_library_is_said_once_offered_found_and_plays_once_taken() {
     std::fs::create_dir_all(&found).unwrap();
     std::fs::create_dir_all(dir.join("inst")).unwrap();
     std::fs::write(found.join("a.wav"), tone_wav()).unwrap();
-    let sfz = dir.join("inst/x.sfz");
-    std::fs::write(&sfz, "<region> sample=Lib/a.wav key=60\n").unwrap();
+    let nki = dir.join("inst/x.nki");
+    let instrument = toned(&nki, &[(dir.join("inst/Lib/a.wav"), 60)]);
 
     let (mut rack, mut audio) = rack();
     let mut browser = contra_host::browser::Browser::open(Some(&dir.join("config")), None);
     browser.add_root(dir.join("found"));
     rack.know(&browser);
-    rack.load(0, &sfz).unwrap();
+    rack.load_ir(0, instrument.clone(), Some(nki.clone()))
+        .unwrap();
     // Missing: said once in plain text, and the part plays on without it.
     let said = rack.take_notices();
     assert!(said[0].contains("1 sample not found in "), "{said:?}");
@@ -1670,7 +1723,8 @@ fn a_moved_library_is_said_once_offered_found_and_plays_once_taken() {
     let o = rack.take_offer(&offer).unwrap();
     browser.relink(o.from, o.to);
     rack.know(&browser);
-    rack.load(o.part, &o.path).unwrap();
+    assert_eq!(o.path, nki);
+    rack.load_ir(o.part, instrument, Some(o.path)).unwrap();
     assert!(rack.take_notices().is_empty());
     assert_eq!(browser.prefs.moved.len(), 1);
     let d = &rack.parts()[0].as_ref().unwrap().diagnostics;
@@ -1705,13 +1759,8 @@ fn a_purged_group_loads_when_a_script_unpurges_it_and_plays_after() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.wav"), tone_wav()).unwrap();
     std::fs::write(dir.join("b.wav"), tone_wav()).unwrap();
-    let sfz = dir.join("x.sfz");
-    std::fs::write(
-        &sfz,
-        "<region> sample=a.wav key=60\n<region> sample=b.wav key=62\n",
-    )
-    .unwrap();
-    let mut instrument = contra_host::instrument::read(&sfz).unwrap();
+    let nki = dir.join("x.nki");
+    let mut instrument = toned(&nki, &[(dir.join("a.wav"), 60), (dir.join("b.wav"), 62)]);
     // The second group is saved purged, and a button un-purges it.
     let zone = instrument.groups[0].zones.pop().unwrap();
     let mut second = instrument.groups[0].clone();
@@ -1733,7 +1782,7 @@ fn a_purged_group_loads_when_a_script_unpurges_it_and_plays_after() {
         links: Vec::new(),
     }];
     let (mut rack, mut audio) = rack();
-    rack.load_ir(0, instrument, Some(sfz)).unwrap();
+    rack.load_ir(0, instrument, Some(nki)).unwrap();
     let loudest = |audio: &mut RackAudio, key: u8| {
         // The sample's 0.1 s tail of the last note, gone.
         for _ in 0..400 {

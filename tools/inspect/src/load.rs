@@ -121,10 +121,7 @@ pub fn run(path: &Path) -> Result<(Value, String)> {
                             .collect::<Vec<_>>()
                     ),
                 );
-                fields.insert(
-                    "callback_entry_kind".into(),
-                    json!("bytecode_offset"),
-                );
+                fields.insert("callback_entry_kind".into(), json!("bytecode_offset"));
             }
         }
     }

@@ -4,9 +4,9 @@
 use contra_ir as ir;
 
 use crate::ledger::Note;
-use ir::TableValue::{Inharmonic, ModAmount, ModTune, Position, Warp};
 use contra_stream::Mix;
 use contra_voice::{Ahdsr, Gain, Lag, Read};
+use ir::TableValue::{Inharmonic, ModAmount, ModTune, Position, Warp};
 
 use crate::effects::{self, product};
 use crate::modulators::{self, Age};
@@ -364,14 +364,11 @@ impl Engine {
             // The wave is the group's unless a note-on route moved it: voices
             // that play the same wave read the same smoothed value.
             return match self.moved_lfo(zone, n, note, age) {
-                Some(lfo) => modulators::smoothed_shared(
-                    t,
-                    &lfo,
-                    age,
-                    self.tempo,
-                    scale.to_bits(),
-                    || t.smoothed(smoothed),
-                ),
+                Some(lfo) => {
+                    modulators::smoothed_shared(t, &lfo, age, self.tempo, scale.to_bits(), || {
+                        t.smoothed(smoothed)
+                    })
+                }
                 None => t.smoothed(smoothed),
             };
         }

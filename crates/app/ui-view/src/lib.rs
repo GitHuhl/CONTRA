@@ -390,9 +390,7 @@ fn drawn_page(
             } else if let Some(face) = stock::label_face(tree, wd, (w, h, scale)) {
                 parts.push(face);
             } else if stock {
-                parts.push(
-                    stock::face(wd, t, (w, h), bare).at(0., 0.),
-                );
+                parts.push(stock::face(wd, t, (w, h), bare).at(0., 0.));
             }
             // A slider's handle rides its track over its picture: bottom to
             // top, left to right.

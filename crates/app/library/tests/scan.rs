@@ -61,13 +61,7 @@ fn libraries_are_found_named_and_shelved() {
         .iter()
         .map(|l| (l.name.as_str(), l.vendor.as_str()))
         .collect();
-    assert_eq!(
-        names,
-        [
-            ("Areia", "Audio Imperia"),
-            ("Piano", "Vendor X"),
-        ]
-    );
+    assert_eq!(names, [("Areia", "Audio Imperia"), ("Piano", "Vendor X"),]);
 
     let areia = &catalog.libraries[0];
     assert!(areia.registered);
@@ -154,13 +148,7 @@ fn a_single_root_is_one_library_and_names_are_told_apart() {
 
 #[test]
 fn the_cache_reads_a_file_once_and_again_when_it_changes() {
-    let dir = tree(
-        "cache",
-        &[
-            ("Lib/Lib.nicnt", NICNT),
-            ("Lib/Lib.nki", ""),
-        ],
-    );
+    let dir = tree("cache", &[("Lib/Lib.nicnt", NICNT), ("Lib/Lib.nki", "")]);
     let file = dir.join("cache.json");
     let mut cache = Cache::default();
     run(&[root(&dir)], &mut cache);
@@ -179,7 +167,11 @@ fn the_cache_reads_a_file_once_and_again_when_it_changes() {
     std::fs::remove_file(dir.join("Lib/Lib.nicnt")).unwrap();
     run(&[root(&dir)], &mut warm);
     warm.save(&file).unwrap();
-    assert!(!std::fs::read_to_string(&file).unwrap().contains("Lib.nicnt"));
+    assert!(
+        !std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("Lib.nicnt")
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

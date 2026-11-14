@@ -4,9 +4,9 @@ mod glide;
 mod halfband;
 mod section;
 
+pub use contra_law::{Section, Sections, Stage};
 pub use glide::{Fader, Levels};
 pub use halfband::Halfband;
-pub use contra_law::{Section, Sections, Stage};
 pub use section::{Biquad32, bilinear};
 
 /// One stereo biquad section, transposed direct form II, f64 state so

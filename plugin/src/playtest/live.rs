@@ -11,16 +11,11 @@ use std::time::{Duration, Instant};
 
 use moose::prelude::*;
 
-use super::{
-    BLOCK, In, KONTAKT, Played, RATE, UVI, activate, at, block_in, limited, off, on, state,
-};
-use crate::{Dsp, Contra, ContraParams, Tick};
+use super::{BLOCK, In, KONTAKT, Played, RATE, activate, at, block_in, limited, off, on, state};
+use crate::{Contra, ContraParams, Dsp, Tick};
 
-/// One Kontakt and one UVI program: big sample sets, streamed.
-const PROGRAMS: [&str; 2] = [
-    "ANALOG STRINGS/Instruments/ANALOG STRINGS.nki",
-    "UVI:VWinds - Clarinets/VWinds-AClarinet.ufs/Presets/Clarinet A.uvip",
-];
+/// A Kontakt program: a big sample set, streamed.
+const PROGRAMS: [&str; 1] = ["ANALOG STRINGS/Instruments/ANALOG STRINGS.nki"];
 /// The single notes' keys, each first played cold.
 const PROBES: [u8; 6] = [41, 47, 53, 59, 66, 71];
 /// Seconds between single notes, room for their tails.
@@ -312,11 +307,8 @@ fn a_loading_library_played_live_never_plays_late() {
     let only = std::env::var("CONTRA_LIVE").ok();
     let programs = only.iter().map(String::as_str).chain(PROGRAMS);
     for program in programs.take(if only.is_some() { 1 } else { PROGRAMS.len() }) {
-        let path = match program.strip_prefix("UVI:") {
-            Some(p) => Path::new(UVI).join(p),
-            None => Path::new(KONTAKT).join(program),
-        };
-        if !path.ancestors().any(Path::is_file) {
+        let path = Path::new(KONTAKT).join(program);
+        if !path.is_file() {
             eprintln!("skipped: no {}", path.display());
             continue;
         }

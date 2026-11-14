@@ -1308,14 +1308,8 @@ mod tests {
             ratio: 100.,
             unit: "dB".into(),
         };
-        assert_eq!(
-            display.format_value(123.),
-            "1.23 dB"
-        );
-        assert_eq!(
-            display.format_value(123.),
-            "1.23 dB"
-        );
+        assert_eq!(display.format_value(123.), "1.23 dB");
+        assert_eq!(display.format_value(123.), "1.23 dB");
         assert_eq!(
             Display {
                 ratio: 0.,

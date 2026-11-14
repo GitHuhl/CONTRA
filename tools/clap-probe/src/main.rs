@@ -40,12 +40,16 @@ use std::time::{Duration, Instant};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{clap_event_header, clap_input_events, clap_output_events};
-use clap_sys::ext::audio_ports::{CLAP_EXT_AUDIO_PORTS, clap_audio_port_info, clap_plugin_audio_ports};
+use clap_sys::ext::audio_ports::{
+    CLAP_EXT_AUDIO_PORTS, clap_audio_port_info, clap_plugin_audio_ports,
+};
+use clap_sys::ext::gui::{
+    CLAP_EXT_GUI, CLAP_WINDOW_API_X11, clap_plugin_gui, clap_window, clap_window_handle,
+};
 use clap_sys::ext::preset_load::{CLAP_EXT_PRESET_LOAD, clap_plugin_preset_load};
-use clap_sys::factory::preset_discovery::CLAP_PRESET_DISCOVERY_LOCATION_FILE;
-use clap_sys::ext::gui::{CLAP_EXT_GUI, CLAP_WINDOW_API_X11, clap_plugin_gui, clap_window, clap_window_handle};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
+use clap_sys::factory::preset_discovery::CLAP_PRESET_DISCOVERY_LOCATION_FILE;
 use clap_sys::host::clap_host;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::clap_process;
@@ -93,7 +97,11 @@ fn ext<T>(plugin: &clap_plugin, id: &CStr) -> Option<&'static T> {
 }
 
 /// A plugin instance, created and initialised.
-fn instance(factory: &clap_plugin_factory, host: &'static clap_host, id: *const c_char) -> &'static clap_plugin {
+fn instance(
+    factory: &clap_plugin_factory,
+    host: &'static clap_host,
+    id: *const c_char,
+) -> &'static clap_plugin {
     let plugin = unsafe { (factory.create_plugin.unwrap())(factory, host, id) };
     if plugin.is_null() {
         fail("create_plugin refused");
@@ -128,12 +136,19 @@ unsafe extern "C" fn read(s: *const clap_istream, buf: *mut c_void, size: u64) -
 
 /// Loads `CLAP_PROBE_PRESET`, if set, and gives the load time to settle.
 fn load_preset(plugin: &clap_plugin) {
-    let Some(file) = std::env::var_os("CLAP_PROBE_PRESET") else { return };
+    let Some(file) = std::env::var_os("CLAP_PROBE_PRESET") else {
+        return;
+    };
     let load: &clap_plugin_preset_load =
         ext(plugin, CLAP_EXT_PRESET_LOAD).unwrap_or_else(|| fail("no preset-load extension"));
     let path = CString::new(file.to_string_lossy().as_bytes()).unwrap_or_else(|e| fail(e));
     let ok = unsafe {
-        (load.from_location.unwrap())(plugin, CLAP_PRESET_DISCOVERY_LOCATION_FILE, path.as_ptr(), ptr::null())
+        (load.from_location.unwrap())(
+            plugin,
+            CLAP_PRESET_DISCOVERY_LOCATION_FILE,
+            path.as_ptr(),
+            ptr::null(),
+        )
     };
     println!("preset-load {}: {ok}", file.to_string_lossy());
     for _ in 0..120 {
@@ -143,9 +158,13 @@ fn load_preset(plugin: &clap_plugin) {
 }
 
 fn save_state(plugin: &clap_plugin) -> Vec<u8> {
-    let state: &clap_plugin_state = ext(plugin, CLAP_EXT_STATE).unwrap_or_else(|| fail("no state extension"));
+    let state: &clap_plugin_state =
+        ext(plugin, CLAP_EXT_STATE).unwrap_or_else(|| fail("no state extension"));
     let mut out = Vec::new();
-    let stream = clap_ostream { ctx: &mut out as *mut Vec<u8> as *mut c_void, write: Some(write) };
+    let stream = clap_ostream {
+        ctx: &mut out as *mut Vec<u8> as *mut c_void,
+        write: Some(write),
+    };
     if !unsafe { (state.save.unwrap())(plugin, &stream) } {
         fail("state.save failed");
     }
@@ -153,9 +172,13 @@ fn save_state(plugin: &clap_plugin) -> Vec<u8> {
 }
 
 fn load_state(plugin: &clap_plugin, data: Vec<u8>) {
-    let state: &clap_plugin_state = ext(plugin, CLAP_EXT_STATE).unwrap_or_else(|| fail("no state extension"));
+    let state: &clap_plugin_state =
+        ext(plugin, CLAP_EXT_STATE).unwrap_or_else(|| fail("no state extension"));
     let mut reader = Reader { data, at: 0 };
-    let stream = clap_istream { ctx: &mut reader as *mut Reader as *mut c_void, read: Some(read) };
+    let stream = clap_istream {
+        ctx: &mut reader as *mut Reader as *mut c_void,
+        read: Some(read),
+    };
     if !unsafe { (state.load.unwrap())(plugin, &stream) } {
         fail("state.load failed");
     }
@@ -197,10 +220,14 @@ fn start_audio(plugin: &'static clap_plugin, stop: Arc<AtomicBool>) -> std::thre
     let plugin = Plugin(plugin);
     std::thread::spawn(move || {
         let plugin = plugin.0;
-        let mut samples: Vec<Vec<Vec<f32>>> =
-            channels.iter().map(|&c| vec![vec![0.0; BLOCK as usize]; c as usize]).collect();
-        let mut pointers: Vec<Vec<*mut f32>> =
-            samples.iter_mut().map(|p| p.iter_mut().map(|c| c.as_mut_ptr()).collect()).collect();
+        let mut samples: Vec<Vec<Vec<f32>>> = channels
+            .iter()
+            .map(|&c| vec![vec![0.0; BLOCK as usize]; c as usize])
+            .collect();
+        let mut pointers: Vec<Vec<*mut f32>> = samples
+            .iter_mut()
+            .map(|p| p.iter_mut().map(|c| c.as_mut_ptr()).collect())
+            .collect();
         let mut outputs: Vec<clap_audio_buffer> = pointers
             .iter_mut()
             .map(|p| clap_audio_buffer {
@@ -211,8 +238,15 @@ fn start_audio(plugin: &'static clap_plugin, stop: Arc<AtomicBool>) -> std::thre
                 constant_mask: 0,
             })
             .collect();
-        let input = clap_input_events { ctx: ptr::null_mut(), size: Some(no_events), get: Some(no_event) };
-        let output = clap_output_events { ctx: ptr::null_mut(), try_push: Some(drop_event) };
+        let input = clap_input_events {
+            ctx: ptr::null_mut(),
+            size: Some(no_events),
+            get: Some(no_event),
+        };
+        let output = clap_output_events {
+            ctx: ptr::null_mut(),
+            try_push: Some(drop_event),
+        };
         if !unsafe { (plugin.start_processing.unwrap())(plugin) } {
             fail("start_processing failed");
         }
@@ -254,7 +288,8 @@ fn open_editor(
     show_after: Duration,
     wait: Duration,
 ) -> (u32, u16, u16, bool) {
-    let gui: &clap_plugin_gui = ext(plugin, CLAP_EXT_GUI).unwrap_or_else(|| fail("no gui extension"));
+    let gui: &clap_plugin_gui =
+        ext(plugin, CLAP_EXT_GUI).unwrap_or_else(|| fail("no gui extension"));
     let started = Instant::now();
     unsafe {
         if !(gui.is_api_supported.unwrap())(plugin, CLAP_WINDOW_API_X11.as_ptr(), false) {
@@ -305,7 +340,9 @@ fn open_editor(
 
     let parent = clap_window {
         api: CLAP_WINDOW_API_X11.as_ptr(),
-        specific: clap_window_handle { x11: u64::from(window) },
+        specific: clap_window_handle {
+            x11: u64::from(window),
+        },
     };
     unsafe {
         if !(gui.set_parent.unwrap())(plugin, &parent) {
@@ -368,7 +405,8 @@ fn open_editor(
 }
 
 fn close_editor(conn: &RustConnection, plugin: &clap_plugin, window: u32) {
-    let gui: &clap_plugin_gui = ext(plugin, CLAP_EXT_GUI).unwrap_or_else(|| fail("no gui extension"));
+    let gui: &clap_plugin_gui =
+        ext(plugin, CLAP_EXT_GUI).unwrap_or_else(|| fail("no gui extension"));
     unsafe {
         (gui.hide.unwrap())(plugin);
         (gui.destroy.unwrap())(plugin);
@@ -380,23 +418,39 @@ fn close_editor(conn: &RustConnection, plugin: &clap_plugin, window: u32) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (Some(path), Some(out)) = (args.get(1), args.get(2)) else {
-        fail("usage: clap-probe <plugin.clap> <out.png> [max seconds] [mode] [show ms] [audio] [reload] [reopen]");
+        fail(
+            "usage: clap-probe <plugin.clap> <out.png> [max seconds] [mode] [show ms] [audio] [reload] [reopen]",
+        );
     };
-    let wait = Duration::from_secs_f64(args.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(60.0));
+    let wait = Duration::from_secs_f64(
+        args.get(3)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(60.0),
+    );
     let mode = args.get(4).map_or("normal", String::as_str);
     if !["normal", "late", "wm", "wm2", "reframe", "flicker"].contains(&mode) {
         fail(format!("unknown mode {mode}"));
     }
     let show_after = Duration::from_millis(args.get(5).and_then(|s| s.parse().ok()).unwrap_or(500));
     let flags: Vec<&str> = args.iter().skip(6).map(String::as_str).collect();
-    let (audio, reload, reopen) = (flags.contains(&"audio"), flags.contains(&"reload"), flags.contains(&"reopen"));
-    if let Some(bad) = flags.iter().find(|f| !["audio", "reload", "reopen"].contains(f)) {
+    let (audio, reload, reopen) = (
+        flags.contains(&"audio"),
+        flags.contains(&"reload"),
+        flags.contains(&"reopen"),
+    );
+    if let Some(bad) = flags
+        .iter()
+        .find(|f| !["audio", "reload", "reopen"].contains(f))
+    {
         fail(format!("unknown flag {bad}"));
     }
 
-    let (conn, screen) = x11rb::connect(None).unwrap_or_else(|e| fail(format!("no X display: {e}")));
+    let (conn, screen) =
+        x11rb::connect(None).unwrap_or_else(|e| fail(format!("no X display: {e}")));
     // Leaked on purpose: the plugin stays loaded until exit, as in a host.
-    let library = Box::leak(Box::new(unsafe { libloading::Library::new(path) }.unwrap_or_else(|e| fail(e))));
+    let library = Box::leak(Box::new(
+        unsafe { libloading::Library::new(path) }.unwrap_or_else(|e| fail(e)),
+    ));
     let entry: &clap_plugin_entry = unsafe {
         &**library
             .get::<*const clap_plugin_entry>(b"clap_entry\0")
@@ -406,13 +460,17 @@ fn main() {
     if !unsafe { (entry.init.unwrap())(cpath.as_ptr()) } {
         fail("clap_entry.init refused");
     }
-    let factory = unsafe { (entry.get_factory.unwrap())(CLAP_PLUGIN_FACTORY_ID.as_ptr()) } as *const clap_plugin_factory;
+    let factory = unsafe { (entry.get_factory.unwrap())(CLAP_PLUGIN_FACTORY_ID.as_ptr()) }
+        as *const clap_plugin_factory;
     if factory.is_null() {
         fail("no plugin factory");
     }
     let factory = unsafe { &*factory };
     let descriptor = unsafe { &*(factory.get_plugin_descriptor.unwrap())(factory, 0) };
-    println!("plugin {}", unsafe { CStr::from_ptr(descriptor.id) }.to_string_lossy());
+    println!(
+        "plugin {}",
+        unsafe { CStr::from_ptr(descriptor.id) }.to_string_lossy()
+    );
 
     let host: &'static clap_host = Box::leak(Box::new(clap_host {
         clap_version: CLAP_VERSION,
@@ -431,7 +489,11 @@ fn main() {
     let saved = reload.then(|| {
         if let Some(file) = std::env::var_os("CLAP_PROBE_LOAD") {
             let state = std::fs::read(&file).unwrap_or_else(|e| fail(e));
-            println!("loaded a session from {}: {} bytes", file.to_string_lossy(), state.len());
+            println!(
+                "loaded a session from {}: {} bytes",
+                file.to_string_lossy(),
+                state.len()
+            );
             return state;
         }
         let first = instance(factory, host, descriptor.id);
@@ -464,7 +526,8 @@ fn main() {
         load_preset(plugin);
     }
 
-    let (mut window, mut w, mut h, mut drew) = open_editor(&conn, screen, plugin, mode, show_after, wait);
+    let (mut window, mut w, mut h, mut drew) =
+        open_editor(&conn, screen, plugin, mode, show_after, wait);
     if reopen && drew {
         close_editor(&conn, plugin, window);
         println!("closed the editor; opening it again");

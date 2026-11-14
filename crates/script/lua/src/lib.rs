@@ -16,8 +16,8 @@ use mlua::{Lua, LuaOptions, StdLib};
 
 pub mod alloc;
 mod interrupt;
-pub mod probe;
 pub mod nui;
+pub mod probe;
 
 // With `system-allocator` (the host's heap-profile example) the binary brings
 // its own measuring allocator and Luau uses the system heap.

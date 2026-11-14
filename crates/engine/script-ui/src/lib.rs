@@ -641,8 +641,12 @@ impl Store {
                     .iter()
                     .find(|r| (i32::from(r.low)..=i32::from(r.high)).contains(&k));
                 match call.action {
-                    Action::GetKeyrangeMinNote => HostValue::Int(range.map_or(-1, |r| i32::from(r.low))),
-                    Action::GetKeyrangeMaxNote => HostValue::Int(range.map_or(-1, |r| i32::from(r.high))),
+                    Action::GetKeyrangeMinNote => {
+                        HostValue::Int(range.map_or(-1, |r| i32::from(r.low)))
+                    }
+                    Action::GetKeyrangeMaxNote => {
+                        HostValue::Int(range.map_or(-1, |r| i32::from(r.high)))
+                    }
                     _ => out(range.map_or(Text::EMPTY, |r| r.name)),
                 }
             }
@@ -779,7 +783,10 @@ mod tests {
         assert_eq!(edge(&mut s, Action::GetKeyrangeMinNote, 50), 36);
         assert_eq!(edge(&mut s, Action::GetKeyrangeMaxNote, 50), 72);
         assert_eq!(edge(&mut s, Action::GetKeyrangeMinNote, 20), -1);
-        assert_eq!(call(&mut s, Action::GetKeyrangeName, &[50]).1.as_str(), "Mid");
+        assert_eq!(
+            call(&mut s, Action::GetKeyrangeName, &[50]).1.as_str(),
+            "Mid"
+        );
         call(&mut s, Action::RemoveKeyrange, &[60]);
         assert_eq!(edge(&mut s, Action::GetKeyrangeMaxNote, 50), -1);
         assert_eq!(call(&mut s, Action::GetKeyrangeName, &[50]).1.as_str(), "");
